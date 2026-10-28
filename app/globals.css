@@ -1,0 +1,21 @@
+/* Plain CSS on purpose: Tailwind/shadcn setup is version-specific and will be added once it can be verified. */
+:root { --bg: #ffffff; --fg: #14161a; --muted: #5b6270; --card: #f5f6f8; --border: #d7dae0; --accent: #3b5bdb; color-scheme: light dark; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #101215; --fg: #eceef2; --muted: #a0a7b4; --card: #181b20; --border: #2c313a; --accent: #8da2ff; }
+}
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; line-height: 1.5; }
+header.site-header, main, footer { max-width: 72rem; margin: 0 auto; padding: 1rem; }
+nav a { margin-right: 1rem; color: var(--accent); }
+.muted { color: var(--muted); font-size: 0.9rem; }
+.notice { background: var(--card); border: 1px solid var(--border); padding: 0.75rem 1rem; border-radius: 0.5rem; }
+.plan-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+.plan-card { background: var(--card); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1rem; }
+.plan-card ul { padding-left: 1.1rem; }
+.prices { display: flex; gap: 1.5rem; } .prices dt { color: var(--muted); } .prices dd { margin: 0; font-size: 1.4rem; font-weight: 600; }
+button { padding: 0.5rem 1rem; border-radius: 0.5rem; border: 1px solid var(--border); background: var(--accent); color: #fff; }
+button[disabled] { opacity: 0.55; cursor: not-allowed; }
+.badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 1rem; border: 1px solid var(--border); font-size: 0.85rem; }
+.cycle-items { width: 100%; border-collapse: collapse; overflow-x: auto; display: block; }
+.cycle-items th, .cycle-items td { text-align: left; padding: 0.4rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.usage-meter progress { width: 100%; } .usage-meter-header { display: flex; justify-content: space-between; }
+@media (max-width: 40rem) { .prices { flex-direction: column; gap: 0.25rem; } }

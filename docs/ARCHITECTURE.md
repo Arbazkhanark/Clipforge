@@ -14,7 +14,13 @@ src/lib/domain/               PURE business rules (no DB, no network, no Redis):
   media-lifecycle.ts          Import (warning, idempotent, verified, charged only on success); owner deletion, grace period, safe S3 delete gate
   preflight.ts                Smart Publishing Assistant: Ready / Recommendation / Action Required / Blocked
   usage-accounting.ts         Idempotent usage records; shared references add no source storage; failed renders charge nothing (assumption)
-tests/                        node:test suites. Run: npm test
+  sharing-management.ts       Who may create/revoke grants; expiring grants; delegated managers (limits); recipient caps
+  schedule.ts                 Publish-time slots from interval/days/window/timezone/daily max/end date; attach slots to items
+  ordering.ts                 Queue order modes; persisted seeded shuffle
+src/lib/render/               ffmpeg-command.ts (pure command + validation), render-runner.ts (runs ffmpeg/ffprobe in a WORKER)
+src/components/               React components with no client-only code (pricing, usage meter, cycle table, preflight, schedule preview, import warning)
+app/                          Next.js App Router skeleton: layout, home, pricing, dashboard placeholder (never run under Next here)
+tests/                        node:test suites (+ UI tests via react-dom/server). Run: npm test
 ```
 
 ## How the pieces will fit together (later phases)
@@ -47,3 +53,9 @@ may ever set `applied_on_instagram`.
 ### Publishing safety
 Pause stops new claims. Ambiguous publish results go to `needs_review` and are never auto-retried. After a crash, stale
 `publishing` items go to `needs_review`; stale `processing` items are redone.
+
+### Rendering
+A worker (never a web request) loads the source, calls `buildRenderArgs` (all settings validated; colours must be `#RRGGBB`;
+no shell is used), runs FFmpeg with `-progress`, then `validateRenderOutput` (codec, size, duration). Only a validated output
+counts as success; `buildRenderUsage` then records usage. The main-video border is padded onto the video itself before it is
+placed on the canvas, so it never surrounds the whole canvas (verified by sampling real pixels).
