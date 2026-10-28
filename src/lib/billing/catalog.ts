@@ -76,8 +76,9 @@ export const PLAN_CATALOG: Record<PlanId, PlanDefinition> = {
       maxResolution: "1080p", showDashboardAds: false, googleDriveImport: true,
       advancedOrdering: true, perAccountQueues: false, advancedSchedulingAndRepeat: false,
       smartPublishingAssistant: false, jobLogsAndPriority: false, analytics: false,
-      // ASSUMPTION (see docs/PLAN.md): the brief says "according to the published plan policy".
-      collectionSharing: "basic", useSharedVideosInCycles: false, mixAndUnmix: false,
+      // POLICY (user decision): basic sharing + direct use of shared videos + Mix/Unmix start at Creator.
+      // Advanced sharing management (Pro and up) and higher limits are the upgrade reasons.
+      collectionSharing: "basic", useSharedVideosInCycles: true, mixAndUnmix: true,
     },
   },
   pro: {

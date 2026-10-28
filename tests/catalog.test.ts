@@ -48,14 +48,22 @@ test("plan limits match the brief", () => {
   assert.deepEqual(c.agency.limits, { connectedAccounts: 10, storageBytes: 1024 * GIB, processingMinutesPerMonth: 6000, exportsPerMonth: 2000, batchSize: 200, concurrentJobs: 10, templates: 500, activeCampaigns: 100, scheduledItemsPerMonth: 2000 });
 });
 
-test("feature gates: ads only on free; shared use and mix start at Pro", () => {
+test("feature gates: ads only on free; sharing, shared use and Mix/Unmix start at Creator", () => {
   assert.equal(PLAN_CATALOG.free.features.showDashboardAds, true);
   for (const id of ["creator", "pro", "agency"] as const) assert.equal(PLAN_CATALOG[id].features.showDashboardAds, false);
   assert.equal(PLAN_CATALOG.free.features.googleDriveImport, false);
   assert.equal(PLAN_CATALOG.creator.features.googleDriveImport, true);
-  assert.equal(PLAN_CATALOG.creator.features.useSharedVideosInCycles, false);
-  assert.equal(PLAN_CATALOG.pro.features.useSharedVideosInCycles, true);
-  assert.equal(PLAN_CATALOG.pro.features.mixAndUnmix, true);
+  // Free: no sharing features.
+  assert.equal(PLAN_CATALOG.free.features.collectionSharing, "none");
+  assert.equal(PLAN_CATALOG.free.features.useSharedVideosInCycles, false);
+  assert.equal(PLAN_CATALOG.free.features.mixAndUnmix, false);
+  // Creator: basic sharing, direct use, Mix/Unmix.
+  assert.equal(PLAN_CATALOG.creator.features.collectionSharing, "basic");
+  assert.equal(PLAN_CATALOG.creator.features.useSharedVideosInCycles, true);
+  assert.equal(PLAN_CATALOG.creator.features.mixAndUnmix, true);
+  // Pro / Agency: advanced sharing management.
+  assert.equal(PLAN_CATALOG.pro.features.collectionSharing, "advanced");
+  assert.equal(PLAN_CATALOG.agency.features.collectionSharing, "advanced");
   assert.equal(PLAN_CATALOG.free.features.maxResolution, "720p");
 });
 
