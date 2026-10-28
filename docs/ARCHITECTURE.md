@@ -13,6 +13,7 @@ src/lib/domain/               PURE business rules (no DB, no network, no Redis):
   cycle-state.ts              Cycle + item status machines; claiming an item (lock); outcomes; restart recovery
   media-lifecycle.ts          Import (warning, idempotent, verified, charged only on success); owner deletion, grace period, safe S3 delete gate
   preflight.ts                Smart Publishing Assistant: Ready / Recommendation / Action Required / Blocked
+  usage-accounting.ts         Idempotent usage records; shared references add no source storage; failed renders charge nothing (assumption)
 tests/                        node:test suites. Run: npm test
 ```
 
