@@ -1,9 +1,12 @@
 // ClipForge database schema (PostgreSQL is the durable source of truth).
 //
-// STATUS: written offline. It has NOT been run through `prisma validate` or `prisma migrate`
-// (Prisma CLI is not installed here and there is no network). tests/schema-sanity.test.ts only
-// catches obvious mistakes. Newer Prisma versions may need the datasource `url` moved to a config
-// file - check the Prisma docs for the installed version when network is available.
+// STATUS: written without the Prisma CLI (no network in the dev sandbox). It has NOT been run through
+// `prisma validate` or `prisma migrate`. tests/schema-sanity.test.ts only catches obvious mistakes.
+//
+// TARGET: Prisma ORM 7 (checked against the official migration guide, docs.prisma.io, 2026-10-28):
+//  - the connection URL is NOT allowed in this file any more; it lives in prisma.config.ts,
+//  - generator provider is "prisma-client" and `output` is required,
+//  - PrismaClient is created with a driver adapter (@prisma/adapter-pg), see src/server/db.ts (to be written).
 //
 // Conventions:
 //  - Enum values are lowercase_snake_case so they match the TypeScript rules in src/lib/domain/types.ts.
@@ -15,12 +18,12 @@
 //  - The plan catalog (Free/Creator/Pro/Agency) is code, not a table, so prices live in ONE place.
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 // ============================ Enums ============================

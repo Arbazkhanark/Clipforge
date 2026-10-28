@@ -2,14 +2,14 @@
 // into concrete UTC publish times, and attach those times to upcoming cycle items.
 // Pure functions. Uses the JavaScript Intl API for time zones (including daylight saving).
 //
-// IMPORTANT: this only answers "which times fit the settings". It does NOT know Instagram's real
-// publishing limits (they are unverified - see PLATFORM_LIMITS_NOTE). A schedule that this module
-// accepts is NOT thereby "safe" for the platform.
+// IMPORTANT: this only answers "which times fit the settings". The Instagram quota is checked
+// separately by preflight.ts. A schedule that this module accepts is NOT thereby "safe" for the platform.
 import { isEditableItem } from "./cycle-state.ts";
 import type { CycleItem } from "./types.ts";
 
 export const PLATFORM_LIMITS_NOTE =
-  "Instagram's publishing limits have not been verified yet, so ClipForge cannot say whether this schedule is within them.";
+  "ClipForge checks Instagram's documented limit of 100 API-published posts per rolling 24 hours when you start a cycle. " +
+  "Other Instagram restrictions (such as video requirements) are not checked here and could still make a post fail.";
 
 export interface ScheduleSettings {
   /** IANA name, e.g. "Asia/Kolkata". */

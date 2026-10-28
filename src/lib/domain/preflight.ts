@@ -3,6 +3,7 @@
 // anything about Instagram that is not verified is phrased as "could not confirm".
 import { validateCaption, type CoverSupport } from "./caption-cover-updates.ts";
 import { isEditableItem } from "./cycle-state.ts";
+import { INSTAGRAM_VERIFIED, findPublishQuotaViolations } from "../integrations/instagram-capabilities.ts";
 import type { CycleItem, Decision, PublishingCycle } from "./types.ts";
 
 export type PreflightLevel = "ready" | "recommendation" | "action_required" | "blocked";
@@ -25,6 +26,10 @@ export interface PreflightInput {
   coverSupport: CoverSupport;
   /** Result of canKeepUsingSourceForCycleItem() for each item, computed by the server just now. */
   sourceAccessByItemId: Record<string, Decision>;
+  /** Optional: times of posts already published recently (for the rolling 24-hour quota check). */
+  recentPublishTimes?: Date[];
+  /** Maximum API-published posts per rolling 24h. Defaults to the documented 100; override from the live content_publishing_limit later. */
+  publishLimitPer24h?: number;
 }
 
 export interface PreflightReport {
@@ -81,7 +86,13 @@ export function runPreflight(input: PreflightInput): PreflightReport {
   const duplicateItemIds = [...countByMedia.values()].filter((ids) => ids.length > 1).flat();
   if (duplicateItemIds.length > 0) add("duplicates", "recommendation", "The same video appears more than once. Make sure the repeat is intended.", duplicateItemIds);
 
-  // 9. Final review
+  // 9. Instagram's documented rolling 24-hour publishing limit (Meta recommends apps enforce it themselves)
+  const plannedTimes = upcomingItems.flatMap((i) => (i.scheduledFor ? [i.scheduledFor] : []));
+  const quotaLimit = input.publishLimitPer24h ?? INSTAGRAM_VERIFIED.publishLimitPer24h;
+  const violations = findPublishQuotaViolations([...(input.recentPublishTimes ?? []), ...plannedTimes], quotaLimit);
+  if (violations.length > 0) add("platform_quota", "action_required", `This schedule would put ${violations[0]!.count} posts inside one 24-hour period; Instagram's documented limit is ${quotaLimit}. Spread the schedule out.`);
+
+  // 10. Final review
   if (!cycle.finalReviewConfirmed) add("final_review", "action_required", "Please review and confirm the final list before starting.");
 
   const worst = checks.reduce<PreflightLevel>((level, c) => (LEVEL_SEVERITY[c.level] > LEVEL_SEVERITY[level] ? c.level : level), "ready");

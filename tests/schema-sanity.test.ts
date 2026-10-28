@@ -114,3 +114,14 @@ test("CycleItem has the version and lock columns the locking rules need", () => 
 test("subscription plan ids in docs/tests are the catalog's", () => {
   assert.deepEqual([...PLAN_IDS], ["free", "creator", "pro", "agency"]);
 });
+
+test("schema follows the Prisma 7 rules we verified in the docs: no url in the datasource, prisma-client generator with output", () => {
+  const datasource = /datasource\s+db\s*\{([^}]*)\}/.exec(schemaText)?.[1] ?? "";
+  assert.ok(!/\burl\s*=/.test(datasource), "datasource url must live in prisma.config.ts (Prisma 7)");
+  const generator = /generator\s+client\s*\{([^}]*)\}/.exec(schemaText)?.[1] ?? "";
+  assert.match(generator, /provider\s*=\s*"prisma-client"/);
+  assert.match(generator, /output\s*=/);
+  const config = readFileSync(new URL("../prisma.config.ts", import.meta.url), "utf8");
+  assert.match(config, /DATABASE_URL/);
+  assert.ok(!/postgres(ql)?:\/\/\w+:\w+@/.test(config), "no real connection string in source");
+});

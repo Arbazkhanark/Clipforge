@@ -24,6 +24,20 @@ export function canTransition(from: SubscriptionStatus, to: SubscriptionStatus):
   return ALLOWED_TRANSITIONS[from].includes(to);
 }
 
+/** Length of the free trial. Razorpay implements a trial with a FUTURE start_at (verified in its docs). */
+export const TRIAL_DAYS = 7;
+
+/** The start_at (unix seconds) to send to Razorpay: billing begins when the trial ends. */
+export function trialStartAtUnix(nowUnix: number): number {
+  return nowUnix + TRIAL_DAYS * 24 * 60 * 60;
+}
+
+/** Must be shown to the user BEFORE they authorise the subscription. */
+export const TRIAL_DISCLOSURE =
+  `Free for ${TRIAL_DAYS} days. To start, you authorise your payment method with a small authentication payment ` +
+  `(Razorpay documents this as ₹5, refunded automatically). After the trial the plan price is charged every billing period ` +
+  `until you cancel. You can cancel before the trial ends to avoid being charged.`;
+
 export interface SubscriptionState {
   planId: PlanId;
   interval: BillingInterval;
@@ -31,6 +45,8 @@ export interface SubscriptionState {
   /** Unix seconds of the last applied event; used to ignore stale, out-of-order events. */
   lastEventAt: number;
   processedEventIds: string[];
+  /** Unix seconds when the free trial ends (the start_at we sent to Razorpay), or null/undefined if no trial. */
+  trialEndsAt?: number | null;
 }
 
 export interface SubscriptionEvent { eventId: string; createdAt: number; newStatus: SubscriptionStatus; }
@@ -53,13 +69,19 @@ export function applySubscriptionEvent(state: SubscriptionState, event: Subscrip
   };
 }
 
-export function hasPaidEntitlements(state: SubscriptionState): boolean {
-  return ENTITLED_STATUSES.includes(state.status);
+/**
+ * Paid features are available when the subscription is active/pending, OR during a free trial:
+ * the user authorised their payment method ("authenticated") and the trial end time has not passed.
+ * Never based on a frontend redirect.
+ */
+export function hasPaidEntitlements(state: SubscriptionState, nowUnix?: number): boolean {
+  if (ENTITLED_STATUSES.includes(state.status)) return true;
+  return state.status === "authenticated" && nowUnix !== undefined && typeof state.trialEndsAt === "number" && nowUnix < state.trialEndsAt;
 }
 
 /** The plan whose limits apply right now (falls back to free if not entitled). */
-export function effectivePlanId(state: SubscriptionState): PlanId {
-  return hasPaidEntitlements(state) ? state.planId : "free";
+export function effectivePlanId(state: SubscriptionState, nowUnix?: number): PlanId {
+  return hasPaidEntitlements(state, nowUnix) ? state.planId : "free";
 }
 
 /** Changing plans NEVER changes the billing interval silently. */

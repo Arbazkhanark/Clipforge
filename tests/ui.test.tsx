@@ -87,7 +87,7 @@ test("preflight panel shows level text, counts, and the unverified-limits note",
   const items = [makeItem({ id: "a", captionText: "" })];
   const report = runPreflight({ cycle: makeCycle({ status: "draft" }), items, socialAccountStatus: "token_expired", scheduledItemsPerMonthLimit: 100, scheduledItemsUsedThisMonth: 0, coverSupport: "unknown", sourceAccessByItemId: { a: { allowed: true, reason: "ok" } } });
   const out = html(<PreflightPanel report={report} />);
-  assert.ok(out.includes("Blocked")); assert.ok(out.includes("Fix the items below")); assert.ok(out.includes("not verified yet"));
+  assert.ok(out.includes("Blocked")); assert.ok(out.includes("Fix the items below")); assert.ok(out.includes("documented limit of 100"));
   const ready = html(<PreflightPanel report={{ overall: "ready", canStart: true, checks: [] }} />);
   assert.ok(ready.includes("You can start this cycle."));
 });
@@ -96,7 +96,7 @@ test("schedule preview lists times in the chosen zone and warns about unplaced v
   const { slots, unfilled } = generateSlots({ startFrom: new Date("2026-06-01T00:00:00Z"), count: 5, settings: { timeZone: "Asia/Kolkata", intervalMinutes: 60, postsPerInterval: 1, daysOfWeek: [1], windowStart: "09:00", windowEnd: "10:00", dailyMax: null, endDate: "2026-06-01" } });
   const out = html(<SchedulePreview slots={slots} unfilled={unfilled} timeZone="Asia/Kolkata" />);
   assert.equal((out.match(/<time /g) ?? []).length, 2);
-  assert.ok(out.includes("3 videos did not get a time")); assert.ok(out.includes("have not been verified"));
+  assert.ok(out.includes("3 videos did not get a time")); assert.ok(out.includes("documented limit of 100"));
 });
 
 test("import warning shows every required warning and a required checkbox", () => {

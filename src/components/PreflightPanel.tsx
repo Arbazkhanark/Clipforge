@@ -15,7 +15,7 @@ export function PreflightPanel({ report }: { report: PreflightReport }) {
           </li>
         ))}
       </ul>
-      <p className="muted">Instagram's own publishing limits are not verified yet, so this check cannot confirm them.</p>
+      <p className="muted">We check Instagram's documented limit of 100 API-published posts per 24 hours. Other Instagram requirements are not checked here and could still make a post fail.</p>
     </section>
   );
 }

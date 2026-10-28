@@ -71,3 +71,14 @@ test("overall level is the worst check", () => {
   const report = runPreflight(baseInput({ socialAccountStatus: "revoked", scheduledItemsUsedThisMonth: 99 }));
   assert.equal(report.overall, "blocked");
 });
+
+test("Instagram's documented rolling 24h quota is enforced before start; recent posts count too", () => {
+  const at = (m: number) => new Date(Date.UTC(2026, 5, 1) + m * 60_000);
+  const items = Array.from({ length: 6 }, (_, i) => makeItem({ id: `i${i}`, mediaAssetId: `m${i}`, captionText: "x", status: "scheduled", scheduledFor: at(i * 10) }));
+  const input = baseInput({ items, sourceAccessByItemId: okAccess(items) });
+  assert.equal(levelOf(runPreflight(input), "platform_quota"), undefined);
+  assert.equal(levelOf(runPreflight({ ...input, publishLimitPer24h: 5 }), "platform_quota"), "action_required");
+  const recent = Array.from({ length: 95 }, (_, i) => at(-600 + i));
+  const report = runPreflight({ ...input, recentPublishTimes: recent });
+  assert.equal(levelOf(report, "platform_quota"), "action_required"); assert.equal(report.canStart, false);
+});

@@ -17,6 +17,8 @@ src/lib/domain/               PURE business rules (no DB, no network, no Redis):
   sharing-management.ts       Who may create/revoke grants; expiring grants; delegated managers (limits); recipient caps
   schedule.ts                 Publish-time slots from interval/days/window/timezone/daily max/end date; attach slots to items
   ordering.ts                 Queue order modes; persisted seeded shuffle
+src/server/                   Request layer: errors.ts, validation.ts, repository.ts (interface), memory-repository.ts (tests), context.ts, handlers/ (captions-covers, sharing, cycles)
+src/lib/integrations/         instagram-capabilities.ts: verified Instagram facts, quota + container rules (no network calls)
 src/lib/render/               ffmpeg-command.ts (pure command + validation), render-runner.ts (runs ffmpeg/ffprobe in a WORKER)
 src/components/               React components with no client-only code (pricing, usage meter, cycle table, preflight, schedule preview, import warning)
 app/                          Next.js App Router skeleton: layout, home, pricing, dashboard placeholder (never run under Next here)
@@ -59,3 +61,9 @@ A worker (never a web request) loads the source, calls `buildRenderArgs` (all se
 no shell is used), runs FFmpeg with `-progress`, then `validateRenderOutput` (codec, size, duration). Only a validated output
 counts as success; `buildRenderUsage` then records usage. The main-video border is padded onto the video itself before it is
 placed on the canvas, so it never surrounds the whole canvas (verified by sampling real pixels).
+
+### Server request layer
+Every handler runs the same steps: signed-in user (from the session, never the body) -> validate input (all problems at once) ->
+load -> **ownership** (someone else's object looks like a missing one: 404) -> **plan limits** (sharing uses the *collection owner's*
+plan) -> business rule -> **version-checked save** (like `UPDATE ... WHERE version = ?`; a lost race is reported as a conflict,
+never overwritten) -> audit log -> a per-item report. Starting a cycle uses a status compare-and-set so two requests cannot both win.

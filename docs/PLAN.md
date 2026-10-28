@@ -3,25 +3,27 @@
 Legend: ✅ done & tested · 🟡 partial · ⬜ not started
 
 ## Current honest status
-**Exists and is tested here:** pure business rules, a draft database schema, the FFmpeg rendering pipeline (really run), React UI
-components and a small Next.js route skeleton (server-rendered in tests).
-**Does NOT exist / never run:** Next.js itself (not installed - no network), a running PostgreSQL, S3, sign-in, uploads,
-workers/queues, Razorpay or Instagram calls, any deployment. **The app has never been started with `next dev` or built with `next build`.**
+**Exists and is tested here:** pure business rules; a server-side request layer (validation, ownership, plan limits, optimistic
+concurrency) tested against an in-memory repository; a draft Prisma 7 schema; the FFmpeg rendering pipeline (really run); React
+components and a small Next.js route skeleton (server-rendered in tests); Razorpay and Instagram **rules** checked against official docs
+(see `docs/VERIFICATION.md`).
+**Does NOT exist / never run:** Next.js itself, Prisma CLI/client, a running PostgreSQL, S3, sign-in, uploads, job queue/worker,
+any real Razorpay or Instagram call, any deployment. **The app has never been started with `next dev` or built with `next build`,
+and the Prisma schema has never been validated or migrated.** Everything below that needs the network is blocked, not done.
 
 ## Stages
 | Stage | What | Status |
 |---|---|---|
-| Billing core | catalog, entitlements, Razorpay signatures, subscription state machine | ✅ logic tested (Razorpay formulas unverified vs live docs) |
-| Authentication | Google + email/password, verification, reset, sessions | ⬜ blocked: needs packages + DB + email provider |
-| Dashboard | real data | ⬜ `/dashboard` is an honest empty-state placeholder |
-| Media library & collections | DB, S3, UI | 🟡 permission rules + schema draft only |
-| Video upload | presigned/multipart S3 | ⬜ blocked: no S3, no network |
-| Editor & background rendering | FFmpeg pipeline | 🟡 command builder, runner, validation, progress parsing **really tested with FFmpeg** (aspect ratios, solid/blur background, zoom/position, main-video border, logo, plan resolution cap). No editor UI (drag/resize), no job queue/worker process, no S3 I/O |
-| Sharing | rules + UI | 🟡 rules (permissions, links, requests, advanced management, import, deletion) tested; `ImportWarning` component; no pages/DB |
-| Publishing cycles | state machine, preflight, Mix/Unmix | 🟡 rules + `CycleItemsTable`, `PreflightPanel` components; no pages/DB/worker |
-| Scheduling | slot calculator, ordering | ✅ pure logic tested (time zones/DST, windows, daily max, end date, seeded shuffle); `SchedulePreview` component; no scheduler process |
-| Billing UI & Razorpay | | 🟡 `/pricing` page reads the catalog (no buy button until billing is real); no checkout/webhook endpoint |
-| Instagram integration | official API | ⬜ docs not researched (no network) |
+| Server request layer | validation, auth check, ownership, plan limits, concurrency | ✅ tested vs in-memory repository (`src/server/`): captions, covers, grants, revoke, create cycle, mix, unmix, start. **Not yet connected to Prisma, HTTP routes, or a session** |
+| Authentication | Google + email/password, verification, reset, sessions | ⬜ blocked: packages + DB + email provider |
+| Dashboard | real data | ⬜ placeholder empty state |
+| Media library & collections | DB, S3, UI | 🟡 rules + schema + repository interface |
+| Video upload | presigned/multipart S3 | ⬜ blocked |
+| Editor & background rendering | FFmpeg pipeline | 🟡 pipeline really tested; no editor UI, no queue/worker |
+| Sharing | rules, handlers | 🟡 grant/revoke handlers tested (plan caps, delegates, expiry); no pages/DB; access-request and import/deletion handlers not yet written |
+| Publishing cycles & scheduling | rules, handlers | 🟡 start/mix/unmix handlers tested; no scheduler process, no pause/resume/stop handlers yet |
+| Billing | catalog, signatures, webhook interpretation, trial rules | 🟡 logic verified against docs; no checkout/webhook HTTP endpoints, no Razorpay calls |
+| Instagram integration | official API | 🟡 documented facts + quota + container rules coded; OAuth/publishing **not implemented** |
 
 ## Fixed prices (INR, stored as integer paise)
 | Plan | Weekly | Monthly |
@@ -52,21 +54,23 @@ workers/queues, Razorpay or Instagram calls, any deployment. **The app has never
 3. Usage resets on the 1st of each calendar month (UTC), independent of billing renewal; the UI shows the reset date/time in the user's zone.
 4. Owner-deletion grace period: default 7 days, maximum 30. Immediate removal for valid privacy/legal requests needs a written justification (audit log). Source files are never deleted while jobs/valid references need them.
 
-**Developer placeholders - please confirm or change (all in one place each)**
-- Recipient caps per collection (owner's plan): Free 0, Creator 5, Pro 25, Agency 100 (`catalog.ts` -> `sharing`).
+**Approved by you (2026-10-28):** recipient caps per collection - Free 0, Creator 5, Pro 25, Agency 100; delegated-manager grants last at most 90 days.
+
+**Other developer placeholders - please confirm or change**
 - Delegate limits (`sharing-management.ts`): may only grant permissions they hold, never `manage`; grants must expire and last at most 90 days (`DELEGATE_MAX_GRANT_DAYS`) and not outlast the delegate's own access; may revoke only grants they made; cannot change visibility.
 - Plan downgrades never silently remove access: `findGrantsOutsidePolicy` reports what is outside the new plan.
 - Storage "GB" = 1024^3 bytes. Agency has everything Pro has; team features not advertised.
 - Failed/needs_review items cannot be bulk-edited until retried.
 - Revoked permission during an import fails and cleans up the import.
-- Trial (7 days) not implemented until Razorpay trial behavior is verified.
+- Trial: 7 days via a future `start_at` (verified). Trial users get their plan's features only after authorising payment and until the trial ends. Not connected to Razorpay yet.
+- Instagram daily limit: code uses the documented 100 per rolling 24h but the docs also mention 50 in one place; it is overridable and should be replaced by the live `content_publishing_limit` value.
 
 ## Known verification gaps
 - Razorpay signature formulas/event names were **not re-checked against live docs** (no network).
 - Instagram API capabilities (covers, quotas) **not researched yet**.
 - Caption limits in `caption-cover-updates.ts` (2,200 chars / 30 hashtags) come from memory, **unverified**.
-- Whether Instagram accepts custom covers via the API is **unknown**; code treats it as `supported | unsupported | unknown` and never claims a cover was applied.
-- Prisma schema never validated by the Prisma CLI; Prisma version-specific config (datasource url) unchecked.
+- Instagram Reels covers: the API has `cover_url`/`thumb_offset` parameters (verified), but cover image requirements are unverified; a saved cover is never reported as applied until the publisher confirms it.
+- Prisma schema was moved to the Prisma 7 layout after reading the official migration guide, but never validated by the CLI.
 - No schedule-slot calculator yet (interval/time-window/timezone/daily-max); Instagram posting quotas not researched.
 - React UI was only server-rendered to HTML in tests; no browser, accessibility audit, responsive check or Next.js run has happened.
 - `package.json` uses `latest` for dependencies because versions could not be looked up offline. Pin them after the first real `npm install`.

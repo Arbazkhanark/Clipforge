@@ -49,9 +49,12 @@ export function countActiveRecipients(collectionId: string, ownerId: UserId, gra
   return new Set(grants.filter((g) => g.collectionId === collectionId && g.granteeId !== ownerId && isCurrentlyValid(g, now)).map((g) => g.granteeId)).size;
 }
 
+/** "not_allowed" = permission problem (403), "plan_limit" = the owner's plan does not allow it (upgrade), "invalid" = bad request. */
+export type GrantFailureCode = "not_allowed" | "plan_limit" | "invalid";
+
 export type GrantPlan =
   | { ok: true; grant: CollectionPermissionGrant }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; code: GrantFailureCode };
 
 /** Decide whether `actorId` may give `granteeId` these capabilities. Returns the grant to save. */
 export function planGrantCreation(args: {
@@ -59,27 +62,27 @@ export function planGrantCreation(args: {
   capabilities: Capability[]; expiresAt: Date | null; policy: SharingPolicy; now: Date;
 }): GrantPlan {
   const { actorId, granteeId, collection, existingGrants, capabilities, expiresAt, policy, now } = args;
-  const fail = (reason: string): GrantPlan => ({ ok: false, reason });
+  const fail = (reason: string, code: GrantFailureCode = "not_allowed"): GrantPlan => ({ ok: false, reason, code });
 
   const role = getSharingActorRole(actorId, collection, existingGrants, policy, now);
   if (role === "none") return fail("You are not allowed to manage sharing for this collection.");
-  if (granteeId === collection.ownerId) return fail("The owner already has full access.");
-  if (granteeId === actorId) return fail("You cannot give permissions to yourself.");
+  if (granteeId === collection.ownerId) return fail("The owner already has full access.", "invalid");
+  if (granteeId === actorId) return fail("You cannot give permissions to yourself.", "invalid");
 
   const uniqueCapabilities = [...new Set(capabilities)];
-  if (uniqueCapabilities.length === 0) return fail("Choose at least one permission.");
-  if (!uniqueCapabilities.every((c) => (CAPABILITIES as readonly string[]).includes(c))) return fail("Unknown permission requested.");
+  if (uniqueCapabilities.length === 0) return fail("Choose at least one permission.", "invalid");
+  if (!uniqueCapabilities.every((c) => (CAPABILITIES as readonly string[]).includes(c))) return fail("Unknown permission requested.", "invalid");
 
   // "manage" is the delegation itself: owner only, and only if the plan includes it.
   if (uniqueCapabilities.includes("manage")) {
     if (role !== "owner") return fail("Only the owner can give someone the manage permission.");
-    if (!policy.delegatedManagement) return fail("Delegated management is not included in your plan.");
+    if (!policy.delegatedManagement) return fail("Delegated management is not included in your plan.", "plan_limit");
   }
 
   // Expiry rules.
   if (expiresAt !== null) {
-    if (!policy.expiringGrants) return fail("Expiring access is not included in your plan.");
-    if (expiresAt <= now) return fail("The expiry date must be in the future.");
+    if (!policy.expiringGrants) return fail("Expiring access is not included in your plan.", "plan_limit");
+    if (expiresAt <= now) return fail("The expiry date must be in the future.", "invalid");
   }
 
   if (role === "delegate") {
@@ -97,7 +100,7 @@ export function planGrantCreation(args: {
   const alreadyRecipient = existingGrants.some((g) => g.collectionId === collection.id && g.granteeId === granteeId && isCurrentlyValid(g, now));
   const activeRecipients = countActiveRecipients(collection.id, collection.ownerId, existingGrants, now);
   if (!alreadyRecipient && activeRecipients + 1 > policy.maxRecipientsPerCollection) {
-    return fail(`This collection already has ${activeRecipients} of ${policy.maxRecipientsPerCollection} allowed recipients.`);
+    return fail(`This collection already has ${activeRecipients} of ${policy.maxRecipientsPerCollection} allowed recipients.`, "plan_limit");
   }
 
   return { ok: true, grant: { collectionId: collection.id, granteeId, capabilities: uniqueCapabilities, status: "active", expiresAt, grantedById: actorId } };
