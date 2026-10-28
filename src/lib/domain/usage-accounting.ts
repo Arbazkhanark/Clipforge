@@ -1,8 +1,10 @@
 // Usage accounting rules: idempotent (retries never double-count) and honest about shared videos.
 //
-// POLICY ASSUMPTIONS (not yet confirmed by the product owner - see docs/PLAN.md):
-//  - A failed render charges nothing (no processing minutes, no export, no storage).
-//  - Usage periods are calendar months in UTC (not the subscription billing cycle).
+// USAGE POLICY (decided by the product owner):
+//  - A render is "successful" only when it finished AND its output passed validation
+//    (right size/duration, readable file). Only successful renders are charged.
+//  - A failed or invalid render charges nothing: no processing time, no export, no storage.
+//  - Usage resets on the 1st of each calendar month (UTC), independent of the billing renewal date.
 //  - Using a shared video does NOT count its source file against the recipient's storage;
 //    the recipient pays only for what THEY cause: processing time, exports, and their own rendered outputs.
 import type { SourceKind, UserId } from "./types.ts";
@@ -20,6 +22,20 @@ export interface UsageRecordDraft {
 }
 
 /** First instant of the (UTC) month containing `date`. */
+/** The calendar month boundaries are UTC. The UI shows the reset moment in the user's own time zone. */
+export const USAGE_RESET_TIME_ZONE = "UTC";
+
+/** First instant of the NEXT calendar month: when this month's usage counters reset. */
+export function nextUsageResetUtc(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+}
+
+/** Clear text for the usage screen, e.g. "Usage resets on 1 July 2026, 5:30 am (Asia/Kolkata)". */
+export function describeUsageReset(now: Date, userTimeZone: string): string {
+  const formatted = new Intl.DateTimeFormat("en-GB", { timeZone: userTimeZone, day: "numeric", month: "long", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true }).format(nextUsageResetUtc(now));
+  return `Usage resets on ${formatted} (${userTimeZone}). Resets happen monthly and do not depend on your billing renewal date.`;
+}
+
 export function monthStartUtc(date: Date): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }
@@ -46,11 +62,15 @@ export function chargeableSourceStorageBytes(sourceKind: SourceKind, sourceSizeB
 
 /** Usage created by one finished render job, charged to the person who ran it. */
 export function buildRenderUsage(args: {
-  consumerId: UserId; renderJobId: string; succeeded: boolean;
+  consumerId: UserId; renderJobId: string;
+  /** The render job finished without error. */
+  succeeded: boolean;
+  /** The output file was checked (e.g. by ffprobe) and matches what was requested. */
+  outputValidated: boolean;
   processingSeconds: number; outputSizeBytes: number; now: Date;
 }): UsageRecordDraft[] {
-  const { consumerId, renderJobId, succeeded, processingSeconds, outputSizeBytes, now } = args;
-  if (!succeeded) return []; // policy assumption: no output, no charge
+  const { consumerId, renderJobId, succeeded, outputValidated, processingSeconds, outputSizeBytes, now } = args;
+  if (!succeeded || !outputValidated) return []; // policy: failed or unvalidated render charges nothing
   const periodStart = monthStartUtc(now);
   const base = { userId: consumerId, periodStart };
   return [

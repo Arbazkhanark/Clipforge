@@ -76,3 +76,18 @@ test("entitlement checks", () => {
   assert.throws(() => checkLimit("nope", "batchSize", 0), UnknownPlanError);
   assert.throws(() => checkLimit("pro", "batchSize", -1), RangeError);
 });
+
+test("advanced sharing policy: expiring grants and delegation start at Pro; recipient caps grow with plan", () => {
+  assert.deepEqual(PLAN_CATALOG.free.sharing, { expiringGrants: false, delegatedManagement: false, maxRecipientsPerCollection: 0 });
+  assert.equal(PLAN_CATALOG.creator.sharing.expiringGrants, false);
+  assert.equal(PLAN_CATALOG.creator.sharing.delegatedManagement, false);
+  assert.ok(PLAN_CATALOG.creator.sharing.maxRecipientsPerCollection > 0);
+  for (const id of ["pro", "agency"] as const) {
+    assert.equal(PLAN_CATALOG[id].sharing.expiringGrants, true);
+    assert.equal(PLAN_CATALOG[id].sharing.delegatedManagement, true);
+  }
+  const caps = PLAN_IDS.map((id) => PLAN_CATALOG[id].sharing.maxRecipientsPerCollection);
+  assert.deepEqual(caps, [...caps].sort((a, b) => a - b));
+  // Prices stay exactly as agreed.
+  assert.deepEqual(PLAN_IDS.map((id) => [getPricePaise(id, "weekly"), getPricePaise(id, "monthly")]), [[0, 0], [49900, 199900], [99900, 399900], [149900, 599900]]);
+});

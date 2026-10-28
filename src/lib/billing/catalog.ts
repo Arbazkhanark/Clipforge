@@ -42,6 +42,19 @@ export interface PlanDefinition {
     useSharedVideosInCycles: boolean;
     mixAndUnmix: boolean;
   };
+  /**
+   * Advanced sharing policy, enforced server-side by src/lib/domain/sharing-management.ts.
+   * PLACEHOLDER NUMBERS: the recipient caps below were chosen by the developer, not the product
+   * owner. They are configurable here in one place - please confirm or change them.
+   */
+  sharing: {
+    /** Can the owner give grants an expiry date? */
+    expiringGrants: boolean;
+    /** Can the owner delegate the "manage" permission (with the limits in sharing-management.ts)? */
+    delegatedManagement: boolean;
+    /** Most people who can hold an active grant on ONE collection (the collection owner's plan applies). */
+    maxRecipientsPerCollection: number;
+  };
 }
 
 const rupees = (amount: number): number => amount * 100;
@@ -62,6 +75,7 @@ export const PLAN_CATALOG: Record<PlanId, PlanDefinition> = {
       smartPublishingAssistant: false, jobLogsAndPriority: false, analytics: false,
       collectionSharing: "none", useSharedVideosInCycles: false, mixAndUnmix: false,
     },
+    sharing: { expiringGrants: false, delegatedManagement: false, maxRecipientsPerCollection: 0 },
   },
   creator: {
     id: "creator",
@@ -80,6 +94,7 @@ export const PLAN_CATALOG: Record<PlanId, PlanDefinition> = {
       // Advanced sharing management (Pro and up) and higher limits are the upgrade reasons.
       collectionSharing: "basic", useSharedVideosInCycles: true, mixAndUnmix: true,
     },
+    sharing: { expiringGrants: false, delegatedManagement: false, maxRecipientsPerCollection: 5 },
   },
   pro: {
     id: "pro",
@@ -96,6 +111,7 @@ export const PLAN_CATALOG: Record<PlanId, PlanDefinition> = {
       smartPublishingAssistant: true, jobLogsAndPriority: true, analytics: false,
       collectionSharing: "advanced", useSharedVideosInCycles: true, mixAndUnmix: true,
     },
+    sharing: { expiringGrants: true, delegatedManagement: true, maxRecipientsPerCollection: 25 },
   },
   agency: {
     id: "agency",
@@ -113,6 +129,7 @@ export const PLAN_CATALOG: Record<PlanId, PlanDefinition> = {
       // ASSUMPTION: Agency gets everything Pro has. Team features are NOT listed until built.
       collectionSharing: "advanced", useSharedVideosInCycles: true, mixAndUnmix: true,
     },
+    sharing: { expiringGrants: true, delegatedManagement: true, maxRecipientsPerCollection: 100 },
   },
 };
 

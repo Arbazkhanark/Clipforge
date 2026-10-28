@@ -170,6 +170,10 @@ export function findMediaDependencies(args: {
   };
 }
 
+/** Owner decision: default 7 days, maximum 30 days. */
+export const DEFAULT_GRACE_DAYS = 7;
+export const MAX_GRACE_DAYS = 30;
+
 export type DeletionReason = "normal" | "legal_removal";
 
 export type DeletionPlan =
@@ -179,10 +183,12 @@ export type DeletionPlan =
   /** Others depend on it. The owner must choose; options are shown in the UI. */
   | { outcome: "needs_owner_choice"; options: ("cancel" | "schedule_with_grace_period")[]; affectedUserIds: UserId[]; activeItemCount: number; activeImportCount: number }
   /** Legal/privacy removal: access ends immediately; no grace period. */
-  | { outcome: "forced_removal"; affectedUserIds: UserId[]; cycleItemIdsToBlock: string[]; importJobIdsToFail: string[] };
+  | { outcome: "forced_removal"; affectedUserIds: UserId[]; cycleItemIdsToBlock: string[]; importJobIdsToFail: string[]; auditJustification: string };
 
 export function planOwnerDeletion(args: {
   requestedBy: UserId; media: MediaAsset; dependencies: MediaDependencies; reason: DeletionReason;
+  /** Required for "legal_removal": what privacy/legal request justifies skipping the grace period. Stored in the audit log. */
+  justification?: string;
 }): DeletionPlan {
   const { requestedBy, media, dependencies, reason } = args;
   if (media.ownerId !== requestedBy) return { outcome: "denied", reason: "Only the owner can delete this video." };
@@ -191,7 +197,10 @@ export function planOwnerDeletion(args: {
   const affectedUserIds = [...new Set([...dependencies.sharedWithUserIds, ...dependencies.activeCycleItems.map((i) => i.cycleOwnerId).filter((id) => id !== media.ownerId)])];
 
   if (reason === "legal_removal") {
+    const justification = (args.justification ?? "").trim();
+    if (justification === "") return { outcome: "denied", reason: "Immediate removal needs a short privacy or legal justification for the audit log." };
     return {
+      auditJustification: justification,
       outcome: "forced_removal", affectedUserIds,
       cycleItemIdsToBlock: dependencies.activeCycleItems.filter(isEditableItem).map((i) => i.id),
       importJobIdsToFail: dependencies.activeImportJobs.map((j) => j.id),
@@ -218,11 +227,14 @@ export interface RecipientNotification {
 
 /** Owner chose a grace period. Marks the media and builds one notification per affected user. */
 export function scheduleDeletionWithGracePeriod(args: {
-  media: MediaAsset; dependencies: MediaDependencies; graceDays: number; now: Date;
+  media: MediaAsset; dependencies: MediaDependencies; /** Defaults to 7 days. */ graceDays?: number; now: Date;
   collections: VideoCollection[]; grants: CollectionPermissionGrant[];
 }): { media: MediaAsset; notifications: RecipientNotification[] } | { error: string } {
-  const { media, dependencies, graceDays, now, collections, grants } = args;
-  if (!Number.isInteger(graceDays) || graceDays < 1) return { error: "The grace period must be a whole number of days, at least 1." };
+  const { media, dependencies, now, collections, grants } = args;
+  const graceDays = args.graceDays ?? DEFAULT_GRACE_DAYS;
+  if (!Number.isInteger(graceDays) || graceDays < 1 || graceDays > MAX_GRACE_DAYS) {
+    return { error: `The grace period must be a whole number of days from 1 to ${MAX_GRACE_DAYS}.` };
+  }
   if (media.status !== "active") return { error: "Only an active video can be scheduled for removal." };
 
   const deleteAfter = new Date(now.getTime() + graceDays * 24 * 60 * 60 * 1000);

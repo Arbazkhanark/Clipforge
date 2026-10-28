@@ -98,15 +98,24 @@ test("owner deletion: only the owner; no deps -> delete now; deps -> owner must 
 
 test("legal removal: no grace period; upcoming items blocked, imports failed, recipients told", () => {
   const deps = findMediaDependencies(depsArgs({ importJobs: [job({ id: "j9", status: "copying" })] }));
-  const plan = planOwnerDeletion({ requestedBy: "owner", media: makeMedia(), dependencies: deps, reason: "legal_removal" });
+  const plan = planOwnerDeletion({ requestedBy: "owner", media: makeMedia(), dependencies: deps, reason: "legal_removal", justification: "  Court order #123 " });
   assert.ok(plan.outcome === "forced_removal");
-  if (plan.outcome === "forced_removal") { assert.deepEqual(plan.cycleItemIdsToBlock, ["item1"]); assert.deepEqual(plan.importJobIdsToFail, ["j9"]); assert.deepEqual(plan.affectedUserIds, ["bob"]); }
+  if (plan.outcome === "forced_removal") { assert.deepEqual(plan.cycleItemIdsToBlock, ["item1"]); assert.deepEqual(plan.importJobIdsToFail, ["j9"]); assert.deepEqual(plan.affectedUserIds, ["bob"]); assert.equal(plan.auditJustification, "Court order #123"); }
+  for (const justification of [undefined, "", "   "]) {
+    assert.equal(planOwnerDeletion({ requestedBy: "owner", media: makeMedia(), dependencies: deps, reason: "legal_removal", justification }).outcome, "denied");
+  }
 });
 
 test("grace period: marks media, real deleteAfter date, one honest notification per affected user", () => {
   const deps = findMediaDependencies(depsArgs());
   const result = scheduleDeletionWithGracePeriod({ media: makeMedia(), dependencies: deps, graceDays: 7, now: NOW, collections: [makeCollection()], grants: [importGrant, makeGrant()] });
   assert.ok(!("error" in result));
+  // Default is 7 days when the owner does not choose.
+  const defaulted = scheduleDeletionWithGracePeriod({ media: makeMedia(), dependencies: deps, now: NOW, collections: [], grants: [] });
+  assert.ok(!("error" in defaulted) && defaulted.media.deleteAfter?.getTime() === inDays(7).getTime());
+  // Maximum is 30 days.
+  assert.ok(!("error" in scheduleDeletionWithGracePeriod({ media: makeMedia(), dependencies: deps, graceDays: 30, now: NOW, collections: [], grants: [] })));
+  assert.ok("error" in scheduleDeletionWithGracePeriod({ media: makeMedia(), dependencies: deps, graceDays: 31, now: NOW, collections: [], grants: [] }));
   if (!("error" in result)) {
     assert.equal(result.media.status, "pending_deletion"); assert.equal(result.media.deleteAfter?.getTime(), inDays(7).getTime());
     const n = result.notifications[0]!;

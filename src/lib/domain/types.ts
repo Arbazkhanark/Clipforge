@@ -50,6 +50,8 @@ export interface CollectionPermissionGrant {
   capabilities: Capability[];
   status: GrantStatus;
   expiresAt: Date | null;
+  /** Who created the grant (the owner or a delegated manager). Delegates may only revoke grants they made. */
+  grantedById?: UserId;
 }
 
 export interface Decision {
