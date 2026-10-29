@@ -20,6 +20,7 @@ export class MemoryRepository implements Repository {
   captionRevisions: CaptionRevision[] = [];
   audit: AuditEntry[] = [];
   scheduledItemsUsed = new Map<string, number>();
+  monthlyUsage = new Map<string, { processingSeconds: number; exports: number }>();
   /** Test hook: runs right before a version-checked save, to simulate another request/worker winning the race. */
   beforeItemSave: (() => void) | null = null;
 
@@ -54,6 +55,29 @@ export class MemoryRepository implements Repository {
   }
 
   async getMedia(mediaId: string): Promise<MediaAsset | null> { await tick(); const m = this.media.get(mediaId); return m ? clone(m) : null; }
+  async getMediaByIds(mediaIds: string[]): Promise<MediaAsset[]> {
+    await tick();
+    return mediaIds.flatMap((id) => { const m = this.media.get(id); return m ? [clone(m)] : []; });
+  }
+  async listMediaForOwner(userId: string, page: { limit: number; offset: number }): Promise<{ items: MediaAsset[]; total: number }> {
+    await tick();
+    const mine = [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted")
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0) || a.id.localeCompare(b.id));
+    return { items: mine.slice(page.offset, page.offset + page.limit).map(clone), total: mine.length };
+  }
+  async listCollectionsForOwner(userId: string): Promise<VideoCollection[]> { await tick(); return [...this.collections.values()].filter((c) => c.ownerId === userId).map(clone); }
+  async listCollectionsSharedWith(userId: string, now: Date): Promise<VideoCollection[]> {
+    await tick();
+    const validIds = new Set(this.grants.filter((g) => g.granteeId === userId && g.status === "active" && (g.expiresAt === null || g.expiresAt > now)).map((g) => g.collectionId));
+    return [...this.collections.values()].filter((c) => validIds.has(c.id) && c.ownerId !== userId).map(clone);
+  }
+  async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { await tick(); return [...this.cycles.values()].filter((c) => c.ownerId === userId).map(clone); }
+  async getStorageUsedBytes(userId: string): Promise<number> {
+    await tick();
+    return [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
+  }
+  async getMonthlyUsage(userId: string): Promise<{ processingSeconds: number; exports: number }> { await tick(); return this.monthlyUsage.get(userId) ?? { processingSeconds: 0, exports: 0 }; }
+
   async getCollection(collectionId: string): Promise<VideoCollection | null> { await tick(); const c = this.collections.get(collectionId); return c ? clone(c) : null; }
   async getGrants(collectionId: string): Promise<CollectionPermissionGrant[]> { await tick(); return this.grants.filter((g) => g.collectionId === collectionId).map(clone); }
   async upsertGrant(grant: CollectionPermissionGrant): Promise<void> {

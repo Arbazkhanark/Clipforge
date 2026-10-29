@@ -27,6 +27,16 @@ export interface Repository {
   saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]>;
 
   getMedia(mediaId: string): Promise<MediaAsset | null>;
+  /** One query for many ids (avoids N+1). Missing ids are simply absent from the result. */
+  getMediaByIds(mediaIds: string[]): Promise<MediaAsset[]>;
+  /** Pages of the user's OWN media, newest first. Never loads a whole library at once. */
+  listMediaForOwner(userId: string, page: { limit: number; offset: number }): Promise<{ items: MediaAsset[]; total: number }>;
+  listCollectionsForOwner(userId: string): Promise<VideoCollection[]>;
+  /** Collections other people shared with this user through a currently valid grant. */
+  listCollectionsSharedWith(userId: string, now: Date): Promise<VideoCollection[]>;
+  listCyclesForOwner(userId: string): Promise<CycleRecord[]>;
+  getStorageUsedBytes(userId: string): Promise<number>;
+  getMonthlyUsage(userId: string, monthStart: Date): Promise<{ processingSeconds: number; exports: number }>;
   getCollection(collectionId: string): Promise<VideoCollection | null>;
   getGrants(collectionId: string): Promise<CollectionPermissionGrant[]>;
   upsertGrant(grant: CollectionPermissionGrant): Promise<void>;

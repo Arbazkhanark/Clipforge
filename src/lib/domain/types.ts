@@ -15,6 +15,11 @@ export interface MediaAsset {
   sizeBytes: number;
   /** Only set while status is "pending_deletion": recipients keep access until this moment. */
   deleteAfter: Date | null;
+  // Display fields (optional so rule tests stay small). Never put storage keys or URLs here.
+  title?: string;
+  kind?: "video" | "image";
+  durationMs?: number | null;
+  createdAt?: Date;
 }
 
 // ---------- Collections and sharing ----------
@@ -28,6 +33,8 @@ export interface VideoCollection {
   archived: boolean;
   /** Media ids currently inside this collection (from CollectionItem rows). */
   mediaIds: string[];
+  name?: string;
+  description?: string;
 }
 
 /**

@@ -1,12 +1,11 @@
 // Creating cycles, mixing/unmixing videos, and starting a cycle.
 import { getPlan } from "../../lib/billing/catalog.ts";
 import { checkLimit } from "../../lib/billing/entitlements.ts";
-import { monthStartUtc } from "../../lib/domain/usage-accounting.ts";
 import { mixVideosIntoCycle, unmixItems, type MixCandidate, type MixRejection } from "../../lib/domain/mix-unmix.ts";
-import { canKeepUsingSourceForCycleItem } from "../../lib/domain/sharing-permissions.ts";
-import { runPreflight, type PreflightReport } from "../../lib/domain/preflight.ts";
+import type { PreflightReport } from "../../lib/domain/preflight.ts";
 import { startCycle as startCycleRule } from "../../lib/domain/cycle-state.ts";
-import type { CollectionPermissionGrant, CycleItem, Decision, VideoCollection } from "../../lib/domain/types.ts";
+import type { CollectionPermissionGrant, CycleItem, VideoCollection } from "../../lib/domain/types.ts";
+import { buildPreflightReport } from "../preflight-service.ts";
 import { requireUser, type RequestContext } from "../context.ts";
 import { AppError, conflict, forbidden, notFound, planLimit } from "../errors.ts";
 import { Problems, readBoolean, readId, readIdList, readObject, readText } from "../validation.ts";
@@ -123,25 +122,7 @@ export async function startPublishingCycle(ctx: RequestContext, rawInput: unknow
 
   const cycle = await loadOwnedCycle(ctx, userId, cycleId);
   const items = await ctx.repo.getCycleItems(cycleId);
-  const account = await ctx.repo.getSocialAccount(cycle.socialAccountId);
-  const planId = await ctx.repo.getPlanIdForUser(userId);
-
-  // Re-check every item's source RIGHT NOW (permission may have been revoked since it was added).
-  const sourceAccessByItemId: Record<string, Decision> = {};
-  for (const item of items) {
-    const media = await ctx.repo.getMedia(item.mediaAssetId);
-    const collection = item.sourceCollectionId ? await ctx.repo.getCollection(item.sourceCollectionId) : null;
-    const grants = collection ? await ctx.repo.getGrants(collection.id) : [];
-    sourceAccessByItemId[item.id] = canKeepUsingSourceForCycleItem(item, media, collection, grants, ctx.now);
-  }
-  const report = runPreflight({
-    cycle: { ...cycle, finalReviewConfirmed: confirmFinalReview }, items,
-    socialAccountStatus: account && account.userId === userId ? account.status : null,
-    scheduledItemsPerMonthLimit: getPlan(planId).limits.scheduledItemsPerMonth,
-    scheduledItemsUsedThisMonth: await ctx.repo.getScheduledItemsUsedThisMonth(userId, monthStartUtc(ctx.now)),
-    coverSupport: ctx.config.coverSupport, sourceAccessByItemId,
-    recentPublishTimes: await ctx.repo.getRecentPublishTimes(userId, new Date(ctx.now.getTime() - 24 * 3_600_000)),
-  });
+  const report = await buildPreflightReport(ctx, userId, cycle, items, confirmFinalReview);
   if (!report.canStart) throw new AppError(409, "preflight_failed", "This cycle cannot start yet.", { report });
 
   const rule = startCycleRule({ ...cycle, finalReviewConfirmed: confirmFinalReview }, items);

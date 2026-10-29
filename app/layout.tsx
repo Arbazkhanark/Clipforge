@@ -16,6 +16,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <a href="/">ClipForge</a>
             <a href="/pricing">Pricing</a>
             <a href="/dashboard">Dashboard</a>
+            <a href="/login">Sign in</a>
           </nav>
         </header>
         <main id="main">{children}</main>

@@ -37,3 +37,13 @@ export function formatDateTime(date: Date, timeZone: string): string {
 }
 
 export const formatCount = (n: number): string => new Intl.NumberFormat("en-IN").format(n);
+
+export function formatDuration(ms: number | null): string {
+  if (ms === null) return "-";
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+export const CAPABILITY_LABELS = { view: "view", use_in_cycle: "use in a publishing cycle", import_copy: "import a copy", download: "download", manage: "manage sharing" } as const;
+export const VISIBILITY_LABELS = { private: "Private", link: "Shared by link", public_view: "Public (view only)" } as const;
+export const CYCLE_STATUS_LABELS = { draft: "Draft (not started)", running: "Running", paused: "Paused", stopped: "Stopped", completed: "Completed" } as const;

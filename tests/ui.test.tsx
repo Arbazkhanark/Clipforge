@@ -18,7 +18,6 @@ import { CYCLE_ITEM_STATUSES } from "../src/lib/domain/types.ts";
 import { makeItem, makeCycle, NOW } from "./helpers.ts";
 import HomePage from "../app/page.tsx";
 import PricingPage from "../app/pricing/page.tsx";
-import DashboardPage from "../app/dashboard/page.tsx";
 import RootLayout from "../app/layout.tsx";
 
 const html = (node: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(node);
@@ -105,11 +104,10 @@ test("import warning shows every required warning and a required checkbox", () =
   assert.ok(out.includes("required")); assert.ok(out.includes("Clip &lt;B&gt;"));
 });
 
-test("pages render: home is honest, pricing uses the catalog, dashboard has an honest empty state, layout is accessible", () => {
+test("pages render: home is honest, pricing uses the catalog, layout is accessible", () => {
   const home = html(<HomePage />);
   assert.ok(home.includes("Early development")); assert.ok(!/testimonial|trusted by|\d+\+ (creators|users)/i.test(home));
   assert.ok(html(<PricingPage />).includes("₹3,999"));
-  assert.ok(html(<DashboardPage />).includes("not connected yet"));
   const layout = html(<RootLayout><p>child</p></RootLayout>);
   assert.ok(layout.includes('<html lang="en">')); assert.ok(layout.includes("Skip to main content")); assert.ok(layout.includes('aria-label="Main"')); assert.ok(layout.includes("<p>child</p>"));
 });

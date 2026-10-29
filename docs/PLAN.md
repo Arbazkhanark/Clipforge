@@ -3,27 +3,33 @@
 Legend: ✅ done & tested · 🟡 partial · ⬜ not started
 
 ## Current honest status
-**Exists and is tested here:** pure business rules; a server-side request layer (validation, ownership, plan limits, optimistic
-concurrency) tested against an in-memory repository; a draft Prisma 7 schema; the FFmpeg rendering pipeline (really run); React
-components and a small Next.js route skeleton (server-rendered in tests); Razorpay and Instagram **rules** checked against official docs
-(see `docs/VERIFICATION.md`).
-**Does NOT exist / never run:** Next.js itself, Prisma CLI/client, a running PostgreSQL, S3, sign-in, uploads, job queue/worker,
-any real Razorpay or Instagram call, any deployment. **The app has never been started with `next dev` or built with `next build`,
-and the Prisma schema has never been validated or migrated.** Everything below that needs the network is blocked, not done.
+**Exists and is tested here (all against in-memory sample data):** business rules; the server request layer; read-side queries that
+return safe view models; Web-standard API routes with CSRF/content-type/size protections; Next.js App Router screens (dashboard,
+media library with paging, collections + detail, publishing cycles + detail with preflight, login/register forms, pricing) rendered to
+HTML in tests; FFmpeg rendering pipeline (really run); Razorpay/Instagram/Prisma-7 rules checked against official docs.
+**Does NOT exist / never run:** Next.js itself, Prisma CLI/client, PostgreSQL, S3 (and no AWS resources exist), real sign-in,
+uploads, mutation forms in the UI, job queue/worker, any real Razorpay or Instagram call, any deployment.
+**The app has never been started with `next dev` or built with `next build`. It is not runnable-verified, deployed or production-ready.**
+
+## Modes
+- default ("unconfigured"): nobody is signed in; data pages say "Sign in required"; API answers 401/503. Nothing is faked.
+- `CLIPFORGE_DEMO_MODE=true`: built-in SAMPLE data in server memory, one sample user, a banner on every app screen, resets on restart.
 
 ## Stages
 | Stage | What | Status |
 |---|---|---|
-| Server request layer | validation, auth check, ownership, plan limits, concurrency | ✅ tested vs in-memory repository (`src/server/`): captions, covers, grants, revoke, create cycle, mix, unmix, start. **Not yet connected to Prisma, HTTP routes, or a session** |
-| Authentication | Google + email/password, verification, reset, sessions | ⬜ blocked: packages + DB + email provider |
-| Dashboard | real data | ⬜ placeholder empty state |
-| Media library & collections | DB, S3, UI | 🟡 rules + schema + repository interface |
-| Video upload | presigned/multipart S3 | ⬜ blocked |
-| Editor & background rendering | FFmpeg pipeline | 🟡 pipeline really tested; no editor UI, no queue/worker |
-| Sharing | rules, handlers | 🟡 grant/revoke handlers tested (plan caps, delegates, expiry); no pages/DB; access-request and import/deletion handlers not yet written |
-| Publishing cycles & scheduling | rules, handlers | 🟡 start/mix/unmix handlers tested; no scheduler process, no pause/resume/stop handlers yet |
-| Billing | catalog, signatures, webhook interpretation, trial rules | 🟡 logic verified against docs; no checkout/webhook HTTP endpoints, no Razorpay calls |
-| Instagram integration | official API | 🟡 documented facts + quota + container rules coded; OAuth/publishing **not implemented** |
+| App structure & navigation | layout, app shell (responsive), public + app route groups | ✅ rendered/tested; never run under Next.js |
+| Login / register | screens | 🟡 real fields, **submit disabled** (no authentication exists) |
+| Dashboard | plan, counts, 4 usage meters, monthly reset date | ✅ against sample data |
+| Media library | paged list (24/page) | 🟡 read-only; **no upload** |
+| Collections | list, shared-with-me, detail with permission explanation | 🟡 read-only; no create/share UI |
+| Publishing cycles | list, detail with preflight + items table | 🟡 read-only; no start/edit UI (API routes exist + tested) |
+| API routes | cycles, mix, unmix, start, bulk captions/covers, grants, revoke | ✅ tested via Web `Request`/`Response`; sit on the in-memory repository |
+| Server request layer / queries | validation, ownership, plan limits, concurrency, safe view models | ✅ tested |
+| Authentication, uploads, database persistence | | ⬜ blocked: packages, network, credentials |
+| Editor UI, background worker | | ⬜ pipeline tested; no UI/queue |
+| Scheduling UI, billing UI/checkout, Instagram | | ⬜ rules only; Razorpay/Instagram never called |
+| Remaining handlers (access requests, import, owner deletion, pause/resume/stop) | | ⬜ deliberately postponed: not needed for this milestone |
 
 ## Fixed prices (INR, stored as integer paise)
 | Plan | Weekly | Monthly |
@@ -76,3 +82,7 @@ and the Prisma schema has never been validated or migrated.** Everything below t
 - `package.json` uses `latest` for dependencies because versions could not be looked up offline. Pin them after the first real `npm install`.
 - Tailwind CSS and shadcn/ui are NOT set up (plain CSS in `app/globals.css`); their setup is version-specific.
 - FFmpeg tests ran with this sandbox's FFmpeg 6.1; behaviour on the production worker image is unverified. Solid-background renders are output at 30 fps (the colour source rate).
+- Pages return HTTP 200 with a "Not found" message for missing/forbidden objects (proper 404 status needs `next/navigation`, to be added once Next.js is installed).
+- `searchParams`/`params` are awaited so pages work on both older (plain object) and newer (Promise) Next.js, but no Next.js version has been tried.
+- Navigation uses plain links (full page loads); `next/link` and client-side form handling come after Next.js is installed.
+- Time zone for display is fixed to Asia/Kolkata until a user setting exists.
