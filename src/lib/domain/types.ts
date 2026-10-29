@@ -20,6 +20,10 @@ export interface MediaAsset {
   kind?: "video" | "image";
   durationMs?: number | null;
   createdAt?: Date;
+  width?: number | null;
+  height?: number | null;
+  /** "verified" = ffprobe decoded it; "incomplete" = accepted by file signature only (ffprobe unavailable). */
+  validation?: "verified" | "incomplete";
 }
 
 // ---------- Collections and sharing ----------

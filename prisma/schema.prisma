@@ -151,6 +151,8 @@ model MediaAsset {
   width            Int?
   height           Int?
   checksumSha256   String?
+  /// true = ffprobe decoded the file; false = accepted by file signature only (metadata check incomplete)
+  metadataValidated Boolean     @default(false)
   /** Set while status = pending_deletion: recipients keep access until this moment. */
   deleteAfter      DateTime?
   /** Provenance when this row is an independent import of someone else's video. */

@@ -20,6 +20,9 @@ export const notFound = (what: string): AppError => new AppError(404, "not_found
 export const forbidden = (message: string): AppError => new AppError(403, "forbidden", message);
 export const planLimit = (message: string): AppError => new AppError(403, "plan_limit", message);
 export const conflict = (message: string, details?: unknown): AppError => new AppError(409, "conflict", message, details);
+export const fileTooLarge = (maxBytes: number): AppError => new AppError(413, "file_too_large", `That file is too large. The limit for one upload is ${Math.floor(maxBytes / (1024 * 1024))} MB.`);
+export const unsupportedMediaType = (message: string): AppError => new AppError(415, "unsupported_media_type", message);
+export const invalidMedia = (message: string): AppError => new AppError(422, "invalid_media", message);
 export const validationFailed = (errors: string[]): AppError => new AppError(422, "validation_failed", "The request is not valid.", { errors });
 
 export interface HttpResult { status: number; body: { error: { code: string; message: string; details?: unknown } } }

@@ -20,6 +20,7 @@ export class MemoryRepository implements Repository {
   captionRevisions: CaptionRevision[] = [];
   audit: AuditEntry[] = [];
   scheduledItemsUsed = new Map<string, number>();
+  storageKeys = new Map<string, string>();
   monthlyUsage = new Map<string, { processingSeconds: number; exports: number }>();
   /** Test hook: runs right before a version-checked save, to simulate another request/worker winning the race. */
   beforeItemSave: (() => void) | null = null;
@@ -65,6 +66,15 @@ export class MemoryRepository implements Repository {
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0) || a.id.localeCompare(b.id));
     return { items: mine.slice(page.offset, page.offset + page.limit).map(clone), total: mine.length };
   }
+  async addMediaIfStorageWithin(media: MediaAsset, storageKey: string, limitBytes: number): Promise<boolean> {
+    await tick();
+    // No `await` between the check and the write: atomic, like one SQL transaction.
+    const used = [...this.media.values()].filter((m) => m.ownerId === media.ownerId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
+    if (used + media.sizeBytes > limitBytes) return false;
+    this.media.set(media.id, clone(media)); this.storageKeys.set(media.id, storageKey);
+    return true;
+  }
+  async listSocialAccountsForOwner(userId: string): Promise<SocialAccountRecord[]> { await tick(); return [...this.socialAccounts.values()].filter((a) => a.userId === userId).map(clone); }
   async listCollectionsForOwner(userId: string): Promise<VideoCollection[]> { await tick(); return [...this.collections.values()].filter((c) => c.ownerId === userId).map(clone); }
   async listCollectionsSharedWith(userId: string, now: Date): Promise<VideoCollection[]> {
     await tick();

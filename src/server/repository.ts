@@ -31,6 +31,13 @@ export interface Repository {
   getMediaByIds(mediaIds: string[]): Promise<MediaAsset[]>;
   /** Pages of the user's OWN media, newest first. Never loads a whole library at once. */
   listMediaForOwner(userId: string, page: { limit: number; offset: number }): Promise<{ items: MediaAsset[]; total: number }>;
+  /**
+   * Adds a media record ONLY if the owner's stored bytes plus this file stay within `limitBytes`.
+   * Must be atomic (a transaction in PostgreSQL) so two simultaneous uploads cannot both squeeze past the quota.
+   * `storageKey` stays inside the repository: it is never returned by queries.
+   */
+  addMediaIfStorageWithin(media: MediaAsset, storageKey: string, limitBytes: number): Promise<boolean>;
+  listSocialAccountsForOwner(userId: string): Promise<SocialAccountRecord[]>;
   listCollectionsForOwner(userId: string): Promise<VideoCollection[]>;
   /** Collections other people shared with this user through a currently valid grant. */
   listCollectionsSharedWith(userId: string, now: Date): Promise<VideoCollection[]>;

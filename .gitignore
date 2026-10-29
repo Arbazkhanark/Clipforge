@@ -9,3 +9,4 @@ coverage/
 .DS_Store
 *.zip
 src/generated/
+.local-media/
