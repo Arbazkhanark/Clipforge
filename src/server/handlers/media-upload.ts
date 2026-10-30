@@ -86,7 +86,7 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
       id: mediaId, ownerId: userId, status: "active", sizeBytes: data.length, deleteAfter: null, title, kind: sniffed.kind,
       durationMs: metadata.durationMs, createdAt: ctx.now, width: metadata.width, height: metadata.height, validation: metadata.validation,
     };
-    if (!(await ctx.repo.addMediaIfStorageWithin(media, finalKey, limitBytes))) throw planLimit(quotaMessage);
+    if (!(await ctx.repo.addMediaIfStorageWithin(media, { storageKey: finalKey, thumbnailKey: null }, limitBytes))) throw planLimit(quotaMessage);
 
     await ctx.repo.appendAudit({ actorId: userId, action: "media.uploaded", entityType: "MediaAsset", entityId: mediaId, metadata: { sizeBytes: data.length, kind: sniffed.kind, validation: metadata.validation } });
     return {

@@ -119,6 +119,8 @@ model Subscription {
   razorpaySubscriptionId String?            @unique
   /** Unix seconds of the last webhook event applied (ignores stale, out-of-order events). */
   lastEventAt            BigInt             @default(0)
+  /// Unix seconds when a free trial ends (the start_at sent to Razorpay), or null.
+  trialEndsAt            BigInt?
   currentPeriodEnd       DateTime?
   createdAt              DateTime           @default(now())
   updatedAt              DateTime           @updatedAt
@@ -292,7 +294,7 @@ model CollectionPermission {
   capabilities Capability[]
   status       GrantStatus     @default(active)
   expiresAt    DateTime?
-  grantedById  String
+  grantedById  String?
   revokedAt    DateTime?
   createdAt    DateTime        @default(now())
 

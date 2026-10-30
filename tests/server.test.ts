@@ -8,6 +8,7 @@ import { bulkUpdateCaptions, bulkUpdateCovers } from "../src/server/handlers/cap
 import { createGrant, revokeGrant } from "../src/server/handlers/sharing.ts";
 import { createCycle, mixIntoCycle, unmixFromCycle, startPublishingCycle } from "../src/server/handlers/cycles.ts";
 import { getCollectionCapabilities } from "../src/lib/domain/sharing-permissions.ts";
+import { monthStartUtc } from "../src/lib/domain/usage-accounting.ts";
 import { NOW, inDays, makeCollection, makeGrant, makeItem, makeMedia } from "./helpers.ts";
 import type { PlanId } from "../src/lib/billing/catalog.ts";
 
@@ -353,7 +354,7 @@ test("start: plan allowance and Instagram's documented 24h quota are enforced on
   const { repo, ctxFor } = setup({ bob: "free" });
   repo.media.set("m1", makeMedia({ id: "m1", ownerId: "bob" }));
   addItems(repo, Array.from({ length: 3 }, (_, i) => own(`i${i}`, { mediaAssetId: "m1", captionText: "x", position: i + 1 })));
-  repo.scheduledItemsUsed.set("bob", 9); // Free allows 10 scheduled items per month; 3 more would be 12
+  repo.setUsage("bob", monthStartUtc(NOW), { processingSeconds: 0, exports: 0, scheduledItems: 9 }); // Free allows 10 scheduled items per month; 3 more would be 12
   const error = await errorOf(startPublishingCycle(ctxFor("bob"), { cycleId: "cycle1", confirmFinalReview: true }));
   assert.ok((error.details as { report: { checks: { id: string }[] } }).report.checks.some((c) => c.id === "plan_limit"));
 });

@@ -1,5 +1,6 @@
 // SAMPLE DATA for local demo mode only. Every title says "Sample". There are no real users, files,
 // accounts or posts here, and nothing is stored anywhere except server memory.
+import { monthStartUtc } from "../lib/domain/usage-accounting.ts";
 import { MemoryRepository } from "./memory-repository.ts";
 import type { CycleItem, MediaAsset } from "../lib/domain/types.ts";
 
@@ -43,6 +44,5 @@ export function seedDemoData(repo: MemoryRepository, now: Date): void {
   repo.items.set("demo-item-3", item(3, {}));
   repo.items.set("demo-item-4", item(4, { mediaAssetId: "demo-shared-1", sourceKind: "shared_reference", sourceCollectionId: "demo-shared-col-1", position: 4, captionText: "Sample shared video" }));
 
-  repo.scheduledItemsUsed.set(DEMO_USER_ID, 12);
-  repo.monthlyUsage.set(DEMO_USER_ID, { processingSeconds: 45 * 60, exports: 8 });
+  repo.setUsage(DEMO_USER_ID, monthStartUtc(now), { processingSeconds: 45 * 60, exports: 8, scheduledItems: 12 });
 }

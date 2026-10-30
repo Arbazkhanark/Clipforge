@@ -36,7 +36,11 @@ export interface Repository {
    * Must be atomic (a transaction in PostgreSQL) so two simultaneous uploads cannot both squeeze past the quota.
    * `storageKey` stays inside the repository: it is never returned by queries.
    */
-  addMediaIfStorageWithin(media: MediaAsset, storageKey: string, limitBytes: number): Promise<boolean>;
+  addMediaIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, limitBytes: number): Promise<boolean>;
+  /** For the serving routes ONLY. These keys never leave the server. */
+  getMediaStorageInfo(mediaId: string): Promise<{ storageKey: string; thumbnailKey: string | null; mimeType: string | null } | null>;
+  /** Every collection (anyone's) that currently contains this media, for access checks. */
+  listCollectionsContainingMedia(mediaId: string): Promise<VideoCollection[]>;
   listSocialAccountsForOwner(userId: string): Promise<SocialAccountRecord[]>;
   listCollectionsForOwner(userId: string): Promise<VideoCollection[]>;
   /** Collections other people shared with this user through a currently valid grant. */

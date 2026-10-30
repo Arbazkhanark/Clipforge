@@ -7,6 +7,8 @@ import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, Vid
 import type { AuditEntry, CycleRecord, Repository, SocialAccountRecord } from "./repository.ts";
 
 const clone = <T>(value: T): T => structuredClone(value);
+/** Fields a version-checked save may change; identity fields (id, cycleId, cycleOwnerId) never do. */
+const MUTABLE_ITEM_FIELDS = ["mediaAssetId", "sourceKind", "sourceCollectionId", "status", "position", "version", "scheduledFor", "captionText", "captionSource", "coverMediaId", "coverIsCustom", "coverState", "lockedBy", "lockExpiresAt", "reviewReason"] as const;
 const tick = (): Promise<void> => Promise.resolve();
 
 export class MemoryRepository implements Repository {
@@ -19,9 +21,11 @@ export class MemoryRepository implements Repository {
   socialAccounts = new Map<string, SocialAccountRecord>();
   captionRevisions: CaptionRevision[] = [];
   audit: AuditEntry[] = [];
-  scheduledItemsUsed = new Map<string, number>();
   storageKeys = new Map<string, string>();
-  monthlyUsage = new Map<string, { processingSeconds: number; exports: number }>();
+  thumbnailKeys = new Map<string, string | null>();
+  /** Usage per user AND month, like the UsageRecord table. Use setUsage() to fill it. */
+  usageByMonth = new Map<string, { processingSeconds: number; exports: number; scheduledItems: number }>();
+  setUsage(userId: string, monthStart: Date, usage: { processingSeconds: number; exports: number; scheduledItems: number }): void { this.usageByMonth.set(`${userId}|${monthStart.toISOString()}`, usage); }
   /** Test hook: runs right before a version-checked save, to simulate another request/worker winning the race. */
   beforeItemSave: (() => void) | null = null;
 
@@ -41,7 +45,10 @@ export class MemoryRepository implements Repository {
     return true;
   }
 
-  async getCycleItems(cycleId: string): Promise<CycleItem[]> { await tick(); return [...this.items.values()].filter((i) => i.cycleId === cycleId).map(clone); }
+  async getCycleItems(cycleId: string): Promise<CycleItem[]> {
+    await tick(); // queue order, like ORDER BY position, id
+    return [...this.items.values()].filter((i) => i.cycleId === cycleId).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id)).map(clone);
+  }
   async addCycleItems(items: CycleItem[]): Promise<void> { await tick(); for (const item of items) this.items.set(item.id, clone(item)); }
   async saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]> {
     await tick();
@@ -50,30 +57,39 @@ export class MemoryRepository implements Repository {
     return updates.map(({ item, expectedVersion }) => {
       const stored = this.items.get(item.id);
       if (!stored || stored.version !== expectedVersion) return { itemId: item.id, saved: false };
-      this.items.set(item.id, clone(item));
+      const merged = { ...stored } as Record<string, unknown>;
+      for (const field of MUTABLE_ITEM_FIELDS) merged[field] = clone(item[field]);
+      this.items.set(item.id, merged as unknown as CycleItem);
       return { itemId: item.id, saved: true };
     });
   }
 
-  async getMedia(mediaId: string): Promise<MediaAsset | null> { await tick(); const m = this.media.get(mediaId); return m ? clone(m) : null; }
+  private view(m: MediaAsset): MediaAsset { const copy = clone(m); if (this.thumbnailKeys.has(m.id)) copy.hasThumbnail = this.thumbnailKeys.get(m.id) != null; return copy; }
+  async getMedia(mediaId: string): Promise<MediaAsset | null> { await tick(); const m = this.media.get(mediaId); return m ? this.view(m) : null; }
   async getMediaByIds(mediaIds: string[]): Promise<MediaAsset[]> {
     await tick();
-    return mediaIds.flatMap((id) => { const m = this.media.get(id); return m ? [clone(m)] : []; });
+    return mediaIds.flatMap((id) => { const m = this.media.get(id); return m ? [this.view(m)] : []; });
   }
   async listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image" }): Promise<{ items: MediaAsset[]; total: number }> {
     await tick();
     const mine = [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted" && (page.kind === undefined || (m.kind ?? "video") === page.kind))
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0) || a.id.localeCompare(b.id));
-    return { items: mine.slice(page.offset, page.offset + page.limit).map(clone), total: mine.length };
+    return { items: mine.slice(page.offset, page.offset + page.limit).map((m) => this.view(m)), total: mine.length };
   }
-  async addMediaIfStorageWithin(media: MediaAsset, storageKey: string, limitBytes: number): Promise<boolean> {
+  async addMediaIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, limitBytes: number): Promise<boolean> {
     await tick();
     // No `await` between the check and the write: atomic, like one SQL transaction.
     const used = [...this.media.values()].filter((m) => m.ownerId === media.ownerId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
     if (used + media.sizeBytes > limitBytes) return false;
-    this.media.set(media.id, clone(media)); this.storageKeys.set(media.id, storageKey);
+    this.media.set(media.id, clone(media)); this.storageKeys.set(media.id, keys.storageKey); this.thumbnailKeys.set(media.id, keys.thumbnailKey);
     return true;
   }
+  async getMediaStorageInfo(mediaId: string): Promise<{ storageKey: string; thumbnailKey: string | null; mimeType: string | null } | null> {
+    await tick();
+    const key = this.storageKeys.get(mediaId);
+    return key ? { storageKey: key, thumbnailKey: this.thumbnailKeys.get(mediaId) ?? null, mimeType: this.media.get(mediaId)?.mimeType ?? null } : null;
+  }
+  async listCollectionsContainingMedia(mediaId: string): Promise<VideoCollection[]> { await tick(); return [...this.collections.values()].filter((c) => c.mediaIds.includes(mediaId)).map(clone); }
   async listSocialAccountsForOwner(userId: string): Promise<SocialAccountRecord[]> { await tick(); return [...this.socialAccounts.values()].filter((a) => a.userId === userId).map(clone); }
   async listCollectionsForOwner(userId: string): Promise<VideoCollection[]> { await tick(); return [...this.collections.values()].filter((c) => c.ownerId === userId).map(clone); }
   async listCollectionsSharedWith(userId: string, now: Date): Promise<VideoCollection[]> {
@@ -86,7 +102,10 @@ export class MemoryRepository implements Repository {
     await tick();
     return [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
   }
-  async getMonthlyUsage(userId: string): Promise<{ processingSeconds: number; exports: number }> { await tick(); return this.monthlyUsage.get(userId) ?? { processingSeconds: 0, exports: 0 }; }
+  async getMonthlyUsage(userId: string, monthStart: Date): Promise<{ processingSeconds: number; exports: number }> {
+    await tick(); const u = this.usageByMonth.get(`${userId}|${monthStart.toISOString()}`);
+    return { processingSeconds: u?.processingSeconds ?? 0, exports: u?.exports ?? 0 };
+  }
 
   async getCollection(collectionId: string): Promise<VideoCollection | null> { await tick(); const c = this.collections.get(collectionId); return c ? clone(c) : null; }
   async getGrants(collectionId: string): Promise<CollectionPermissionGrant[]> { await tick(); return this.grants.filter((g) => g.collectionId === collectionId).map(clone); }
@@ -97,7 +116,7 @@ export class MemoryRepository implements Repository {
   }
 
   async getSocialAccount(accountId: string): Promise<SocialAccountRecord | null> { await tick(); const a = this.socialAccounts.get(accountId); return a ? clone(a) : null; }
-  async getScheduledItemsUsedThisMonth(userId: string): Promise<number> { await tick(); return this.scheduledItemsUsed.get(userId) ?? 0; }
+  async getScheduledItemsUsedThisMonth(userId: string, monthStart: Date): Promise<number> { await tick(); return this.usageByMonth.get(`${userId}|${monthStart.toISOString()}`)?.scheduledItems ?? 0; }
   async getRecentPublishTimes(userId: string, since: Date): Promise<Date[]> {
     await tick();
     const ownCycleIds = new Set([...this.cycles.values()].filter((c) => c.ownerId === userId).map((c) => c.id));

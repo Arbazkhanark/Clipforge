@@ -24,6 +24,9 @@ export interface MediaAsset {
   height?: number | null;
   /** "verified" = ffprobe decoded it; "incomplete" = accepted by file signature only (ffprobe unavailable). */
   validation?: "verified" | "incomplete";
+  /** The real type (from the file signature): e.g. "video/mp4". Used for serving. */
+  mimeType?: string;
+  hasThumbnail?: boolean;
 }
 
 // ---------- Collections and sharing ----------
