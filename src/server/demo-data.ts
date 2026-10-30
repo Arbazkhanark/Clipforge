@@ -16,7 +16,8 @@ export function seedDemoData(repo: MemoryRepository, now: Date): void {
   const day = 86_400_000;
   const makeMedia = (id: string, ownerId: string, title: string, sizeMb: number, daysAgo: number, seconds: number): MediaAsset =>
     ({ id, ownerId, status: "active", sizeBytes: sizeMb * MB, deleteAfter: null, title, kind: "video", durationMs: seconds * 1000, createdAt: new Date(now.getTime() - daysAgo * day) });
-  for (let i = 1; i <= 30; i++) repo.media.set(`demo-media-${i}`, makeMedia(`demo-media-${i}`, DEMO_USER_ID, `Sample clip ${String(i).padStart(2, "0")}`, 20 + (i % 7) * 15, i, 15 + (i % 5) * 10));
+  for (let i = 1; i <= 28; i++) repo.media.set(`demo-media-${i}`, makeMedia(`demo-media-${i}`, DEMO_USER_ID, `Sample clip ${String(i).padStart(2, "0")}`, 20 + (i % 7) * 15, i, 15 + (i % 5) * 10));
+  for (const i of [29, 30]) repo.media.set(`demo-media-${i}`, { id: `demo-media-${i}`, ownerId: DEMO_USER_ID, status: "active", sizeBytes: 2 * MB, deleteAfter: null, title: `Sample cover image ${i}`, kind: "image", durationMs: null, createdAt: new Date(now.getTime() - i * day) });
   for (let i = 1; i <= 4; i++) repo.media.set(`demo-shared-${i}`, makeMedia(`demo-shared-${i}`, DEMO_OTHER_USER_ID, `Sample shared clip ${i}`, 40, i, 30));
 
   repo.collections.set("demo-col-1", { id: "demo-col-1", ownerId: DEMO_USER_ID, visibility: "private", archived: false, name: "Sample collection - Client A", description: "Example collection of the sample clips.", mediaIds: ["demo-media-1", "demo-media-2", "demo-media-3", "demo-media-4", "demo-media-5"] });

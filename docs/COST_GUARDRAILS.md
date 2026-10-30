@@ -11,5 +11,7 @@
 4. Private media is never exposed: view models contain no storage keys or URLs; originals are not downloadable unless the owner
    granted `download`; when S3 exists it stays private with short-lived presigned URLs.
 
+**Storage specifically:** uploads use server memory or a private local folder (`CLIPFORGE_LOCAL_MEDIA_DIR`, gitignored `.local-media/`). No S3 adapter exists; when one is written it must stay private (presigned, short-lived URLs), and creating the bucket needs your explicit approval first.
+
 **Current state:** no AWS credentials exist in the repo or the sandbox; `.env.example` holds placeholders only; nothing here calls
 any cloud service.

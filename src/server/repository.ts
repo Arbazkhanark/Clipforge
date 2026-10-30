@@ -30,7 +30,7 @@ export interface Repository {
   /** One query for many ids (avoids N+1). Missing ids are simply absent from the result. */
   getMediaByIds(mediaIds: string[]): Promise<MediaAsset[]>;
   /** Pages of the user's OWN media, newest first. Never loads a whole library at once. */
-  listMediaForOwner(userId: string, page: { limit: number; offset: number }): Promise<{ items: MediaAsset[]; total: number }>;
+  listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image" }): Promise<{ items: MediaAsset[]; total: number }>;
   /**
    * Adds a media record ONLY if the owner's stored bytes plus this file stay within `limitBytes`.
    * Must be atomic (a transaction in PostgreSQL) so two simultaneous uploads cannot both squeeze past the quota.

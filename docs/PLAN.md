@@ -3,33 +3,33 @@
 Legend: ✅ done & tested · 🟡 partial · ⬜ not started
 
 ## Current honest status
-**Exists and is tested here (all against in-memory sample data):** business rules; the server request layer; read-side queries that
-return safe view models; Web-standard API routes with CSRF/content-type/size protections; Next.js App Router screens (dashboard,
-media library with paging, collections + detail, publishing cycles + detail with preflight, login/register forms, pricing) rendered to
-HTML in tests; FFmpeg rendering pipeline (really run); Razorpay/Instagram/Prisma-7 rules checked against official docs.
-**Does NOT exist / never run:** Next.js itself, Prisma CLI/client, PostgreSQL, S3 (and no AWS resources exist), real sign-in,
-uploads, mutation forms in the UI, job queue/worker, any real Razorpay or Instagram call, any deployment.
-**The app has never been started with `next dev` or built with `next build`. It is not runnable-verified, deployed or production-ready.**
+**Exists and is tested here (all against in-memory sample data and private local/memory storage):** business rules; server request layer;
+safe read queries; Web-standard JSON API routes; **plain HTML form routes** (no client JavaScript) that run the same tested handlers and
+redirect with whitelisted flash messages; **a real upload workflow** (private local-disk or memory storage, file-signature sniffing, ffprobe
+validation, plan storage quota, safe names, cleanup of failed uploads); Next.js App Router screens (dashboard, media library with upload,
+collections with add-to-cycle form, publishing cycles with create/edit/start forms, login/register, pricing) rendered to HTML in tests;
+FFmpeg rendering pipeline (really run); Razorpay/Instagram/Prisma-7 rules checked against official docs.
+**Does NOT exist / never run:** Next.js itself (so no `next build`, no browser, no hydration), Prisma CLI/client, PostgreSQL, S3 (no AWS
+resources exist), real sign-in, persistent records, job queue/worker, any real Razorpay or Instagram call, any deployment.
+**Not runnable-verified, not deployed, not production-ready.**
 
-## Modes
-- default ("unconfigured"): nobody is signed in; data pages say "Sign in required"; API answers 401/503. Nothing is faked.
-- `CLIPFORGE_DEMO_MODE=true`: built-in SAMPLE data in server memory, one sample user, a banner on every app screen, resets on restart.
+## Modes and storage (kept visibly separate in the UI)
+- default ("unconfigured"): nobody is signed in; data pages say "Sign in required"; APIs answer 401/503; **uploads unavailable**.
+- `CLIPFORGE_DEMO_MODE=true`: sample data in memory; uploads go to **server memory** ("Demo storage", discarded on restart).
+- demo + `CLIPFORGE_LOCAL_MEDIA_DIR=<folder>`: uploaded **files** are saved on disk in a private folder (mode 0700/0600, refused inside
+  public/.next/app); the **list of files is still in memory** and is lost on restart until the database exists. Development only.
+- S3: not connected; the UI says so. Nothing in the repo calls AWS.
 
 ## Stages
 | Stage | What | Status |
 |---|---|---|
-| App structure & navigation | layout, app shell (responsive), public + app route groups | ✅ rendered/tested; never run under Next.js |
-| Login / register | screens | 🟡 real fields, **submit disabled** (no authentication exists) |
-| Dashboard | plan, counts, 4 usage meters, monthly reset date | ✅ against sample data |
-| Media library | paged list (24/page) | 🟡 read-only; **no upload** |
-| Collections | list, shared-with-me, detail with permission explanation | 🟡 read-only; no create/share UI |
-| Publishing cycles | list, detail with preflight + items table | 🟡 read-only; no start/edit UI (API routes exist + tested) |
-| API routes | cycles, mix, unmix, start, bulk captions/covers, grants, revoke | ✅ tested via Web `Request`/`Response`; sit on the in-memory repository |
-| Server request layer / queries | validation, ownership, plan limits, concurrency, safe view models | ✅ tested |
-| Authentication, uploads, database persistence | | ⬜ blocked: packages, network, credentials |
-| Editor UI, background worker | | ⬜ pipeline tested; no UI/queue |
-| Scheduling UI, billing UI/checkout, Instagram | | ⬜ rules only; Razorpay/Instagram never called |
-| Remaining handlers (access requests, import, owner deletion, pause/resume/stop) | | ⬜ deliberately postponed: not needed for this milestone |
+| Storage + upload | `MediaStorage` interface, memory + local-disk adapters, upload handler, upload route/form | ✅ tested (incl. real ffprobe/ffmpeg files). **Limits:** whole file buffered in memory (200 MB default cap, `CLIPFORGE_MAX_UPLOAD_MB`); no download/preview route; records not persisted |
+| Media validation | signature sniff + MIME agreement + ffprobe | ✅ when ffprobe exists; otherwise accepted by signature only and **marked "incomplete"** (never "verified") |
+| Forms wired to API | upload, create cycle, start, bulk caption, bulk cover, remove (unmix), add videos (mix) | ✅ routes + rendered forms tested together (incl. an end-to-end read-form-fields-then-post test). **Not browser-tested** |
+| Sharing UI | grants/revoke | ⬜ routes exist; no screen (no way to look up another user until accounts exist) |
+| Remaining handlers (access requests, import, owner deletion, pause/resume/stop) | | ⬜ postponed |
+| Login / register | | 🟡 forms with submit disabled (no authentication) |
+| Auth, DB persistence, Prisma repository, S3 adapter, worker, editor UI, scheduling UI, checkout, Instagram | | ⬜ blocked/not started |
 
 ## Fixed prices (INR, stored as integer paise)
 | Plan | Weekly | Monthly |
@@ -86,3 +86,6 @@ uploads, mutation forms in the UI, job queue/worker, any real Razorpay or Instag
 - `searchParams`/`params` are awaited so pages work on both older (plain object) and newer (Promise) Next.js, but no Next.js version has been tried.
 - Navigation uses plain links (full page loads); `next/link` and client-side form handling come after Next.js is installed.
 - Time zone for display is fixed to Asia/Kolkata until a user setting exists.
+- Uploaded videos are not re-encoded or scanned for malware; ffprobe only confirms the file decodes as media. Instagram's own video requirements remain unverified.
+- Form flows use full-page redirects (POST -> 303). No double-submit protection yet (a refresh after a redirect is safe; resubmitting a form twice creates two actions).
+- Upload size is checked from the declared Content-Length before reading, and again on the bytes; a client that lies about length is still bounded by the multipart parser's buffering in Node (dev only).

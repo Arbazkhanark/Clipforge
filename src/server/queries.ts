@@ -9,11 +9,12 @@ import type { Capability, CollectionVisibility, CycleItem, CycleStatus, MediaAss
 import type { PreflightReport } from "../lib/domain/preflight.ts";
 import { requireUser, type RequestContext } from "./context.ts";
 import { notFound, validationFailed } from "./errors.ts";
+import { describeStorage, type StorageDescription } from "./storage/media-storage.ts";
 import { buildPreflightReport } from "./preflight-service.ts";
 import type { CycleRecord } from "./repository.ts";
 
-export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; }
-const toMediaCard = (m: MediaAsset): MediaCard => ({ id: m.id, title: m.title ?? "Untitled", kind: m.kind ?? "video", sizeBytes: m.sizeBytes, durationMs: m.durationMs ?? null, status: m.status });
+export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; /** "incomplete" = accepted by file signature only. */ validation: "verified" | "incomplete" | "unknown"; }
+const toMediaCard = (m: MediaAsset): MediaCard => ({ id: m.id, title: m.title ?? "Untitled", kind: m.kind ?? "video", sizeBytes: m.sizeBytes, durationMs: m.durationMs ?? null, status: m.status, validation: m.validation ?? "unknown" });
 
 export interface UsageLine { used: number; limit: number; }
 export interface DashboardData {
@@ -71,7 +72,7 @@ export async function getCollectionsOverview(ctx: RequestContext): Promise<{ own
   return { owned: await Promise.all(owned.map((c) => toCollectionCard(ctx, userId, c))), sharedWithMe: await Promise.all(shared.map((c) => toCollectionCard(ctx, userId, c))) };
 }
 
-export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canDownload: boolean; isOwner: boolean }; }
+export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canDownload: boolean; isOwner: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; }
 
 /** A collection you cannot view looks exactly like one that does not exist. */
 export async function getCollectionDetail(ctx: RequestContext, collectionId: string): Promise<CollectionDetail> {
@@ -82,7 +83,9 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
   const capabilities = getCollectionCapabilities(userId, collection, grants, ctx.now);
   if (!capabilities.has("view")) throw notFound("Collection");
   const media = (await ctx.repo.getMediaByIds(collection.mediaIds)).filter((m) => m.status !== "deleted");
+  const ownCycles = capabilities.has("use_in_cycle") ? await ctx.repo.listCyclesForOwner(userId) : [];
   return {
+    cycleChoices: ownCycles.filter((c) => c.status === "draft" || c.status === "running" || c.status === "paused").map((c) => ({ id: c.id, name: c.name })),
     collection: await toCollectionCard(ctx, userId, collection), videos: media.map(toMediaCard),
     permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canDownload: capabilities.has("download"), isOwner: collection.ownerId === userId },
   };
@@ -104,7 +107,7 @@ export async function getCyclesOverview(ctx: RequestContext): Promise<CycleCard[
   }));
 }
 
-export interface CycleDetail { cycle: Pick<CycleRecord, "id" | "name" | "status">; items: CycleItem[]; mediaTitles: Record<string, string>; report: PreflightReport; }
+export interface CycleDetail { cycle: Pick<CycleRecord, "id" | "name" | "status">; items: CycleItem[]; mediaTitles: Record<string, string>; report: PreflightReport; /** Images the user owns that can be used as covers. */ coverChoices: MediaCard[]; /** True when only the final confirmation is missing (every other check passes). */ readyToConfirm: boolean; }
 
 export async function getCycleDetail(ctx: RequestContext, cycleId: string): Promise<CycleDetail> {
   const userId = requireUser(ctx);
@@ -116,5 +119,23 @@ export async function getCycleDetail(ctx: RequestContext, cycleId: string): Prom
   for (const m of media) mediaTitles[m.id] = m.title ?? "Untitled";
   // Shown as information only: the cycle is NOT started by viewing it.
   const report = await buildPreflightReport(ctx, userId, cycle, items, cycle.finalReviewConfirmed);
-  return { cycle: { id: cycle.id, name: cycle.name, status: cycle.status }, items, mediaTitles, report };
+  const coverChoices = (await ctx.repo.listMediaForOwner(userId, { limit: 50, offset: 0, kind: "image" })).items.map(toMediaCard);
+  const readyToConfirm = report.checks.every((c) => c.id === "final_review" || c.level === "ready" || c.level === "recommendation");
+  return { cycle: { id: cycle.id, name: cycle.name, status: cycle.status }, items, mediaTitles, report, coverChoices, readyToConfirm };
+}
+
+export interface UploadInfo { available: boolean; storage: StorageDescription; storageKind: "memory" | "local-disk" | "s3" | null; maxMegabytes: number; }
+
+/** What the upload form needs. `available` is false when no storage is configured: the form then explains instead of failing. */
+export function getUploadInfo(ctx: RequestContext): UploadInfo {
+  requireUser(ctx);
+  const kind = ctx.media?.storage.kind ?? null;
+  return { available: ctx.media !== undefined, storage: describeStorage(kind), storageKind: kind, maxMegabytes: ctx.media ? Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) : 0 };
+}
+
+/** The user's own connected accounts for the "new cycle" form. External ids are never shown. */
+export async function getCycleCreationOptions(ctx: RequestContext): Promise<{ accounts: { id: string; label: string }[] }> {
+  const userId = requireUser(ctx);
+  const accounts = await ctx.repo.listSocialAccountsForOwner(userId);
+  return { accounts: accounts.filter((a) => a.status === "connected").map((a, index) => ({ id: a.id, label: `Connected account ${index + 1}` })) };
 }

@@ -60,9 +60,9 @@ export class MemoryRepository implements Repository {
     await tick();
     return mediaIds.flatMap((id) => { const m = this.media.get(id); return m ? [clone(m)] : []; });
   }
-  async listMediaForOwner(userId: string, page: { limit: number; offset: number }): Promise<{ items: MediaAsset[]; total: number }> {
+  async listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image" }): Promise<{ items: MediaAsset[]; total: number }> {
     await tick();
-    const mine = [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted")
+    const mine = [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted" && (page.kind === undefined || (m.kind ?? "video") === page.kind))
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0) || a.id.localeCompare(b.id));
     return { items: mine.slice(page.offset, page.offset + page.limit).map(clone), total: mine.length };
   }

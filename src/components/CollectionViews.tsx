@@ -27,6 +27,25 @@ export function CollectionsOverviewView({ owned, sharedWithMe }: { owned: Collec
   );
 }
 
+/** Add videos to one of YOUR cycles. Shared videos are used in place (no copy). The server re-checks every permission. */
+function MixForm({ detail }: { detail: CollectionDetail }) {
+  const { permissions, cycleChoices, videos, collection } = detail;
+  if (!permissions.canUseInCycle) return null;
+  if (cycleChoices.length === 0) return <p className="muted">Create a publishing cycle to add these videos to it.</p>;
+  return (
+    <form method="post" action="/api/forms/cycle-mix" aria-labelledby="mix-heading" className="card">
+      <h2 id="mix-heading">Add videos to a publishing cycle</h2>
+      <input type="hidden" name="collectionId" value={collection.id} />
+      <p><label>Cycle<br /><select name="cycleId" required>{cycleChoices.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label></p>
+      <fieldset><legend>Videos</legend>
+        {videos.map((v) => <p key={v.id}><label><input type="checkbox" name="video" value={`${collection.id}|${v.id}`} /> {v.title}</label></p>)}
+      </fieldset>
+      {!permissions.isOwner && <p className="muted">These videos stay with their owner: ClipForge uses them in place and does not copy them to your storage.</p>}
+      <button type="submit">Add ticked videos to the cycle</button>
+    </form>
+  );
+}
+
 export function CollectionDetailView({ detail }: { detail: CollectionDetail }) {
   const { collection, videos, permissions } = detail;
   return (
@@ -45,6 +64,7 @@ export function CollectionDetailView({ detail }: { detail: CollectionDetail }) {
         </ul>
         {!permissions.isOwner && <p className="muted">Permission to use content does not give you rights to redistribute it outside ClipForge.</p>}
       </section>
+      <MixForm detail={detail} />
       <section aria-labelledby="videos-heading">
         <h2 id="videos-heading">Videos</h2>
         {videos.length === 0 ? <p>This collection has no videos.</p> : (

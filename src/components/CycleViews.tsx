@@ -1,6 +1,6 @@
 import type { CycleCard, CycleDetail } from "../server/queries.ts";
 import { CYCLE_STATUS_LABELS } from "./format.ts";
-import { CycleItemsTable } from "./CycleItemsTable.tsx";
+import { CycleEditor, StartCycleForm } from "./CycleForms.tsx";
 import { PreflightPanel } from "./PreflightPanel.tsx";
 
 export function CyclesOverviewView({ cycles }: { cycles: CycleCard[] }) {
@@ -28,9 +28,10 @@ export function CycleDetailView({ detail, timeZone }: { detail: CycleDetail; tim
       <p><a href="/cycles">All cycles</a></p>
       <h1>{detail.cycle.name}</h1>
       <p>Status: <strong>{CYCLE_STATUS_LABELS[detail.cycle.status]}</strong></p>
-      <p className="muted">Starting, pausing and editing are not available in the screens yet. Publishing to Instagram is not connected.</p>
+      <p className="muted">Pausing, resuming and stopping are not available in the screens yet. Publishing to Instagram is not connected.</p>
       {detail.cycle.status === "draft" && <PreflightPanel report={detail.report} />}
-      <CycleItemsTable items={detail.items} mediaTitles={detail.mediaTitles} timeZone={timeZone} />
+      <CycleEditor detail={detail} timeZone={timeZone} />
+      {detail.cycle.status === "draft" && <StartCycleForm cycleId={detail.cycle.id} readyToConfirm={detail.readyToConfirm} />}
     </>
   );
 }

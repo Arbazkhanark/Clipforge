@@ -19,6 +19,9 @@ src/lib/domain/               PURE business rules (no DB, no network, no Redis):
   ordering.ts                 Queue order modes; persisted seeded shuffle
 src/server/                   runtime.ts (modes + adapters), queries.ts (safe view models), http.ts (Request->Response, CSRF), page-data.ts, demo-data.ts, preflight-service.ts; request layer: errors.ts, validation.ts, repository.ts (interface), memory-repository.ts (tests), context.ts, handlers/ (captions-covers, sharing, cycles)
 src/lib/integrations/         instagram-capabilities.ts: verified Instagram facts, quota + container rules (no network calls)
+src/server/storage/            media-storage.ts (interface, key rules, descriptions), local-disk-storage.ts, memory-storage.ts, media-inspection.ts (signatures, filenames, ffprobe)
+src/server/handlers/media-upload.ts   the upload workflow
+src/server/flash.ts, form-routes.ts, form-handlers.ts, upload-route.ts   HTML form posts -> handlers -> redirect with whitelisted messages
 src/lib/render/               ffmpeg-command.ts (pure command + validation), render-runner.ts (runs ffmpeg/ffprobe in a WORKER)
 src/components/               React components with no client-only code (pricing, usage meter, cycle table, preflight, schedule preview, import warning)
 app/                          Next.js App Router: (app)/ signed-in screens, login, register, pricing, api/ route handlers (never run under Next here)
@@ -73,3 +76,15 @@ never overwritten) -> audit log -> a per-item report. Starting a cycle uses a st
 interface -> adapter chosen by `runtime.ts` (today: in-memory demo data, or a repository that refuses every call). Components in
 `src/components` only receive view models; they never see storage keys, URLs or other users' ids. Mutations go through
 `app/api/**/route.ts` -> `jsonRoute` -> the tested handlers.
+
+### Upload workflow
+signed in -> input shape -> size cap -> real type from the file's first bytes (browser MIME must agree) -> early plan-quota check (no bytes
+written if it cannot fit) -> **stage** under `staging/<id>` -> ffprobe (if installed; otherwise "incomplete") -> **commit** to
+`media/<userId>/<mediaId>` (never overwrites) -> record created **atomically within the quota** (`addMediaIfStorageWithin`) -> audit.
+Keys come only from validated ids; the user's file name becomes a sanitised display title and is never part of a path. Failures remove only
+this upload's staged/just-committed file; **existing media is never touched** and nothing is deleted automatically.
+
+### Forms
+`<form method=post action=/api/forms/...>` -> `formRoute` (same-origin check, size cap) -> the tested handler -> `303` to a page with
+`?notice=<code>` or `?error=<code>`. Codes map to fixed sentences (`flash.ts`); user text is never echoed. One form wraps the cycle items
+table; buttons use `formAction` to choose caption / cover / remove. Hidden `version.<id>` fields carry the item versions the user saw.
