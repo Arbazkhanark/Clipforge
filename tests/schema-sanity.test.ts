@@ -40,7 +40,7 @@ test("every brief-required entity exists (or is deliberately merged)", () => {
   const required = ["User", "Subscription", "SocialAccount", "MediaAsset", "MediaDerivative", "VideoCollection", "CollectionItem",
     "CollectionShareLink", "CollectionAccessRequest", "CollectionPermission", "MediaImportJob", "EditingTemplate", "PublishingCycle",
     "CycleItem", "CaptionRevision", "CoverImageSelection", "PublishingJob", "ProcessingJob", "Notification", "UsageRecord",
-    "PaymentRecord", "WebhookEvent", "AuditLog"];
+    "PaymentRecord", "WebhookEvent", "AuditLog", "Session", "AuthToken"];
   for (const name of required) assert.ok(models[name], `missing model ${name}`);
 });
 
@@ -124,4 +124,14 @@ test("schema follows the Prisma 7 rules we verified in the docs: no url in the d
   const config = readFileSync(new URL("../prisma.config.ts", import.meta.url), "utf8");
   assert.match(config, /DATABASE_URL/);
   assert.ok(!/postgres(ql)?:\/\/\w+:\w+@/.test(config), "no real connection string in source");
+});
+
+test("auth tables store hashes only (no raw token or password columns)", () => {
+  for (const name of ["Session", "AuthToken"]) {
+    const text = models[name]!.join("\n");
+    assert.match(text, /^tokenHash\s+String\s+@unique/m, `${name}.tokenHash must be unique`);
+    assert.ok(!/^(token|rawToken|password)\s/m.test(text), `${name} must not store a raw secret`);
+  }
+  assert.deepEqual(enums["AuthTokenKind"], ["email_verification", "password_reset"]);
+  assert.ok(!/^password\s/m.test(models["User"]!.join("\n")), "User stores passwordHash, never password");
 });

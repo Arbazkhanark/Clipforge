@@ -52,11 +52,13 @@ enum SocialAccountStatus   { connected token_expired revoked disconnected }
 enum BillingInterval       { weekly monthly }
 enum SubscriptionStatus    { created authenticated active pending halted paused cancelled completed expired }
 enum UsageKind             { storage_bytes processing_seconds exports scheduled_items }
+enum AuthTokenKind        { email_verification password_reset }
 enum WebhookEventStatus    { received processed failed ignored }
 
 // ============================ Users & billing ============================
 model User {
   id             String    @id @default(cuid())
+  /// Stored lowercase and trimmed by the application (see src/server/auth/auth-service.ts).
   email          String    @unique
   emailVerified  DateTime?
   passwordHash   String?   // null for Google-only accounts
@@ -64,6 +66,8 @@ model User {
   role           UserRole  @default(user)
   createdAt      DateTime  @default(now())
 
+  sessions       Session[]
+  authTokens     AuthToken[]
   subscription   Subscription?
   socialAccounts SocialAccount[]
   mediaAssets    MediaAsset[]
@@ -75,6 +79,34 @@ model User {
   cycles         PublishingCycle[]
   notifications  Notification[]
   usageRecords   UsageRecord[]
+}
+
+/// Login sessions. Only a SHA-256 hash of the cookie token is stored, so a database leak cannot be replayed as cookies.
+model Session {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  @@index([userId])
+}
+
+/// One-time tokens for email verification and password reset (hash only; single use; short expiry).
+model AuthToken {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      AuthTokenKind
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  @@index([userId, kind])
 }
 
 model Subscription {
@@ -151,6 +183,8 @@ model MediaAsset {
   width            Int?
   height           Int?
   checksumSha256   String?
+  /// Storage key of the small JPEG preview image (or null if none could be made). Never sent to browsers.
+  thumbnailKey     String?
   /// true = ffprobe decoded the file; false = accepted by file signature only (metadata check incomplete)
   metadataValidated Boolean     @default(false)
   /** Set while status = pending_deletion: recipients keep access until this moment. */
