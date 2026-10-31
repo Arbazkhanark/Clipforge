@@ -28,7 +28,7 @@ export function redirectResponse(location: string): Response {
   return new Response(null, { status: 303, headers: { Location: location, "Cache-Control": "no-store" } });
 }
 
-async function readUrlEncoded(request: Request): Promise<FormFields> {
+export async function readUrlEncoded(request: Request): Promise<FormFields> {
   const type = (request.headers.get("content-type") ?? "").toLowerCase();
   if (!type.startsWith("application/x-www-form-urlencoded")) throw new AppError(415, "unsupported_media_type", "Unsupported form type.");
   if (Number(request.headers.get("content-length") ?? 0) > MAX_JSON_BODY_BYTES) throw new AppError(413, "payload_too_large", "Too large.");

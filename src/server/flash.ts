@@ -11,10 +11,22 @@ export const FLASH_NOTICES = {
   captions_applied: "Caption update finished.",
   covers_applied: "Cover update finished. Covers are saved in ClipForge; Instagram has not received them.",
   videos_added: "Videos added to the cycle.",
+  registered: "If that email address can be used, we sent a confirmation link. Check your inbox (in local development mode the message is on the outbox page).",
+  verified: "Your email is confirmed. You can sign in now.",
+  logged_out: "You are signed out.",
+  reset_email_sent: "If that email belongs to a confirmed account, we sent a password reset link.",
+  password_changed: "Your password was changed and you were signed out everywhere. Sign in with the new password.",
   videos_removed: "Videos removed from the cycle. Already-published posts are not affected.",
 } as const;
 
 export const FLASH_ERRORS = {
+  invalid_credentials: "Email or password is not correct.",
+  email_not_verified: "Please confirm your email first. Check your inbox for the link.",
+  rate_limited: "Too many attempts. Please wait a few minutes and try again.",
+  invalid_token: "That link is not valid or has expired.",
+  weak_password: "Choose a stronger password: at least 10 characters, not a common password, not your email address.",
+  invalid_email: "Enter a valid email address.",
+  auth_not_available: "Sign-in is not available in this build.",
   validation_failed: "Some of the fields are not valid. Check them and try again.",
   not_authenticated: "Please sign in first. (Real sign-in is not available yet in this build.)",
   not_found: "We could not find that, or you do not have access to it.",

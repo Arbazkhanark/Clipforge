@@ -131,14 +131,15 @@ test("CLIPFORGE_DEMO_MODE=true switches to sample data and shows the demo banner
   assert.ok(layout.includes('aria-label="App"'));
 });
 
-test("login and register: real fields and labels, but submit is disabled and says why; no fake success", () => {
-  setRuntimeForTests(null); // default mode: not demo
+test("login and register: real fields and labels, but submit is disabled and says why; no fake success", async () => {
+  setRuntimeForTests(null); // default mode: not demo, no authentication
   for (const [Page, heading] of [[LoginPage, "Sign in"], [RegisterPage, "Create your account"]] as const) {
-    const out = html(<Page />);
+    const out = html(await Page());
     assert.ok(out.includes(heading)); assert.ok(out.includes("not available yet")); assert.ok(/<button type="submit" disabled/.test(out));
     assert.ok(out.includes('type="email"') && out.includes('type="password"') && out.includes("required"));
-    assert.ok(/<label>/.test(out));
+    assert.ok(/<label>/.test(out)); assert.ok(out.includes('action="#"')); assert.ok(!out.includes("/api/auth/"));
   }
-  assert.ok(html(<RegisterPage />).includes('autoComplete="new-password"') || html(<RegisterPage />).includes('autocomplete="new-password"'));
-  assert.ok(!html(<LoginPage />).includes("Demo mode is on"));
+  const register = html(await RegisterPage());
+  assert.ok(register.includes('autoComplete="new-password"') || register.includes('autocomplete="new-password"'));
+  assert.ok(!html(await LoginPage()).includes("Demo mode is on"));
 });

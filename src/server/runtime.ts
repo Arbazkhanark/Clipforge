@@ -6,17 +6,25 @@
 //   "demo" (CLIPFORGE_DEMO_MODE=true): an in-memory repository with clearly labelled SAMPLE data and one
 //                  built-in sample user. Data resets when the server restarts. For local development only.
 // A real mode (Prisma + PostgreSQL + real sessions) will be added when those can be installed and verified.
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { MediaServices, RequestContext } from "./context.ts";
 import { AppError } from "./errors.ts";
 import { MemoryRepository } from "./memory-repository.ts";
 import type { Repository } from "./repository.ts";
 import { DEMO_USER_ID, seedDemoData } from "./demo-data.ts";
+import { AuthService, DEFAULT_AUTH_CONFIG } from "./auth/auth-service.ts";
+import { MemoryAuthRepository } from "./auth/memory-auth-repository.ts";
+import { MemoryEmailOutbox } from "./auth/email.ts";
+import { InMemoryRateLimiter } from "./auth/rate-limiter.ts";
+import { readSessionToken } from "./auth/tokens.ts";
+import { readPageCookieHeader } from "./auth/page-cookies.ts";
+import type { ScryptParams } from "./auth/password.ts";
 import { LocalDiskMediaStorage } from "./storage/local-disk-storage.ts";
 import { detectProbe, detectThumbnailMaker } from "./storage/media-inspection.ts";
 import { MemoryMediaStorage } from "./storage/memory-storage.ts";
 
-export type RuntimeMode = "demo" | "unconfigured";
+export type RuntimeMode = "demo" | "unconfigured" | "local";
 
 export interface Runtime {
   mode: RuntimeMode;
@@ -27,6 +35,10 @@ export interface Runtime {
   now: () => Date;
   /** Upload services, or missing when uploads are unavailable (unconfigured mode). */
   media?: () => Promise<MediaServices | null>;
+  /** Present only when real authentication is available (local mode today). */
+  auth?: AuthService;
+  /** Local mode only: the "emails" that would have been sent (there is no email provider). */
+  outbox?: MemoryEmailOutbox;
 }
 
 /** Default technical cap for one upload while files are buffered in memory (development only). */
@@ -42,7 +54,7 @@ function unavailableRepository(): Repository {
 let testOverride: Runtime | null = null;
 export const setRuntimeForTests = (runtime: Runtime | null): void => { testOverride = runtime; };
 
-type GlobalWithDemo = typeof globalThis & { __clipforgeDemoRepo?: MemoryRepository; __clipforgeDemoMedia?: Promise<MediaServices> };
+type GlobalWithDemo = typeof globalThis & { __clipforgeDemoRepo?: MemoryRepository; __clipforgeDemoMedia?: Promise<MediaServices>; __clipforgeLocalRuntime?: Runtime };
 
 /**
  * Demo uploads go to server MEMORY by default. If CLIPFORGE_LOCAL_MEDIA_DIR is set they go to a private folder on disk
@@ -59,8 +71,29 @@ function demoMediaServices(): Promise<MediaServices> {
   return holder.__clipforgeDemoMedia;
 }
 
+/**
+ * LOCAL MODE (CLIPFORGE_LOCAL_AUTH=true): real registration, email confirmation, login and sessions - but everything lives in
+ * server MEMORY and disappears on restart, and "emails" go to an in-memory outbox (no email provider exists). Data starts empty.
+ * It exists so the real auth flow can be developed and tested without a database. It is not a production mode.
+ */
+export function createLocalRuntime(opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; media?: () => Promise<MediaServices | null> } = {}): Runtime {
+  const repo = new MemoryRepository(); const outbox = new MemoryEmailOutbox(); const now = opts.now ?? (() => new Date());
+  const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? "http://localhost:3000"), ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };
+  const auth = new AuthService({ repo: new MemoryAuthRepository(), email: outbox, limiter: new InMemoryRateLimiter(), now, newId: () => randomUUID(), config });
+  return {
+    mode: "local", repo, auth, outbox, now, newId: () => randomUUID(), media: opts.media ?? demoMediaServices,
+    // The cookie comes from the request when we have one (API routes); pages read it from Next.js's request headers.
+    currentUserId: async (request) => auth.getSessionUserId(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
+  };
+}
+
 export function getRuntime(): Runtime {
   if (testOverride) return testOverride;
+  if (process.env["CLIPFORGE_LOCAL_AUTH"] === "true" && process.env["NODE_ENV"] !== "production") {
+    const holder = globalThis as GlobalWithDemo;
+    holder.__clipforgeLocalRuntime ??= createLocalRuntime({ baseUrl: process.env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000" });
+    return holder.__clipforgeLocalRuntime;
+  }
   if (process.env["CLIPFORGE_DEMO_MODE"] === "true") {
     // Kept on globalThis so dev-server reloads do not recreate the sample data on every edit.
     const holder = globalThis as GlobalWithDemo;

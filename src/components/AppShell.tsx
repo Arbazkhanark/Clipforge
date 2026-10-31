@@ -11,6 +11,12 @@ export function AppShell({ mode, children }: { mode: RuntimeMode; children: Reac
         <ul>{LINKS.map(([href, label]) => <li key={href}><a href={href}>{label}</a></li>)}</ul>
       </nav>
       <div className="app-content">
+        {mode === "local" && (
+          <div role="note" className="notice" data-local-banner>
+            <p>Local development mode: accounts and data live in server memory and disappear when the server restarts. No email is sent (see <a href="/dev/outbox">the outbox</a>).</p>
+            <form method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
+          </div>
+        )}
         {mode === "demo" && (
           <p role="note" className="notice" data-demo-banner>
             Demo mode: you are using built-in SAMPLE data held in server memory. It resets when the server restarts. Nothing is uploaded, stored, or published,
