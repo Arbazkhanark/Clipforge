@@ -1,6 +1,8 @@
 // Private local-disk storage for DEVELOPMENT ONLY. Files live under one root folder that must be OUTSIDE
 // anything the web server serves (public/, .next/, app/). Nothing here is reachable by URL: the only way
 // to read a file is through authorised server code.
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
 import { chmod, link, lstat, mkdir, open, realpath, rm, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { InvalidStorageKeyError, parseStorageKey, type MediaStorage } from "./media-storage.ts";
@@ -59,5 +61,14 @@ export class LocalDiskMediaStorage implements MediaStorage {
 
   async discardStaged(stagingKey: string): Promise<void> { await rm(await this.resolveInside(stagingKey, false), { force: true }); }
   async exists(key: string): Promise<boolean> { return stat(await this.resolveInside(key, false)).then((s) => s.isFile(), () => false); }
+  async statSize(key: string): Promise<number | null> {
+    const target = await this.resolveInside(key, false);
+    const info = (await stat(target).then((i) => i, () => null)) as { isFile(): boolean; size: number } | null;
+    return info && info.isFile() ? info.size : null;
+  }
+  async openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>> {
+    const target = await this.resolveInside(key, false);
+    return Readable.toWeb(createReadStream(target, range ? { start: range.start, end: range.end } : {})) as unknown as ReadableStream<Uint8Array>;
+  }
   async deleteUnreferencedUpload(finalKey: string): Promise<void> { await rm(await this.resolveInside(finalKey, false), { force: true }); }
 }

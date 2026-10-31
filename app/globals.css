@@ -44,3 +44,6 @@ a:focus-visible, button:focus-visible, input:focus-visible { outline: 3px solid 
 .flash-error { border-color: #c0392b; }
 fieldset { margin: 1rem 0; border: 1px solid var(--border); border-radius: 0.5rem; }
 textarea, select { max-width: 100%; box-sizing: border-box; }
+.details { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+.details dt { color: var(--muted); } .details dd { margin: 0; }
+video, img { max-width: 100%; height: auto; }

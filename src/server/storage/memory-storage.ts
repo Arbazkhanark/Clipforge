@@ -35,5 +35,13 @@ export class MemoryMediaStorage implements MediaStorage {
 
   async discardStaged(stagingKey: string): Promise<void> { parseStorageKey(stagingKey); this.staged.delete(stagingKey); }
   async exists(key: string): Promise<boolean> { parseStorageKey(key); return this.objects.has(key); }
+  async statSize(key: string): Promise<number | null> { parseStorageKey(key); return this.objects.get(key)?.length ?? null; }
+  async openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>> {
+    parseStorageKey(key);
+    const bytes = this.objects.get(key);
+    if (!bytes) throw new Error("No such object.");
+    const slice = range ? bytes.slice(range.start, range.end + 1) : bytes.slice();
+    return new Response(slice).body as ReadableStream<Uint8Array>;
+  }
   async deleteUnreferencedUpload(finalKey: string): Promise<void> { parseStorageKey(finalKey); this.objects.delete(finalKey); }
 }

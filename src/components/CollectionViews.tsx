@@ -1,4 +1,5 @@
 import type { CollectionCard, CollectionDetail } from "../server/queries.ts";
+import { Thumbnail } from "./MediaTable.tsx";
 import { CAPABILITY_LABELS, VISIBILITY_LABELS, formatCount, formatDuration, formatStorage } from "./format.ts";
 
 function CollectionList({ collections, emptyText }: { collections: CollectionCard[]; emptyText: string }) {
@@ -69,8 +70,8 @@ export function CollectionDetailView({ detail }: { detail: CollectionDetail }) {
         <h2 id="videos-heading">Videos</h2>
         {videos.length === 0 ? <p>This collection has no videos.</p> : (
           <div className="table-scroll"><table className="data-table"><caption>Videos in this collection</caption>
-            <thead><tr><th scope="col">Title</th><th scope="col">Length</th><th scope="col">Size</th></tr></thead>
-            <tbody>{videos.map((v) => <tr key={v.id}><td>{v.title}</td><td>{formatDuration(v.durationMs)}</td><td>{formatStorage(v.sizeBytes)}</td></tr>)}</tbody></table></div>
+            <thead><tr><th scope="col">Preview</th><th scope="col">Title</th><th scope="col">Length</th><th scope="col">Size</th></tr></thead>
+            <tbody>{videos.map((v) => <tr key={v.id}><td><Thumbnail media={v} /></td><td>{v.title}</td><td>{formatDuration(v.durationMs)}</td><td>{formatStorage(v.sizeBytes)}</td></tr>)}</tbody></table></div>
         )}
       </section>
     </>

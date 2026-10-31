@@ -17,7 +17,7 @@ export function uploadRoute(runtime: () => Runtime = getRuntime): (request: Requ
     if (crossSite) return new Response("Cross-site requests are not allowed.", { status: 403, headers: { "Cache-Control": "no-store" } });
     try {
       if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("multipart/form-data")) throw new AppError(415, "unsupported_media_type", "Send the upload as multipart/form-data.");
-      const ctx = await buildContext(runtime());
+      const ctx = await buildContext(runtime(), request);
       const maxBytes = ctx.media?.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES;
       // Without a declared length we would have to buffer an unknown amount, so refuse.
       const declaredLength = request.headers.get("content-length");

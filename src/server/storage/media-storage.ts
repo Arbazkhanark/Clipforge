@@ -23,6 +23,10 @@ export interface MediaStorage {
   /** Remove a staged object (it never became media). Missing is fine. */
   discardStaged(stagingKey: string): Promise<void>;
   exists(key: string): Promise<boolean>;
+  /** Size in bytes of a committed object, or null if it does not exist. */
+  statSize(key: string): Promise<number | null>;
+  /** Streams a committed object (optionally just bytes start..end inclusive). For server use only: never hand a path or key to a browser. */
+  openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>>;
   /**
    * Remove an object that was committed moments ago by a FAILED upload and has no database record.
    * Never call this for media that has a record.
@@ -48,6 +52,7 @@ export function parseStorageKey(key: string): string[] {
 function assertSingleSegment(id: string): void { if (typeof id !== "string" || !SEGMENT.test(id)) throw new InvalidStorageKeyError(); }
 
 export const mediaKeyFor = (ownerId: string, mediaId: string): string => { assertSingleSegment(ownerId); assertSingleSegment(mediaId); return `media/${ownerId}/${mediaId}`; };
+export const thumbnailKeyFor = (ownerId: string, mediaId: string): string => { assertSingleSegment(ownerId); assertSingleSegment(mediaId); return `thumb/${ownerId}/${mediaId}`; };
 export const stagingKeyFor = (mediaId: string): string => { assertSingleSegment(mediaId); return `staging/${mediaId}`; };
 
 export interface StorageDescription { label: string; persistent: boolean; warning: string; }

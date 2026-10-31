@@ -13,8 +13,8 @@ import { describeStorage, type StorageDescription } from "./storage/media-storag
 import { buildPreflightReport } from "./preflight-service.ts";
 import type { CycleRecord } from "./repository.ts";
 
-export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; /** "incomplete" = accepted by file signature only. */ validation: "verified" | "incomplete" | "unknown"; }
-const toMediaCard = (m: MediaAsset): MediaCard => ({ id: m.id, title: m.title ?? "Untitled", kind: m.kind ?? "video", sizeBytes: m.sizeBytes, durationMs: m.durationMs ?? null, status: m.status, validation: m.validation ?? "unknown" });
+export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; /** "incomplete" = accepted by file signature only. */ validation: "verified" | "incomplete" | "unknown"; hasThumbnail: boolean; width: number | null; height: number | null; }
+const toMediaCard = (m: MediaAsset): MediaCard => ({ id: m.id, title: m.title ?? "Untitled", kind: m.kind ?? "video", sizeBytes: m.sizeBytes, durationMs: m.durationMs ?? null, status: m.status, validation: m.validation ?? "unknown", hasThumbnail: m.hasThumbnail === true, width: m.width ?? null, height: m.height ?? null });
 
 export interface UsageLine { used: number; limit: number; }
 export interface DashboardData {
@@ -138,4 +138,14 @@ export async function getCycleCreationOptions(ctx: RequestContext): Promise<{ ac
   const userId = requireUser(ctx);
   const accounts = await ctx.repo.listSocialAccountsForOwner(userId);
   return { accounts: accounts.filter((a) => a.status === "connected").map((a, index) => ({ id: a.id, label: `Connected account ${index + 1}` })) };
+}
+
+export interface MediaDetail { media: MediaCard; mimeType: string | null; addedAt: Date | null; }
+
+/** Details of ONE of your own files. Someone else's file looks exactly like a missing one. */
+export async function getMediaDetail(ctx: RequestContext, mediaId: string): Promise<MediaDetail> {
+  const userId = requireUser(ctx);
+  const media = await ctx.repo.getMedia(mediaId);
+  if (!media || media.ownerId !== userId || media.status === "deleted") throw notFound("File");
+  return { media: toMediaCard(media), mimeType: media.mimeType ?? null, addedAt: media.createdAt ?? null };
 }

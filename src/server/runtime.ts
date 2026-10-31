@@ -13,7 +13,7 @@ import { MemoryRepository } from "./memory-repository.ts";
 import type { Repository } from "./repository.ts";
 import { DEMO_USER_ID, seedDemoData } from "./demo-data.ts";
 import { LocalDiskMediaStorage } from "./storage/local-disk-storage.ts";
-import { detectProbe } from "./storage/media-inspection.ts";
+import { detectProbe, detectThumbnailMaker } from "./storage/media-inspection.ts";
 import { MemoryMediaStorage } from "./storage/memory-storage.ts";
 
 export type RuntimeMode = "demo" | "unconfigured";
@@ -22,7 +22,7 @@ export interface Runtime {
   mode: RuntimeMode;
   repo: Repository;
   /** Returns the signed-in user's id, or null. Demo mode has one fixed sample user. */
-  currentUserId: () => Promise<string | null>;
+  currentUserId: (request?: Request) => Promise<string | null>;
   newId: () => string;
   now: () => Date;
   /** Upload services, or missing when uploads are unavailable (unconfigured mode). */
@@ -54,7 +54,7 @@ function demoMediaServices(): Promise<MediaServices> {
     const dir = process.env["CLIPFORGE_LOCAL_MEDIA_DIR"];
     const storage = dir ? await LocalDiskMediaStorage.create(path.resolve(dir)) : new MemoryMediaStorage();
     const configuredMb = Number(process.env["CLIPFORGE_MAX_UPLOAD_MB"]);
-    return { storage, probe: await detectProbe(), maxUploadBytes: Number.isFinite(configuredMb) && configuredMb > 0 ? configuredMb * 1024 * 1024 : DEFAULT_MAX_UPLOAD_BYTES };
+    return { storage, probe: await detectProbe(), thumbnail: await detectThumbnailMaker(), maxUploadBytes: Number.isFinite(configuredMb) && configuredMb > 0 ? configuredMb * 1024 * 1024 : DEFAULT_MAX_UPLOAD_BYTES };
   })();
   return holder.__clipforgeDemoMedia;
 }
@@ -71,9 +71,9 @@ export function getRuntime(): Runtime {
   return { mode: "unconfigured", repo: unavailableRepository(), currentUserId: async () => null, newId: () => { throw new AppError(503, "not_configured", "Not configured."); }, now: () => new Date() };
 }
 
-export async function buildContext(runtime: Runtime = getRuntime()): Promise<RequestContext> {
+export async function buildContext(runtime: Runtime = getRuntime(), request?: Request): Promise<RequestContext> {
   return {
-    userId: await runtime.currentUserId(), now: runtime.now(), repo: runtime.repo, newId: runtime.newId,
+    userId: await runtime.currentUserId(request), now: runtime.now(), repo: runtime.repo, newId: runtime.newId,
     // Whether Instagram accepts the cover is unverified in detail, so we say "unknown" until the publisher confirms.
     config: { coverSupport: "unknown" },
     ...(runtime.media ? await (async () => { const media = await runtime.media!(); return media ? { media } : {}; })() : {}),

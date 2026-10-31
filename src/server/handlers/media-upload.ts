@@ -9,8 +9,8 @@ import { getPlan } from "../../lib/billing/catalog.ts";
 import type { MediaAsset } from "../../lib/domain/types.ts";
 import { requireUser, type RequestContext } from "../context.ts";
 import { AppError, fileTooLarge, invalidMedia, planLimit, unsupportedMediaType, validationFailed } from "../errors.ts";
-import { declaredMimeAgrees, sanitizeFilename, sniffMedia } from "../storage/media-inspection.ts";
-import { mediaKeyFor, stagingKeyFor } from "../storage/media-storage.ts";
+import { CANONICAL_MIME, declaredMimeAgrees, sanitizeFilename, sniffMedia } from "../storage/media-inspection.ts";
+import { mediaKeyFor, stagingKeyFor, thumbnailKeyFor } from "../storage/media-storage.ts";
 
 export interface UploadInput { filename: unknown; declaredMimeType: unknown; data: unknown; }
 
@@ -24,12 +24,14 @@ export interface UploadResult {
   /** Set when validation is incomplete, in words the user can read. */
   warning: string | null;
   storage: "memory" | "local-disk" | "s3";
+  hasThumbnail: boolean;
 }
 
 export async function uploadMedia(ctx: RequestContext, input: UploadInput): Promise<UploadResult> {
   const userId = requireUser(ctx);
   if (!ctx.media) throw new AppError(503, "storage_not_configured", "Uploads are not available: no storage is configured.");
   const { storage, probe, maxUploadBytes } = ctx.media;
+  const makeThumbnail = ctx.media.thumbnail ?? null;
 
   // 1. Input shape
   const problems: string[] = [];
@@ -60,7 +62,10 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
   const mediaId = ctx.newId();
   const stagingKey = stagingKeyFor(mediaId);
   const finalKey = mediaKeyFor(userId, mediaId);
+  const thumbStagingKey = stagingKeyFor(`${mediaId}-thumb`);
+  const thumbFinalKey = thumbnailKeyFor(userId, mediaId);
   let committed = false;
+  let thumbCommitted = false;
   let metadata: { width: number | null; height: number | null; durationMs: number | null; validation: "verified" | "incomplete" };
   try {
     await storage.stage(stagingKey, data);
@@ -77,25 +82,36 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
       metadata = { width: probed.width, height: probed.height, durationMs: sniffed.kind === "video" ? Math.round(probed.durationSeconds * 1000) : null, validation: "verified" };
     }
 
+    // A small preview image. Failure here is NOT fatal: the upload simply has no thumbnail.
+    let hasThumbnail = false;
+    if (makeThumbnail) {
+      const jpeg = await storage.runWithStagedFile(stagingKey, (file) => makeThumbnail(file, metadata.durationMs === null ? null : metadata.durationMs / 1000)).catch(() => null);
+      if (jpeg && jpeg.length > 0) { await storage.stage(thumbStagingKey, jpeg); hasThumbnail = true; }
+    }
+
     await storage.commit(stagingKey, finalKey);
     committed = true;
+    if (hasThumbnail) { await storage.commit(thumbStagingKey, thumbFinalKey); thumbCommitted = true; }
 
     // 6. Record it, atomically within the quota (two simultaneous uploads cannot both squeeze in).
     const title = sanitizeFilename(input.filename as string);
     const media: MediaAsset = {
       id: mediaId, ownerId: userId, status: "active", sizeBytes: data.length, deleteAfter: null, title, kind: sniffed.kind,
       durationMs: metadata.durationMs, createdAt: ctx.now, width: metadata.width, height: metadata.height, validation: metadata.validation,
+      mimeType: CANONICAL_MIME[sniffed.type], hasThumbnail,
     };
-    if (!(await ctx.repo.addMediaIfStorageWithin(media, { storageKey: finalKey, thumbnailKey: null }, limitBytes))) throw planLimit(quotaMessage);
+    if (!(await ctx.repo.addMediaIfStorageWithin(media, { storageKey: finalKey, thumbnailKey: hasThumbnail ? thumbFinalKey : null }, limitBytes))) throw planLimit(quotaMessage);
 
     await ctx.repo.appendAudit({ actorId: userId, action: "media.uploaded", entityType: "MediaAsset", entityId: mediaId, metadata: { sizeBytes: data.length, kind: sniffed.kind, validation: metadata.validation } });
     return {
-      mediaId, title, kind: sniffed.kind, sizeBytes: data.length, durationMs: metadata.durationMs, validation: metadata.validation, storage: storage.kind,
+      mediaId, title, kind: sniffed.kind, sizeBytes: data.length, durationMs: metadata.durationMs, validation: metadata.validation, storage: storage.kind, hasThumbnail,
       warning: metadata.validation === "incomplete" ? "The file was accepted by its file signature only. Its length and size could not be checked because ffprobe is not installed on this server." : null,
     };
   } catch (error) {
     // Cleanup of THIS upload only. Best effort: a cleanup problem must never hide the real error.
     await storage.discardStaged(stagingKey).catch(() => undefined);
+    await storage.discardStaged(thumbStagingKey).catch(() => undefined);
+    if (thumbCommitted) await storage.deleteUnreferencedUpload(thumbFinalKey).catch(() => undefined);
     if (committed) await storage.deleteUnreferencedUpload(finalKey).catch(() => undefined);
     throw error;
   }

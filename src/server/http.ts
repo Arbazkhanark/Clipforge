@@ -43,7 +43,7 @@ export function jsonRoute(handler: (ctx: RequestContext, body: unknown) => Promi
       const crossSite = checkSameOrigin(request);
       if (crossSite) throw crossSite;
       const body = await readJsonBody(request);
-      const ctx = await buildContext(runtime());
+      const ctx = await buildContext(runtime(), request);
       return jsonResponse(await handler(ctx, body), 200);
     } catch (error) {
       const result = toHttpResult(error);

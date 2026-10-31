@@ -45,7 +45,7 @@ export function formRoute<R>(spec: FormSpec<R>, runtime: () => Runtime = getRunt
     let fields: FormFields = { get: () => null, getAll: () => [], entries: () => [] };
     try {
       fields = await readUrlEncoded(request);
-      const ctx = await buildContext(runtime());
+      const ctx = await buildContext(runtime(), request);
       const result = await spec.handler(ctx, spec.toInput(fields));
       const target = spec.success(result, fields);
       return redirectResponse(buildFlashLocation(target.path, "notice", target.code, target.counts));
