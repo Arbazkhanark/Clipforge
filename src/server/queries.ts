@@ -10,6 +10,8 @@ import type { PreflightReport } from "../lib/domain/preflight.ts";
 import { requireUser, type RequestContext } from "./context.ts";
 import { notFound, validationFailed } from "./errors.ts";
 import { describeStorage, type StorageDescription } from "./storage/media-storage.ts";
+import { computePreviewLayout, parseEditorQuery, type EditingSettings, type PreviewLayout } from "../lib/domain/editing-settings.ts";
+import type { MaxResolution } from "../lib/render/ffmpeg-command.ts";
 import { buildPreflightReport } from "./preflight-service.ts";
 import type { CycleRecord } from "./repository.ts";
 
@@ -148,4 +150,53 @@ export async function getMediaDetail(ctx: RequestContext, mediaId: string): Prom
   const media = await ctx.repo.getMedia(mediaId);
   if (!media || media.ownerId !== userId || media.status === "deleted") throw notFound("File");
   return { media: toMediaCard(media), mimeType: media.mimeType ?? null, addedAt: media.createdAt ?? null };
+}
+
+export interface TemplateCard { id: string; name: string; summary: string; }
+export interface EditorPageData {
+  /** The video being edited, or null (then the page lets you choose one). */
+  source: MediaCard | null;
+  videoChoices: MediaCard[];
+  logoChoices: MediaCard[];
+  settings: EditingSettings;
+  problems: string[];
+  layout: PreviewLayout | null;
+  /** true when the file's real size is unknown, so the sketch assumes a 16:9 picture. */
+  assumedSourceSize: boolean;
+  templates: TemplateCard[];
+  templateLimit: number;
+  maxResolution: MaxResolution;
+  logoAspect: number;
+}
+
+const describeSettings = (s: EditingSettings): string =>
+  `${s.aspect}, ${s.background.kind === "solid" ? `solid ${s.background.colorHex}` : "blurred background"}, zoom ${s.zoom}${s.border.thicknessPx > 0 ? `, ${s.border.thicknessPx}px border` : ""}${s.logo ? ", logo" : ""}`;
+
+/**
+ * Everything the editor page shows. The video must be YOURS (someone else's looks like a missing one).
+ * Settings come from the page's query string and are checked with the same rules as the renderer; bad values are
+ * reported and the defaults are used instead. Nothing here changes any media.
+ */
+export async function getEditorPageData(ctx: RequestContext, input: { mediaId: string | undefined; search: Record<string, string | string[] | undefined> | undefined }): Promise<EditorPageData> {
+  const userId = requireUser(ctx);
+  const planId = await ctx.repo.getPlanIdForUser(userId);
+  const plan = getPlan(planId);
+  const [templates, videos, images] = await Promise.all([ctx.repo.listTemplatesForOwner(userId), ctx.repo.listMediaForOwner(userId, { limit: 12, offset: 0, kind: "video" }), ctx.repo.listMediaForOwner(userId, { limit: 50, offset: 0, kind: "image" })]);
+  const common = { videoChoices: videos.items.map(toMediaCard), logoChoices: images.items.map(toMediaCard), templates: templates.map((t) => ({ id: t.id, name: t.name, summary: describeSettings(t.settings) })), templateLimit: plan.limits.templates, maxResolution: plan.features.maxResolution };
+  if (!input.mediaId) return { ...common, source: null, settings: parseEditorQuery(undefined).settings, problems: [], layout: null, assumedSourceSize: false, logoAspect: 1 };
+
+  const media = await ctx.repo.getMedia(input.mediaId);
+  if (!media || media.ownerId !== userId || media.status === "deleted" || (media.kind ?? "video") !== "video") throw notFound("Video");
+
+  const parsed = parseEditorQuery(input.search);
+  let { settings } = parsed; const problems = [...parsed.problems];
+  let logoAspect = 1;
+  if (settings.logo) {
+    const logo = images.items.find((m) => m.id === settings.logo!.mediaId);
+    if (!logo) { problems.push("The logo must be one of your own images; it was removed from the preview."); settings = { ...settings, logo: null }; }
+    else if (logo.width && logo.height) logoAspect = logo.width / logo.height;
+  }
+  const assumedSourceSize = !(media.width && media.height);
+  const layout = computePreviewLayout(settings, { width: media.width ?? 1920, height: media.height ?? 1080 }, logoAspect, plan.features.maxResolution);
+  return { ...common, source: toMediaCard(media), settings, problems, layout, assumedSourceSize, logoAspect };
 }

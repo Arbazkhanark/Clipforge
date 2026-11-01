@@ -3,33 +3,37 @@
 Legend: ✅ done & tested · 🟡 partial · ⬜ not started
 
 ## Current honest status
-**Exists and is tested here (all against in-memory sample data and private local/memory storage):** business rules; server request layer;
-safe read queries; Web-standard JSON API routes; **plain HTML form routes** (no client JavaScript) that run the same tested handlers and
-redirect with whitelisted flash messages; **a real upload workflow** (private local-disk or memory storage, file-signature sniffing, ffprobe
-validation, plan storage quota, safe names, cleanup of failed uploads); Next.js App Router screens (dashboard, media library with upload,
-collections with add-to-cycle form, publishing cycles with create/edit/start forms, login/register, pricing) rendered to HTML in tests;
-FFmpeg rendering pipeline (really run); Razorpay/Instagram/Prisma-7 rules checked against official docs.
-**Does NOT exist / never run:** Next.js itself (so no `next build`, no browser, no hydration), Prisma CLI/client, PostgreSQL, S3 (no AWS
-resources exist), real sign-in, persistent records, job queue/worker, any real Razorpay or Instagram call, any deployment.
+**Exists and is tested here:** business rules; server request layer; safe read queries; JSON + HTML-form routes with CSRF checks;
+upload workflow (private storage, real file-signature checks, ffprobe, quota, thumbnails); **owner-authorized media preview/download
+(access re-checked on every request)**; **real authentication logic** (scrypt hashing, hashed session/email/reset tokens, secure cookies,
+rate limiting, enumeration-safe flows) wired into a **local mode**; **PrismaRepository + PrismaAuthRepository** (logic tested through shared
+contract suites over a FAKE Prisma client); **editor UI** (aspect ratio, background, zoom, position, border, logo) that saves settings as
+templates separate from media, with layout geometry proven against real FFmpeg output; Next.js App Router screens rendered to HTML in tests.
+**Does NOT exist / never run:** Next.js itself (no `next build`, no browser, no hydration), the Prisma CLI/client and any real
+PostgreSQL (so the Prisma repositories have NEVER run against a database and `prisma validate`/migrations have never run), S3 (no AWS
+resources exist), email delivery, Google sign-in, job queue/worker, video rendering from the editor, any real Razorpay or Instagram call.
 **Not runnable-verified, not deployed, not production-ready.**
 
-## Modes and storage (kept visibly separate in the UI)
-- default ("unconfigured"): nobody is signed in; data pages say "Sign in required"; APIs answer 401/503; **uploads unavailable**.
-- `CLIPFORGE_DEMO_MODE=true`: sample data in memory; uploads go to **server memory** ("Demo storage", discarded on restart).
-- demo + `CLIPFORGE_LOCAL_MEDIA_DIR=<folder>`: uploaded **files** are saved on disk in a private folder (mode 0700/0600, refused inside
-  public/.next/app); the **list of files is still in memory** and is lost on restart until the database exists. Development only.
-- S3: not connected; the UI says so. Nothing in the repo calls AWS.
+## Modes
+| Mode | How | Auth | Data | Uploads |
+|---|---|---|---|---|
+| unconfigured (default) | nothing set | none: sign-in forms disabled, APIs answer 401/503 | none | unavailable |
+| demo | `CLIPFORGE_DEMO_MODE=true` | fixed sample user, banner | sample data, memory | memory (or local disk) |
+| local | `CLIPFORGE_LOCAL_AUTH=true` (refused when `NODE_ENV=production`) | REAL register/confirm/login/logout/reset; memory only | empty, memory | memory (or local disk) |
+| database | **not built**: needs Prisma + PostgreSQL | | | |
+In local mode the confirmation/reset "emails" are only visible on `/dev/outbox` (no email provider exists).
 
 ## Stages
 | Stage | What | Status |
 |---|---|---|
-| Storage + upload | `MediaStorage` interface, memory + local-disk adapters, upload handler, upload route/form | ✅ tested (incl. real ffprobe/ffmpeg files). **Limits:** whole file buffered in memory (200 MB default cap, `CLIPFORGE_MAX_UPLOAD_MB`); no download/preview route; records not persisted |
-| Media validation | signature sniff + MIME agreement + ffprobe | ✅ when ffprobe exists; otherwise accepted by signature only and **marked "incomplete"** (never "verified") |
-| Forms wired to API | upload, create cycle, start, bulk caption, bulk cover, remove (unmix), add videos (mix) | ✅ routes + rendered forms tested together (incl. an end-to-end read-form-fields-then-post test). **Not browser-tested** |
-| Sharing UI | grants/revoke | ⬜ routes exist; no screen (no way to look up another user until accounts exist) |
+| Persistence | PrismaRepository, PrismaAuthRepository, mappers, contract suites | 🟡 written + logic-tested over a fake client; **never run on real Prisma/PostgreSQL**; no DB runtime mode, no `src/server/db.ts` wiring beyond an unverified `create-client.ts` |
+| Authentication | password hashing, sessions, verification, reset, routes, pages | 🟡 logic and routes verified in local (memory) mode; pages read the cookie via `next/headers` (**unverified under Next.js**); Google sign-in and real email NOT built; rate limiting is per email, in memory |
+| Media preview/download | `/api/media/file` (thumbnail, preview, download), ranges, headers | ✅ tested; originals only for the owner or someone given `download`; thumbnails for anyone who can see the item |
+| Thumbnails & metadata | ffmpeg JPEG at upload, detail page | ✅ tested with real ffmpeg; not counted toward storage quota |
+| Editor | settings, validation, sketch preview, templates (plan limit), save form | 🟡 UI + persistence tested; **no rendering from the editor**; logo drag is an unverified client enhancement (sliders work without JavaScript); templates cannot yet be applied to cycle items |
+| Upload / forms / sharing / cycles | see earlier | ✅/🟡 as before (read-only sharing screens; no grants UI) |
 | Remaining handlers (access requests, import, owner deletion, pause/resume/stop) | | ⬜ postponed |
-| Login / register | | 🟡 forms with submit disabled (no authentication) |
-| Auth, DB persistence, Prisma repository, S3 adapter, worker, editor UI, scheduling UI, checkout, Instagram | | ⬜ blocked/not started |
+| Worker/queue, S3 adapter, Razorpay checkout/webhook endpoints, Instagram OAuth/publishing | | ⬜ not started |
 
 ## Fixed prices (INR, stored as integer paise)
 | Plan | Weekly | Monthly |
@@ -89,3 +93,8 @@ resources exist), real sign-in, persistent records, job queue/worker, any real R
 - Uploaded videos are not re-encoded or scanned for malware; ffprobe only confirms the file decodes as media. Instagram's own video requirements remain unverified.
 - Form flows use full-page redirects (POST -> 303). No double-submit protection yet (a refresh after a redirect is safe; resubmitting a form twice creates two actions).
 - Upload size is checked from the declared Content-Length before reading, and again on the bytes; a client that lies about length is still bounded by the multipart parser's buffering in Node (dev only).
+- Password hashing: scrypt N=2^17, r=8, p=1 is from memory of OWASP guidance (unverified); Argon2id is generally preferred but needs a package.
+- Rate limiting ignores IP addresses (X-Forwarded-For is spoofable without a trusted proxy) and resets on restart; a real deployment needs a shared store.
+- New accounts must confirm their email before signing in; resend/forgot flows never reveal whether an email exists.
+- Thumbnails are not counted toward the storage quota; originals are.
+- Nothing has been verified under a real browser: forms, the editor, video playback, and the logo-drag enhancement are untested in one.

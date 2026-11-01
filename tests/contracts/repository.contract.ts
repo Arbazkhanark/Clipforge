@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Repository, CycleRecord, SocialAccountRecord } from "../../src/server/repository.ts";
 import type { PlanId } from "../../src/lib/billing/catalog.ts";
+import { DEFAULT_EDITING_SETTINGS } from "../../src/lib/domain/editing-settings.ts";
 import type { CollectionPermissionGrant, CycleItem, MediaAsset, VideoCollection } from "../../src/lib/domain/types.ts";
 
 export interface RepoHarness {
@@ -150,6 +151,22 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     await h.seedSocialAccount({ id: "a1", userId: "bob", status: "connected" }); await h.seedSocialAccount({ id: "a2", userId: "bob", status: "token_expired" }); await h.seedSocialAccount({ id: "a3", userId: "eve", status: "connected" });
     assert.deepEqual(await h.repo.getSocialAccount("a2"), { id: "a2", userId: "bob", status: "token_expired" }); assert.equal(await h.repo.getSocialAccount("nope"), null);
     assert.deepEqual(ids(await h.repo.listSocialAccountsForOwner("bob")), ["a1", "a2"]);
+  });
+
+  t("editing templates: stored per owner, newest first, JSON settings round-trip, and the plan limit is enforced atomically", async (h) => {
+    const tpl = (id: string, ownerId: string, minutes: number) => ({ id, ownerId, name: `T ${id}`, settings: { ...DEFAULT_EDITING_SETTINGS, zoom: 1.5, logo: { mediaId: "logo1", widthFraction: 0.2, centerX: 0.8, centerY: 0.1, opacity: 1 } }, createdAt: new Date(T0.getTime() + minutes * 60_000) });
+    assert.equal(await h.repo.createTemplateIfWithinLimit(tpl("a", "bob", 1), 2), true); assert.equal(await h.repo.createTemplateIfWithinLimit(tpl("b", "bob", 2), 2), true);
+    assert.equal(await h.repo.createTemplateIfWithinLimit(tpl("c", "bob", 3), 2), false);                       // at the limit: refused, nothing stored
+    assert.equal(await h.repo.createTemplateIfWithinLimit(tpl("d", "eve", 4), 2), true);                        // other owners are separate
+    const mine = await h.repo.listTemplatesForOwner("bob"); assert.deepEqual(mine.map((x) => x.id), ["b", "a"]);
+    assert.deepEqual(mine[0]!.settings, tpl("b", "bob", 2).settings); assert.equal(mine[0]!.name, "T b");
+    assert.deepEqual(await h.repo.listTemplatesForOwner("nobody"), []);
+  });
+
+  t("editing templates RACE: simultaneous saves beyond the limit - only the allowed number succeed", async (h) => {
+    const tpl = (n: number) => ({ id: `r${n}`, ownerId: "bob", name: `R${n}`, settings: DEFAULT_EDITING_SETTINGS, createdAt: new Date(T0.getTime() + n * 1000) });
+    const results = await Promise.all([1, 2, 3, 4, 5].map((n) => h.repo.createTemplateIfWithinLimit(tpl(n), 3)));
+    assert.equal(results.filter(Boolean).length, 3); assert.equal((await h.repo.listTemplatesForOwner("bob")).length, 3);
   });
 
   t("audit and caption revisions are appended", async (h) => {

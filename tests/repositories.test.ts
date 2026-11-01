@@ -7,6 +7,7 @@ import { cycleToRow, grantToRow, itemToMutableData, itemToRow, mediaToRow, rowTo
 import { FakePrismaClient } from "./helpers/fake-prisma.ts";
 import { runRepositoryContract, type RepoHarness } from "./contracts/repository.contract.ts";
 import { runAuthRepositoryContract } from "./contracts/auth-repository.contract.ts";
+import { DEFAULT_EDITING_SETTINGS } from "../src/lib/domain/editing-settings.ts";
 import { makeItem, makeMedia } from "./helpers.ts";
 
 function memoryHarness(): RepoHarness {
@@ -68,6 +69,15 @@ test("the quota insert takes a lock inside ONE transaction before it counts (so 
   wrapped.$transaction = async (work) => { calls.push("begin"); const r = await client.$transaction(async (tx) => work(Object.assign(Object.create(tx), { $queryRaw: async (s: TemplateStringsArray) => { calls.push(`lock:${s.join("?").includes("FOR UPDATE")}`); return []; } }))); calls.push("end"); return r; };
   const repo = new PrismaRepository(wrapped);
   assert.equal(await repo.addMediaIfStorageWithin(makeMedia({ id: "m1", ownerId: "bob", sizeBytes: 10 }), { storageKey: "k", thumbnailKey: null }, 100), true);
+  assert.deepEqual(calls, ["begin", "lock:true", "end"]);
+});
+
+test("the template-limit insert also takes the user-row lock inside ONE transaction before it counts", async () => {
+  const client = new FakePrismaClient(); const calls: string[] = [];
+  const wrapped = Object.create(client) as FakePrismaClient;
+  wrapped.$transaction = async (work) => { calls.push("begin"); const r = await client.$transaction(async (tx) => work(Object.assign(Object.create(tx), { $queryRaw: async (s: TemplateStringsArray) => { calls.push(`lock:${s.join("?").includes("FOR UPDATE")}`); return []; } }))); calls.push("end"); return r; };
+  const repo = new PrismaRepository(wrapped);
+  assert.equal(await repo.createTemplateIfWithinLimit({ id: "t1", ownerId: "bob", name: "N", settings: DEFAULT_EDITING_SETTINGS, createdAt: new Date() }, 3), true);
   assert.deepEqual(calls, ["begin", "lock:true", "end"]);
 });
 

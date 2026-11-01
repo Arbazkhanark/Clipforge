@@ -14,7 +14,7 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** Returns the value only if it is a safe id; otherwise null. */
 export const safeId = (value: string | null): string | null => (value !== null && ID.test(value) ? value : null);
 
-export interface Redirect { path: string; code: string; counts?: Parameters<typeof buildFlashLocation>[3]; }
+export interface Redirect { path: string; code: string; counts?: Parameters<typeof buildFlashLocation>[3]; extra?: Parameters<typeof buildFlashLocation>[4]; }
 
 export interface FormSpec<R> {
   handler: (ctx: RequestContext, input: unknown) => Promise<R>;
@@ -22,6 +22,8 @@ export interface FormSpec<R> {
   success: (result: R, fields: FormFields) => Redirect;
   /** Where to send the user when it fails (same page, with an error code). */
   failurePath: (fields: FormFields) => string;
+  /** Extra safe query values (such as the media id) to keep on the failure redirect. */
+  failureExtra?: (fields: FormFields) => Parameters<typeof buildFlashLocation>[4];
 }
 
 export function redirectResponse(location: string): Response {
@@ -48,9 +50,9 @@ export function formRoute<R>(spec: FormSpec<R>, runtime: () => Runtime = getRunt
       const ctx = await buildContext(runtime(), request);
       const result = await spec.handler(ctx, spec.toInput(fields));
       const target = spec.success(result, fields);
-      return redirectResponse(buildFlashLocation(target.path, "notice", target.code, target.counts));
+      return redirectResponse(buildFlashLocation(target.path, "notice", target.code, target.counts, target.extra));
     } catch (error) {
-      return redirectResponse(buildFlashLocation(spec.failurePath(fields), "error", flashCodeForError(error)));
+      return redirectResponse(buildFlashLocation(spec.failurePath(fields), "error", flashCodeForError(error), {}, spec.failureExtra?.(fields)));
     }
   };
 }

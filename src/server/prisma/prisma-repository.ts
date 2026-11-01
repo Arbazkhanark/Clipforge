@@ -9,7 +9,7 @@ import { effectivePlanId, type SubscriptionState } from "../../lib/billing/subsc
 import type { PlanId } from "../../lib/billing/catalog.ts";
 import type { CaptionRevision } from "../../lib/domain/caption-cover-updates.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../../lib/domain/types.ts";
-import type { AuditEntry, CycleRecord, Repository, SocialAccountRecord } from "../repository.ts";
+import type { AuditEntry, CycleRecord, EditingTemplateRecord, Repository, SocialAccountRecord } from "../repository.ts";
 import { cycleToRow, grantToRow, itemToMutableData, itemToRow, mediaToRow, rowToCollection, rowToCycle, rowToGrant, rowToItem, rowToMedia, rowToSocialAccount } from "./mappers.ts";
 import type { PrismaClientLike } from "./prisma-client-like.ts";
 
@@ -123,6 +123,19 @@ export class PrismaRepository implements Repository {
     if (cycleIds.length === 0) return [];
     const items = await this.db.cycleItem.findMany({ where: { cycleId: { in: cycleIds }, status: "published", scheduledFor: { gte: since } } });
     return items.map((i) => i["scheduledFor"] as Date);
+  }
+
+  async listTemplatesForOwner(userId: string): Promise<EditingTemplateRecord[]> {
+    const rows = await this.db.editingTemplate.findMany({ where: { ownerId: userId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] });
+    return rows.map((r) => ({ id: r["id"], ownerId: r["ownerId"], name: r["name"], settings: r["settings"], createdAt: r["createdAt"] }));
+  }
+  async createTemplateIfWithinLimit(template: EditingTemplateRecord, limit: number): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${template.ownerId} FOR UPDATE`; // serialise this user's saves
+      if ((await tx.editingTemplate.count({ where: { ownerId: template.ownerId } })) + 1 > limit) return false;
+      await tx.editingTemplate.create({ data: { id: template.id, ownerId: template.ownerId, name: template.name, settings: template.settings, isDefault: false, createdAt: template.createdAt } });
+      return true;
+    });
   }
 
   async saveCaptionRevisions(revisions: CaptionRevision[]): Promise<void> {

@@ -6,10 +6,12 @@
 // for each item, and report whether a row changed. Two writers can never both win.
 import type { PlanId } from "../lib/billing/catalog.ts";
 import type { CaptionRevision } from "../lib/domain/caption-cover-updates.ts";
+import type { EditingSettings } from "../lib/domain/editing-settings.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, PublishingCycle, VideoCollection } from "../lib/domain/types.ts";
 
 export interface CycleRecord extends PublishingCycle { name: string; socialAccountId: string; }
 export interface SocialAccountRecord { id: string; userId: string; status: "connected" | "token_expired" | "revoked" | "disconnected"; }
+export interface EditingTemplateRecord { id: string; ownerId: string; name: string; settings: EditingSettings; createdAt: Date; }
 export interface AuditEntry { actorId: string | null; action: string; entityType: string; entityId: string; metadata?: Record<string, unknown>; }
 
 export interface Repository {
@@ -55,6 +57,11 @@ export interface Repository {
   getSocialAccount(accountId: string): Promise<SocialAccountRecord | null>;
   getScheduledItemsUsedThisMonth(userId: string, monthStart: Date): Promise<number>;
   getRecentPublishTimes(userId: string, since: Date): Promise<Date[]>;
+
+  /** Saved editing settings (never part of a media file). Newest first. */
+  listTemplatesForOwner(userId: string): Promise<EditingTemplateRecord[]>;
+  /** Adds a template only if the owner would still have at most `limit` templates. Atomic, like the storage quota. */
+  createTemplateIfWithinLimit(template: EditingTemplateRecord, limit: number): Promise<boolean>;
 
   saveCaptionRevisions(revisions: CaptionRevision[]): Promise<void>;
   appendAudit(entry: AuditEntry): Promise<void>;

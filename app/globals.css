@@ -47,3 +47,5 @@ textarea, select { max-width: 100%; box-sizing: border-box; }
 .details { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
 .details dt { color: var(--muted); } .details dd { margin: 0; }
 video, img { max-width: 100%; height: auto; }
+.editor-grid { display: grid; gap: 1.5rem; grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 60rem) { .editor-grid { grid-template-columns: minmax(16rem, 24rem) 1fr; } }

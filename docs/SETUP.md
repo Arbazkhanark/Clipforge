@@ -12,6 +12,8 @@ app shows "sign in required" (there is no real authentication yet).
 
 Uploads in demo mode: files go to server memory by default. To keep the FILES on disk set `CLIPFORGE_LOCAL_MEDIA_DIR=.local-media` (a private folder, gitignored; the file LIST is still memory-only). `CLIPFORGE_MAX_UPLOAD_MB` changes the per-upload cap (default 200).
 
+Local accounts (real sign-up/sign-in, memory only): set `CLIPFORGE_LOCAL_AUTH=true` (and optionally `CLIPFORGE_BASE_URL`). Confirmation and reset links appear on `/dev/outbox`; no email is sent. This mode is refused when `NODE_ENV=production`.
+
 Rendering and upload tests need `ffmpeg`/`ffprobe` on the PATH (skipped if ffmpeg is missing).
 No AWS account, credentials or resources are needed or used: see docs/COST_GUARDRAILS.md.
 

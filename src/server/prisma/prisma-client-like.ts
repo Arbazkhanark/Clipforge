@@ -24,7 +24,7 @@ export interface PrismaClientLike {
   user: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate;
   mediaAsset: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate;
   publishingCycle: ModelDelegate; cycleItem: ModelDelegate; captionRevision: ModelDelegate;
-  auditLog: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; usageRecord: ModelDelegate;
+  auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; usageRecord: ModelDelegate;
   /** Runs `work` in a database transaction. */
   $transaction<T>(work: (tx: PrismaClientLike) => Promise<T>): Promise<T>;
   /** Tagged-template raw query (used only to lock a user row: SELECT ... FOR UPDATE). */

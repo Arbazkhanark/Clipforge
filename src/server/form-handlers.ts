@@ -1,6 +1,8 @@
 // The concrete form routes: how each HTML form's fields become a handler input, and where the user goes next.
 import { bulkUpdateCaptions, bulkUpdateCovers, type BulkUpdateReport } from "./handlers/captions-covers.ts";
 import { createCycle, mixIntoCycle, startPublishingCycle, unmixFromCycle } from "./handlers/cycles.ts";
+import { editorCandidateFromFields } from "../lib/domain/editing-settings.ts";
+import { saveEditingTemplate } from "./handlers/editor.ts";
 import { formRoute, safeId, type FormFields } from "./form-routes.ts";
 
 const cyclePath = (f: FormFields): string => { const id = safeId(f.get("cycleId")); return id ? `/cycles/${id}` : "/cycles"; };
@@ -58,4 +60,15 @@ export const mixForm = formRoute({
   }),
   success: (r, f) => ({ path: cyclePath(f), code: "videos_added", counts: { added: r.added, rejected: r.rejected.length } }),
   failurePath: (f) => { const c = safeId(f.get("collectionId")); return c ? `/collections/${c}` : cyclePath(f); },
+});
+
+const editorExtra = (f: FormFields) => { const media = safeId(f.get("media")); return media ? { media } : {}; };
+
+/** Saves the editor's current settings as a template. The original media is not touched. */
+export const editorSaveForm = formRoute({
+  handler: saveEditingTemplate,
+  toInput: (f) => ({ name: f.get("name") ?? "", settings: editorCandidateFromFields((k) => f.get(k) ?? undefined, () => NaN) }), // a non-number becomes NaN, which the strict parser refuses
+  success: (_r, f) => ({ path: "/editor", code: "template_saved", extra: editorExtra(f) }),
+  failurePath: () => "/editor",
+  failureExtra: editorExtra,
 });

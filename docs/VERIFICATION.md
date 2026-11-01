@@ -39,3 +39,13 @@ nothing here has been exercised against a live service. Re-check before launch; 
 | Generator `prisma-client` with required `output`; client needs a driver adapter (`@prisma/adapter-pg`) | ✅ verified -> schema + package.json |
 | `prisma validate`, migrations, generated client behaviour | ❌ **never run** (CLI not installed) |
 | Exact installable versions | ❌ unknown offline; Prisma pinned to `^7`, others `latest` |
+
+## Authentication and persistence (this project's own code; nothing external was called)
+| Claim | Status |
+|---|---|
+| Password hashing/verification, token hashing, session expiry (idle 7d, absolute 30d), single-use 24h/1h tokens, reset ends all sessions, rate limit, identical answers for unknown/wrong accounts | ✅ tested (real `node:crypto` scrypt) |
+| scrypt cost parameters match current OWASP guidance | ❌ from memory, not re-checked (no network) |
+| Cookie flags (HttpOnly, SameSite=Lax, Secure + `__Host-` on https) | ✅ asserted in tests; ❌ never seen by a real browser |
+| PrismaRepository / PrismaAuthRepository correctness | 🟡 logic verified against a FAKE client that models documented Prisma behaviour (`updateMany` count, `P2002`, `$transaction`); **real Prisma + PostgreSQL never run** (row locks, JSON/BigInt columns, enum casts, constraint names are unproven) |
+| Prisma schema validity | ❌ `prisma validate` never run (only a text sanity test) |
+| `next/headers` cookie reading in pages | ❌ never run under Next.js |

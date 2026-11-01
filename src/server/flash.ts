@@ -16,6 +16,7 @@ export const FLASH_NOTICES = {
   logged_out: "You are signed out.",
   reset_email_sent: "If that email belongs to a confirmed account, we sent a password reset link.",
   password_changed: "Your password was changed and you were signed out everywhere. Sign in with the new password.",
+  template_saved: "Template saved. Your original video was not changed.",
   videos_removed: "Videos removed from the cycle. Already-published posts are not affected.",
 } as const;
 
@@ -65,13 +66,17 @@ export function flashCodeForError(error: unknown): FlashErrorCode {
 const SAFE_PATH = /^\/[A-Za-z0-9_\/-]{0,200}$/;
 
 /** Builds the redirect target. The path must be a plain internal path (no "//", no scheme, no query). */
-export function buildFlashLocation(path: string, kind: "notice" | "error", code: string, counts: Partial<Record<(typeof COUNT_KEYS)[number], number>> = {}): string {
+const EXTRA_KEYS = ["media"] as const;
+const EXTRA_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function buildFlashLocation(path: string, kind: "notice" | "error", code: string, counts: Partial<Record<(typeof COUNT_KEYS)[number], number>> = {}, extra: Partial<Record<(typeof EXTRA_KEYS)[number], string>> = {}): string {
   if (!SAFE_PATH.test(path) || path.startsWith("//")) throw new Error("Unsafe redirect path.");
   const params = new URLSearchParams();
   const known = kind === "notice" ? isNotice(code) : isError(code);
   params.set(kind, known ? code : kind === "notice" ? "cycle_started" : "error");
   if (!known && kind === "notice") throw new Error("Unknown notice code.");
   for (const key of COUNT_KEYS) { const value = counts[key]; if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 9999) params.set(key, String(value)); }
+  for (const key of EXTRA_KEYS) { const v = extra[key]; if (typeof v === "string" && EXTRA_VALUE.test(v)) params.set(key, v); }
   return `${path}?${params.toString()}`;
 }
 

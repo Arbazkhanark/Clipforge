@@ -85,6 +85,30 @@ export function canvasSizeFor(aspect: AspectRatio, maxResolution: MaxResolution,
   return { width: makeEven(wanted.width * scale), height: makeEven(wanted.height * scale) };
 }
 
+export interface RenderLayout {
+  canvas: { width: number; height: number };
+  videoWidth: number; videoHeight: number; border: number;
+  /** The main video area INCLUDING its border, on the canvas (x/y may be negative when zoomed or moved past the edge). */
+  box: { width: number; height: number; x: number; y: number };
+  /** Logo width in pixels, or null when there is no logo. Its height depends on the logo image. */
+  logoWidth: number | null;
+}
+
+/** The ONE place that decides where things go. Used by the real renderer AND the editor preview, so they cannot drift apart. */
+export function computeRenderLayout(settings: RenderSettings, source: SourceVideoInfo): RenderLayout {
+  const canvas = canvasSizeFor(settings.aspect, settings.maxResolution, source);
+  const border = settings.border.thicknessPx;
+  // Main video: fit inside the canvas, then apply zoom.
+  const fitScale = Math.min(canvas.width / source.width, canvas.height / source.height);
+  const videoWidth = makeEven(source.width * fitScale * settings.zoom);
+  const videoHeight = makeEven(source.height * fitScale * settings.zoom);
+  const boxWidth = videoWidth + 2 * border;   // video + border = the "main video area"
+  const boxHeight = videoHeight + 2 * border;
+  const boxX = Math.round((canvas.width - boxWidth) / 2 + settings.offsetX * (canvas.width / 2));
+  const boxY = Math.round((canvas.height - boxHeight) / 2 + settings.offsetY * (canvas.height / 2));
+  return { canvas, videoWidth, videoHeight, border, box: { width: boxWidth, height: boxHeight, x: boxX, y: boxY }, logoWidth: settings.logo ? makeEven(canvas.width * settings.logo.widthFraction) : null };
+}
+
 export interface RenderPlan {
   canvas: { width: number; height: number };
   /** Size and top-left position of the main video INCLUDING its border, on the canvas. */
@@ -100,17 +124,9 @@ export function buildRenderArgs(args: {
   if (settings.logo && !logoPath) problems.push("A logo file is needed when a logo overlay is set.");
   if (problems.length > 0) throw new InvalidRenderSettingsError(problems);
 
-  const canvas = canvasSizeFor(settings.aspect, settings.maxResolution, source);
-  const border = settings.border.thicknessPx;
-
-  // Main video: fit inside the canvas, then apply zoom.
-  const fitScale = Math.min(canvas.width / source.width, canvas.height / source.height);
-  const videoWidth = makeEven(source.width * fitScale * settings.zoom);
-  const videoHeight = makeEven(source.height * fitScale * settings.zoom);
-  const boxWidth = videoWidth + 2 * border;   // video + border = the "main video area"
-  const boxHeight = videoHeight + 2 * border;
-  const boxX = Math.round((canvas.width - boxWidth) / 2 + settings.offsetX * (canvas.width / 2));
-  const boxY = Math.round((canvas.height - boxHeight) / 2 + settings.offsetY * (canvas.height / 2));
+  const layout = computeRenderLayout(settings, source);
+  const { canvas, border, videoWidth, videoHeight, box } = layout;
+  const boxWidth = box.width, boxHeight = box.height, boxX = box.x, boxY = box.y;
 
   const inputs: string[] = ["-i", inputPath];
   let nextInputIndex = 1;

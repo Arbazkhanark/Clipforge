@@ -19,8 +19,13 @@ src/lib/domain/               PURE business rules (no DB, no network, no Redis):
   ordering.ts                 Queue order modes; persisted seeded shuffle
 src/server/                   runtime.ts (modes + adapters), queries.ts (safe view models), http.ts (Request->Response, CSRF), page-data.ts, demo-data.ts, preflight-service.ts; request layer: errors.ts, validation.ts, repository.ts (interface), memory-repository.ts (tests), context.ts, handlers/ (captions-covers, sharing, cycles)
 src/lib/integrations/         instagram-capabilities.ts: verified Instagram facts, quota + container rules (no network calls)
+src/server/auth/              password.ts (scrypt), tokens.ts (hashed tokens, cookies), rate-limiter.ts, email.ts (interface + memory outbox), auth-service.ts, auth-repository.ts, memory-auth-repository.ts, auth-routes.ts, page-cookies.ts
+src/server/prisma/            prisma-client-like.ts (narrow documented slice), mappers.ts, prisma-repository.ts, prisma-auth-repository.ts, create-client.ts (UNVERIFIED real client factory)
 src/server/storage/            media-storage.ts (interface, key rules, descriptions), local-disk-storage.ts, memory-storage.ts, media-inspection.ts (signatures, filenames, ffprobe)
 src/server/handlers/media-upload.ts   the upload workflow
+src/server/handlers/media-serve.ts    thumbnail/preview/download serving; media-route.ts is the GET route
+src/server/handlers/editor.ts         save editing templates; src/lib/domain/editing-settings.ts validates/shapes them
+src/lib/domain/media-access.ts        who may fetch which form of a file
 src/server/flash.ts, form-routes.ts, form-handlers.ts, upload-route.ts   HTML form posts -> handlers -> redirect with whitelisted messages
 src/lib/render/               ffmpeg-command.ts (pure command + validation), render-runner.ts (runs ffmpeg/ffprobe in a WORKER)
 src/components/               React components with no client-only code (pricing, usage meter, cycle table, preflight, schedule preview, import warning)
@@ -88,3 +93,19 @@ this upload's staged/just-committed file; **existing media is never touched** an
 `<form method=post action=/api/forms/...>` -> `formRoute` (same-origin check, size cap) -> the tested handler -> `303` to a page with
 `?notice=<code>` or `?error=<code>`. Codes map to fixed sentences (`flash.ts`); user text is never echoed. One form wraps the cycle items
 table; buttons use `formAction` to choose caption / cover / remove. Hidden `version.<id>` fields carry the item versions the user saw.
+
+### Media access (preview / download / thumbnail)
+`GET /api/media/file?id=&variant=` -> signed in? -> load the media -> (non-owner) load every collection containing it + grants ->
+`decideMediaAccess` -> a denial is the SAME 404 as a missing file -> storage key comes from the repository, never from the client ->
+stream (ranges supported) with `nosniff`, `Cache-Control: private, no-store`, `Content-Security-Policy: sandbox`, `CORP: same-origin`.
+Nothing is cached "as allowed": revoking a grant, expiry, deletion and the end of a grace period take effect on the next request.
+Owner: thumbnail, preview, download. Recipient: thumbnail with any valid grant; the ORIGINAL only with `download`.
+
+### Editor
+Settings (aspect, background, zoom, offsets, border, logo-by-media-id) are validated with the renderer's own rules and saved as an
+`EditingTemplate` (JSON) - never inside a media record. `computeRenderLayout` is the single geometry function used by BOTH the real FFmpeg
+command and the preview sketch; a test samples a real render's pixels at the sketch's predicted positions. The resolution cap comes from the plan.
+
+### Persistence plan
+`Repository` and `AuthRepository` are interfaces with two implementations each (memory, Prisma). `tests/contracts/*.contract.ts` run against
+every implementation; when PostgreSQL is available the same suites will run against the real Prisma client (see FIRST_RUN_CHECKLIST).

@@ -4,7 +4,7 @@
 import type { PlanId } from "../lib/billing/catalog.ts";
 import type { CaptionRevision } from "../lib/domain/caption-cover-updates.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
-import type { AuditEntry, CycleRecord, Repository, SocialAccountRecord } from "./repository.ts";
+import type { AuditEntry, CycleRecord, EditingTemplateRecord, Repository, SocialAccountRecord } from "./repository.ts";
 
 const clone = <T>(value: T): T => structuredClone(value);
 /** Fields a version-checked save may change; identity fields (id, cycleId, cycleOwnerId) never do. */
@@ -21,6 +21,7 @@ export class MemoryRepository implements Repository {
   socialAccounts = new Map<string, SocialAccountRecord>();
   captionRevisions: CaptionRevision[] = [];
   audit: AuditEntry[] = [];
+  templates = new Map<string, EditingTemplateRecord>();
   storageKeys = new Map<string, string>();
   thumbnailKeys = new Map<string, string | null>();
   /** Usage per user AND month, like the UsageRecord table. Use setUsage() to fill it. */
@@ -121,6 +122,16 @@ export class MemoryRepository implements Repository {
     await tick();
     const ownCycleIds = new Set([...this.cycles.values()].filter((c) => c.ownerId === userId).map((c) => c.id));
     return [...this.items.values()].filter((i) => ownCycleIds.has(i.cycleId) && i.status === "published" && i.scheduledFor && i.scheduledFor >= since).map((i) => i.scheduledFor as Date);
+  }
+
+  async listTemplatesForOwner(userId: string): Promise<EditingTemplateRecord[]> {
+    await tick();
+    return [...this.templates.values()].filter((t) => t.ownerId === userId).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id)).map(clone);
+  }
+  async createTemplateIfWithinLimit(template: EditingTemplateRecord, limit: number): Promise<boolean> {
+    await tick(); // no await between the count and the write: atomic
+    if ([...this.templates.values()].filter((t) => t.ownerId === template.ownerId).length + 1 > limit) return false;
+    this.templates.set(template.id, clone(template)); return true;
   }
 
   async saveCaptionRevisions(revisions: CaptionRevision[]): Promise<void> { await tick(); this.captionRevisions.push(...revisions.map(clone)); }
