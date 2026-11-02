@@ -6,7 +6,7 @@ import { useEffect } from "react";
 
 export function LogoDragger({ svgId, formId }: { svgId: string; formId: string }) {
   useEffect(() => {
-    const svg = document.getElementById(svgId);
+    const svg = document.getElementById(svgId) as unknown as SVGSVGElement | null; // getElementById returns HTMLElement; an <svg> needs the SVG type for viewBox
     const form = document.getElementById(formId) as HTMLFormElement | null;
     const handle = svg?.querySelector("[data-logo-handle]") as SVGGraphicsElement | null;
     const xField = form?.elements.namedItem("logoX") as HTMLInputElement | null;

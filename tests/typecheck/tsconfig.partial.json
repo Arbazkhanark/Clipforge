@@ -1,0 +1,5 @@
+{
+  "compilerOptions": { "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext", "strict": true, "noUncheckedIndexedAccess": true, "allowImportingTsExtensions": true, "noEmit": true, "skipLibCheck": true, "jsx": "react-jsx", "types": [], "lib": ["ES2022", "DOM"] },
+  "include": ["stubs.d.ts", "../../src/**/*.ts", "../../src/**/*.tsx", "../../app/**/*.ts", "../../app/**/*.tsx"],
+  "exclude": ["../../src/server/prisma/create-client.ts"]
+}
