@@ -49,3 +49,39 @@ nothing here has been exercised against a live service. Re-check before launch; 
 | PrismaRepository / PrismaAuthRepository correctness | 🟡 logic verified against a FAKE client that models documented Prisma behaviour (`updateMany` count, `P2002`, `$transaction`); **real Prisma + PostgreSQL never run** (row locks, JSON/BigInt columns, enum casts, constraint names are unproven) |
 | Prisma schema validity | ❌ `prisma validate` never run (only a text sanity test) |
 | `next/headers` cookie reading in pages | ❌ never run under Next.js |
+
+## Verification status - run on 2026-11-03 (commit after 6895b2e)
+Environment: the sandbox's network access is DISABLED by configuration (DNS cannot resolve `registry.npmjs.org`; no proxy; every external host
+unreachable). No PostgreSQL server, Docker or Podman exists, nothing listens on port 5432, and `next`, `prisma`, `@prisma/*`, `@types/*` are not installed.
+
+| Step | Status | Detail |
+|---|---|---|
+| Install pinned dependencies | ⛔ BLOCKED | no network; `package.json` still uses `latest` for non-Prisma packages (cannot look up versions) |
+| `prisma validate` | ⛔ NOT RUN | Prisma CLI not installed |
+| Migrations on real PostgreSQL | ⛔ NOT RUN | no PostgreSQL; `prisma/manual-constraints.sql` never applied |
+| Repository contract tests on real PostgreSQL | ⛔ NOT RUN | pass only against `MemoryRepository` and `PrismaRepository` over a FAKE client |
+| Full TypeScript check incl. TSX | 🟡 PARTIAL | `npm run typecheck` (real types) NOT RUN. A stub-based strict check of ALL of `src/` and `app/` (every `.tsx` included) passes and runs as a test (`tests/typecheck.test.ts`); it excludes `create-client.ts` and `prisma.config.ts` (need uninstalled packages) and does not cover `tests/` or `scripts/`. It found and fixed one real bug (LogoDragger). HTML attribute names are not checked by the stubs |
+| Next.js production build | ⛔ NOT RUN | Next.js not installed |
+| App running under Next.js (`next dev`) | ⛔ NOT RUN | |
+| Real-browser test | 🟡 PARTIAL | 18/18 checks pass in real Chromium 141 against a **verification harness that is NOT Next.js** (`npm run verify:browser`, see below) |
+
+### What the browser harness proves - and does not
+`scripts/verify-harness.ts` serves the app's REAL `app/**/page.tsx` and `route.ts` modules with Next-style file routing (route groups, `[params]`,
+nested layouts, Request/Response handlers) in local-auth mode; `scripts/browser-check.mjs` drives Chromium through it.
+**Proved in a real browser:** register -> email link shows a confirm page (no auto-confirm) -> confirm -> sign in -> dashboard; session cookie is
+HttpOnly + SameSite=Lax and unreadable from JavaScript; wrong-password and unknown-account errors are identical and set no cookie; image, MP4 and WebM
+uploads through the real form (verified by ffprobe); thumbnails load; WebM plays and seeks using HTTP 206 Range responses; MP4 metadata and Range
+responses are correct; downloads are byte-identical to the uploads with the right file name; another user gets 404 for every variant of my files
+(identical to a missing file) and anonymous gets 401; the editor sketch updates (aspect, zoom, border, colour, logo), saves a template, and the original
+file stays byte-identical; hostile editor input is explained and never executes; a fake `.mp4` is refused with a clear message and not stored; the dashboard
+storage meter reflects real uploads; cross-origin forms cannot log out, create or sign in (403); no horizontal scrolling at 375px on 9 screens;
+logout clears the cookie and the old cookie stops working; no JavaScript errors and no unexpected failed requests.
+**NOT proved:** anything about Next.js itself (bundling, RSC, caching, `next/headers`, `next/link`, metadata/icon conventions, `next build`);
+MP4/H.264 PLAYBACK (this Chromium build has no H.264 decoder - WebM was used for playback); the logo-drag enhancement (client JavaScript is not
+bundled by the harness); `Secure`/`__Host-` cookies over https; Firefox/WebKit; automated accessibility audits; real PostgreSQL behaviour.
+Bugs found by the browser run: a missing favicon (added `app/icon.svg`, regression test `tests/app-icon.test.ts`).
+
+### To unblock (needs the owner)
+Enable network access for the sandbox (the sandbox setting `Network: disabled` is a configuration choice). Then: install + pin dependencies; get a real
+PostgreSQL (system package, or an npm-installable one such as `embedded-postgres` - an untested suggestion); run `prisma validate`, migrate, the contract
+suites against it, the real typecheck, `next build`, and re-run `npm run verify:browser` pointed at `next start`.

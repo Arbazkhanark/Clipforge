@@ -19,3 +19,7 @@ No AWS account, credentials or resources are needed or used: see docs/COST_GUARD
 
 Sandbox note: in the development sandbox React, react-dom, tsx were symlinked into `node_modules` from a global install because there
 was no network. `node_modules` is git-ignored; a normal `npm install` replaces this.
+
+Verification helpers (not part of the app): `npm run verify:harness` serves the app's real pages/routes with Next-style routing (local-auth mode) and
+`npm run verify:browser` drives Chromium through it (needs ffmpeg, Playwright and a Chromium; the paths default to the development sandbox and can be set
+with PLAYWRIGHT_MODULE / CHROMIUM_PATH). After `npm install` the real checks are `npm run typecheck`, `npm test`, `npm run build`.

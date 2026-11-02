@@ -12,7 +12,8 @@ templates separate from media, with layout geometry proven against real FFmpeg o
 **Does NOT exist / never run:** Next.js itself (no `next build`, no browser, no hydration), the Prisma CLI/client and any real
 PostgreSQL (so the Prisma repositories have NEVER run against a database and `prisma validate`/migrations have never run), S3 (no AWS
 resources exist), email delivery, Google sign-in, job queue/worker, video rendering from the editor, any real Razorpay or Instagram call.
-**Not runnable-verified, not deployed, not production-ready.**
+**Verified in a real browser (Chromium) only through a Next-style harness, NOT Next.js; see docs/VERIFICATION.md.**
+**Not runnable-verified under Next.js, not deployed, not production-ready.**
 
 ## Modes
 | Mode | How | Auth | Data | Uploads |

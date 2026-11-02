@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "db:validate": "prisma validate",
     "db:migrate": "prisma migrate dev",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "verify:harness": "CLIPFORGE_LOCAL_AUTH=true node --import tsx --import ./tests/helpers/register-css.mjs scripts/verify-harness.ts",
+    "verify:browser": "node scripts/browser-check.mjs"
   },
   "dependencies": {
     "next": "latest",
