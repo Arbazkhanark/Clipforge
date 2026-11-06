@@ -1,12 +1,14 @@
 import type { ReactNode } from "react";
 import "./globals.css";
+import { getRuntime } from "../src/server/runtime.ts";
 
 export const metadata = {
   title: { default: "ClipForge", template: "%s | ClipForge" },
   description: "Organise short-form videos, share collections, and schedule publishing. Early development.",
 };
 
-export default function RootLayout({ children }: { children: ReactNode }) {
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  const signedIn = (await getRuntime().currentUserId()) !== null;
   return (
     <html lang="en">
       <body>
@@ -16,7 +18,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <a href="/">ClipForge</a>
             <a href="/pricing">Pricing</a>
             <a href="/dashboard">Dashboard</a>
-            <a href="/login">Sign in</a>
+            {signedIn ? <span data-auth-state="signed-in">Signed in</span> : <a href="/login" data-auth-state="signed-out">Sign in</a>}
           </nav>
         </header>
         <main id="main">{children}</main>

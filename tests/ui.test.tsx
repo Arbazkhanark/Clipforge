@@ -11,7 +11,8 @@ import { SchedulePreview } from "../src/components/SchedulePreview.tsx";
 import { ImportWarning } from "../src/components/ImportWarning.tsx";
 import { InstagramAccountsView } from "../src/components/InstagramAccounts.tsx";
 import { StatusBadge } from "../src/components/StatusBadge.tsx";
-import { formatStorage } from "../src/components/format.ts";
+import { countNoun, formatStorage } from "../src/components/format.ts";
+import { DashboardView } from "../src/components/DashboardView.tsx";
 import { runPreflight } from "../src/lib/domain/preflight.ts";
 import { describeUsageReset } from "../src/lib/domain/usage-accounting.ts";
 import { generateSlots } from "../src/lib/domain/schedule.ts";
@@ -111,10 +112,21 @@ test("Instagram page shows connect and disconnect without a password or token", 
   assert.equal(out.includes("type=\"password\""), false);
 });
 
-test("pages render: home is honest, pricing uses the catalog, layout is accessible", () => {
+test("pages render: home is honest, pricing uses the catalog, layout is accessible", async () => {
   const home = html(<HomePage />);
   assert.ok(home.includes("Early development")); assert.ok(!/testimonial|trusted by|\d+\+ (creators|users)/i.test(home));
   assert.ok(html(<PricingPage />).includes("₹3,999"));
-  const layout = html(<RootLayout><p>child</p></RootLayout>);
+  const layout = html(await RootLayout({ children: <p>child</p> }));
   assert.ok(layout.includes('<html lang="en">')); assert.ok(layout.includes("Skip to main content")); assert.ok(layout.includes('aria-label="Main"')); assert.ok(layout.includes("<p>child</p>"));
+  assert.ok(layout.includes('href="/login"')); assert.ok(layout.includes("Sign in")); assert.ok(!layout.includes("Signed in"));
+});
+
+test("counts use the singular when there is one", () => {
+  assert.equal(countNoun(1, "collection"), "collection");
+  assert.equal(countNoun(0, "collection"), "collections");
+  assert.equal(countNoun(2, "media file", "media files"), "media files");
+  const one = html(<DashboardView data={{ planId: "free", planName: "Free", timeZone: "UTC", resetNotice: "Resets monthly.", usage: { storage: { used: 0, limit: 1 }, processingMinutes: { used: 0, limit: 1 }, exports: { used: 0, limit: 1 }, scheduledItems: { used: 0, limit: 1 } }, counts: { media: 1, collections: 1, cycles: 1, runningCycles: 0 } }} />);
+  assert.ok(one.includes("<strong>1</strong> media file")); assert.ok(!one.includes("media files"));
+  assert.ok(one.includes("<strong>1</strong> collection")); assert.ok(!one.includes("collections"));
+  assert.ok(one.includes("<strong>1</strong> publishing cycle")); assert.ok(!one.includes("publishing cycles"));
 });

@@ -13,7 +13,10 @@ export function MediaDetailView({ detail, timeZone }: { detail: MediaDetail; tim
       <section aria-labelledby="preview-heading">
         <h2 id="preview-heading">Preview</h2>
         {m.kind === "video"
-          ? <video controls preload="metadata" width={480} poster={m.hasThumbnail ? fileUrl(m.id, "thumbnail") : undefined} src={fileUrl(m.id, "preview")}>Your browser cannot play this video. You can download it instead.</video>
+          ? <>
+              <video controls preload="metadata" width={480} poster={m.hasThumbnail ? fileUrl(m.id, "thumbnail") : undefined} src={fileUrl(m.id, "preview")}>Your browser cannot play this video. You can download it instead.</video>
+              {!m.hasThumbnail && <p className="muted">No preview image was created for this video. The original file is unchanged.</p>}
+            </>
           : <img src={fileUrl(m.id, "preview")} alt={`Preview of ${m.title}`} width={480} />}
       </section>
       <section aria-labelledby="meta-heading">

@@ -84,6 +84,13 @@ export const FLASH_ERRORS = {
 } as const;
 
 export type FlashNoticeCode = keyof typeof FLASH_NOTICES;
+
+/** The create-collection notice must name the storage that was actually used. */
+export function collectionCreatedMessage(mode: "database" | "local" | "demo" | "unconfigured"): string {
+  return mode === "database"
+    ? FLASH_NOTICES.collection_created
+    : "Collection saved in server memory. It disappears when the server restarts.";
+}
 export type FlashErrorCode = keyof typeof FLASH_ERRORS;
 
 const COUNT_KEYS = ["updated", "skipped", "conflicts", "confirm", "added", "rejected", "removed", "blocked"] as const;

@@ -88,23 +88,33 @@ export type ThumbnailMaker = (filePath: string, durationSeconds: number | null) 
 export const THUMBNAIL_MAX_WIDTH = 320;
 const THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024;
 
-export const makeThumbnailWithFfmpeg: ThumbnailMaker = (filePath, durationSeconds) => new Promise((resolve) => {
-  // A frame about 10% in (at most 3s) usually avoids a black first frame. Images just get scaled down.
-  const seek = durationSeconds && durationSeconds > 1 ? Math.min(3, durationSeconds * 0.1) : 0;
-  const args = ["-v", "error", "-nostdin", ...(seek > 0 ? ["-ss", seek.toFixed(2)] : []), "-i", filePath, "-frames:v", "1", "-vf", `scale='min(${THUMBNAIL_MAX_WIDTH},iw)':-2`, "-f", "mjpeg", "-q:v", "5", "pipe:1"];
-  let child;
-  try { child = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "ignore"] }); } catch { resolve(null); return; }
-  const chunks: Uint8Array[] = []; let total = 0; let settled = false;
-  const done = (value: Uint8Array | null) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
-  const timer = setTimeout(() => { child.kill?.("SIGKILL"); done(null); }, 20_000);
-  child.stdout.on("data", (d: Uint8Array) => { total += d.length; if (total > THUMBNAIL_MAX_BYTES) { child.kill?.("SIGKILL"); done(null); } else chunks.push(d); });
-  child.on("error", () => done(null));
-  child.on("close", () => {
-    if (total === 0) return done(null);
-    const bytes = new Uint8Array(total); let offset = 0; for (const c of chunks) { bytes.set(c, offset); offset += c.length; }
-    done(bytes[0] === 0xff && bytes[1] === 0xd8 ? bytes : null); // only accept real JPEG output
+function grabJpeg(filePath: string, seek: number, filter: string): Promise<Uint8Array | null> {
+  return new Promise((resolve) => {
+    const args = ["-v", "error", "-nostdin", ...(seek > 0 ? ["-ss", seek.toFixed(2)] : []), "-i", filePath, "-an", "-frames:v", "1", "-vf", filter, "-f", "mjpeg", "-q:v", "5", "pipe:1"];
+    let child;
+    try { child = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "ignore"] }); } catch { resolve(null); return; }
+    const chunks: Uint8Array[] = []; let total = 0; let settled = false;
+    const done = (value: Uint8Array | null) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
+    const timer = setTimeout(() => { child.kill?.("SIGKILL"); done(null); }, 20_000);
+    child.stdout.on("data", (d: Uint8Array) => { total += d.length; if (total > THUMBNAIL_MAX_BYTES) { child.kill?.("SIGKILL"); done(null); } else chunks.push(d); });
+    child.on("error", () => done(null));
+    child.on("close", () => {
+      if (total === 0) return done(null);
+      const bytes = new Uint8Array(total); let offset = 0; for (const c of chunks) { bytes.set(c, offset); offset += c.length; }
+      done(bytes[0] === 0xff && bytes[1] === 0xd8 ? bytes : null); // only accept real JPEG output
+    });
   });
-});
+}
+
+export const makeThumbnailWithFfmpeg: ThumbnailMaker = async (filePath, durationSeconds) => {
+  // A frame about 10% in (at most 3s) usually avoids a black first frame. Images and very short videos use the first frame.
+  const seek = durationSeconds && durationSeconds > 1 ? Math.min(3, durationSeconds * 0.1) : 0;
+  const fitted = `scale='min(${THUMBNAIL_MAX_WIDTH},iw)':-2`;
+  const first = await grabJpeg(filePath, seek, fitted);
+  if (first) return first;
+  // The seek can land past the only picture, or the scale expression can be rejected. Try the first frame with a simpler scale. The source file is only read.
+  return grabJpeg(filePath, 0, "scale=320:-2:force_original_aspect_ratio=decrease");
+};
 
 let ffmpegAvailable: Promise<boolean> | null = null;
 export function isFfmpegAvailable(): Promise<boolean> {

@@ -80,6 +80,13 @@ test("collection detail: shared collection shows what you may do; a collection y
   assert.ok(shared.includes("Import an independent copy: no")); assert.ok(shared.includes("Download originals: no"));
   assert.ok(shared.includes("does not give you rights to redistribute"));
   assert.ok(shared.includes("Sample shared clip 1"));
+  const memoryNotice = html(await CollectionPage({ params: { collectionId: "demo-col-1" }, searchParams: { notice: "collection_created" } }));
+  assert.ok(memoryNotice.includes("Collection saved in server memory."));
+  assert.ok(!memoryNotice.includes("saved in the database"));
+  setRuntimeForTests(runtimeFor(DEMO_USER_ID, "database"));
+  const databaseNotice = html(await CollectionPage({ params: { collectionId: "demo-col-1" }, searchParams: { notice: "collection_created" } }));
+  assert.ok(databaseNotice.includes("Collection saved in the database."));
+  setRuntimeForTests(runtimeFor(DEMO_USER_ID));
   const viewOnly = html(await CollectionPage({ params: { collectionId: "demo-shared-col-2" } }));
   assert.ok(viewOnly.includes("Use videos in a publishing cycle without copying them: no"));
   // A different user cannot see someone's private collection - same message as a missing one.
@@ -130,7 +137,7 @@ test("DEFAULT (no demo flag): nothing is faked - nobody is signed in and the dat
   assert.equal(getRuntime().mode, "unconfigured");
   const out = html(await DashboardPage());
   assert.ok(out.includes("Sign in required")); assert.ok(!out.includes("Sample"));
-  assert.ok(!html(<AppLayout><p>x</p></AppLayout>).includes("Demo mode"));
+  assert.ok(!html(await AppLayout({ children: <p>x</p> })).includes("Demo mode"));
 });
 
 test("CLIPFORGE_DEMO_MODE=true switches to sample data and shows the demo banner on every app screen", async () => {
@@ -138,7 +145,7 @@ test("CLIPFORGE_DEMO_MODE=true switches to sample data and shows the demo banner
   process.env["CLIPFORGE_DEMO_MODE"] = "true";
   assert.equal(getRuntime().mode, "demo");
   assert.ok(html(await MediaPage({})).includes("Sample clip"));
-  const layout = html(<AppLayout><p>child</p></AppLayout>);
+  const layout = html(await AppLayout({ children: <p>child</p> }));
   assert.ok(layout.includes("data-demo-banner")); assert.ok(layout.includes("SAMPLE data")); assert.ok(layout.includes("read-only previews"));
   for (const label of ["Dashboard", "Media library", "Collections", "Publishing cycles", "Plans"]) assert.ok(layout.includes(label));
   assert.ok(layout.includes('aria-label="App"'));

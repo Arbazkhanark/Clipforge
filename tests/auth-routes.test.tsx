@@ -15,6 +15,7 @@ import { parseFlash } from "../src/server/flash.ts";
 import DashboardPage from "../app/(app)/dashboard/page.tsx";
 import MediaPage from "../app/(app)/media/page.tsx";
 import AppLayout from "../app/(app)/layout.tsx";
+import RootLayout from "../app/layout.tsx";
 import LoginPage from "../app/login/page.tsx";
 import RegisterPage from "../app/register/page.tsx";
 import VerifyEmailPage from "../app/verify-email/page.tsx";
@@ -135,8 +136,15 @@ test("PAGES read the cookie from the request headers: signed-in users see their 
   assert.ok(!html(await MediaPage({})).includes("annpic.png")); assert.ok(html(await MediaPage({})).includes("Your library is empty"));
   for (const reader of [async () => null, async () => "clipforge_session=" + "B".repeat(43), async () => "garbage"]) { setPageCookieReaderForTests(reader); assert.ok(html(await DashboardPage()).includes("Sign in required")); }
   setPageCookieReaderForTests(async () => ann);
-  const layout = html(<AppLayout><p>x</p></AppLayout>);
-  assert.ok(layout.includes("data-local-banner")); assert.ok(layout.includes("disappear when the server restarts")); assert.ok(layout.includes('action="/api/auth/logout"')); assert.ok(!layout.includes("data-demo-banner"));
+  const layout = html(await AppLayout({ children: <p>x</p> }));
+  assert.ok(layout.includes("data-local-banner")); assert.ok(layout.includes("disappear when the server restarts")); assert.ok(layout.includes('action="/api/auth/logout"')); assert.ok(layout.includes("Connect Google")); assert.ok(!layout.includes("data-demo-banner"));
+  const header = html(await RootLayout({ children: <p>x</p> }));
+  assert.ok(header.includes('data-auth-state="signed-in"')); assert.ok(!header.includes('data-auth-state="signed-out"'));
+  setPageCookieReaderForTests(async () => null);
+  const signedOut = html(await AppLayout({ children: <p>x</p> }));
+  assert.ok(signedOut.includes("data-local-banner")); assert.ok(signedOut.includes('href="/login"')); assert.ok(!signedOut.includes('action="/api/auth/logout"')); assert.ok(!signedOut.includes("Connect Google"));
+  const signedOutHeader = html(await RootLayout({ children: <p>x</p> }));
+  assert.ok(signedOutHeader.includes('data-auth-state="signed-out"')); assert.ok(signedOutHeader.includes(">Sign in</a>")); assert.ok(!signedOutHeader.includes("Signed in"));
 });
 
 test("LOGOUT ends the session everywhere that cookie is used and clears it", async () => {

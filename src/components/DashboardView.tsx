@@ -1,6 +1,6 @@
 import type { DashboardData } from "../server/queries.ts";
 import { UsageMeter } from "./UsageMeter.tsx";
-import { formatCount, formatStorage } from "./format.ts";
+import { countNoun, formatCount, formatStorage } from "./format.ts";
 
 export function DashboardView({ data }: { data: DashboardData }) {
   const { usage, counts } = data;
@@ -11,9 +11,9 @@ export function DashboardView({ data }: { data: DashboardData }) {
       <section aria-labelledby="counts-heading">
         <h2 id="counts-heading">Overview</h2>
         <ul className="stat-grid">
-          <li><strong>{formatCount(counts.media)}</strong> media files</li>
-          <li><strong>{formatCount(counts.collections)}</strong> collections</li>
-          <li><strong>{formatCount(counts.cycles)}</strong> publishing cycles ({formatCount(counts.runningCycles)} running)</li>
+          <li><strong>{formatCount(counts.media)}</strong> {countNoun(counts.media, "media file", "media files")}</li>
+          <li><strong>{formatCount(counts.collections)}</strong> {countNoun(counts.collections, "collection")}</li>
+          <li><strong>{formatCount(counts.cycles)}</strong> {countNoun(counts.cycles, "publishing cycle", "publishing cycles")} ({formatCount(counts.runningCycles)} running)</li>
         </ul>
       </section>
       <section aria-labelledby="usage-heading">

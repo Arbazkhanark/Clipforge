@@ -1,9 +1,10 @@
 import { CollectionDetailView } from "../../../../src/components/CollectionViews.tsx";
 import { ErrorState } from "../../../../src/components/PageState.tsx";
 import { FlashMessage } from "../../../../src/components/FlashMessage.tsx";
-import { parseFlash } from "../../../../src/server/flash.ts";
+import { collectionCreatedMessage, parseFlash } from "../../../../src/server/flash.ts";
 import { loadPageData } from "../../../../src/server/page-data.ts";
 import { getCollectionDetail } from "../../../../src/server/queries.ts";
+import { getRuntime } from "../../../../src/server/runtime.ts";
 
 export const metadata = { title: "Collection" };
 export const dynamic = "force-dynamic";
@@ -14,9 +15,13 @@ export default async function CollectionPage(props: { params: Promise<{ collecti
   const { collectionId } = await props.params;
   const searchParams = await props.searchParams;
   const result = await loadPageData((ctx) => getCollectionDetail(ctx, collectionId, searchParams));
+  const flash = parseFlash(searchParams);
+  const shown = flash && searchParams?.notice === "collection_created"
+    ? { ...flash, message: collectionCreatedMessage(getRuntime().mode) }
+    : flash;
   return (
     <>
-      <FlashMessage flash={parseFlash(searchParams)} />
+      <FlashMessage flash={shown} />
       {result.ok ? <CollectionDetailView detail={result.data} /> : <ErrorState error={result.error} />}
     </>
   );

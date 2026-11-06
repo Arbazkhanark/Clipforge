@@ -38,6 +38,11 @@ export function formatDateTime(date: Date, timeZone: string): string {
 
 export const formatCount = (n: number): string => new Intl.NumberFormat("en-IN").format(n);
 
+/** "1 collection", "2 collections". The number stays separate so the page can emphasise it. */
+export function countNoun(count: number, singular: string, plural = `${singular}s`): string {
+  return count === 1 ? singular : plural;
+}
+
 export function formatDuration(ms: number | null): string {
   if (ms === null) return "-";
   const total = Math.round(ms / 1000);

@@ -3,8 +3,18 @@ import type { EmailDelivery, RuntimeMode } from "../server/runtime.ts";
 
 const LINKS: [string, string][] = [["/dashboard", "Dashboard"], ["/media", "Media library"], ["/collections", "Collections"], ["/cycles", "Publishing cycles"], ["/instagram", "Instagram"], ["/editor", "Editor"], ["/pricing", "Plans"]];
 
+function SessionActions({ signedIn }: { signedIn: boolean }) {
+  if (!signedIn) return <p><a href="/login">Sign in</a></p>;
+  return (
+    <>
+      <form method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
+      <form method="post" action="/api/auth/google/start"><input type="hidden" name="intent" value="link" /><button type="submit">Connect Google</button></form>
+    </>
+  );
+}
+
 /** Navigation + content area for signed-in screens. Responsive with CSS only (sidebar on wide screens, wrapped links on narrow ones). */
-export function AppShell({ mode, emailDelivery, children }: { mode: RuntimeMode; emailDelivery?: EmailDelivery; children: ReactNode }) {
+export function AppShell({ mode, emailDelivery, signedIn, children }: { mode: RuntimeMode; emailDelivery?: EmailDelivery; signedIn: boolean; children: ReactNode }) {
   return (
     <div className="app-shell">
       <nav aria-label="App" className="app-nav">
@@ -14,15 +24,13 @@ export function AppShell({ mode, emailDelivery, children }: { mode: RuntimeMode;
         {mode === "local" && (
           <div role="note" className="notice" data-local-banner>
             <p>Local development mode: accounts and data live in server memory and disappear when the server restarts. No email is sent (see <a href="/dev/outbox">the outbox</a>).</p>
-            <form method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
-            <form method="post" action="/api/auth/google/start"><input type="hidden" name="intent" value="link" /><button type="submit">Connect Google</button></form>
+            <SessionActions signedIn={signedIn} />
           </div>
         )}
         {mode === "database" && (
           <div role="note" className="notice" data-database-banner>
             <p>Accounts, media details, collections, and publishing cycles are stored in the database. Uploaded files are saved in a private folder on this computer when that folder is configured, and they are not stored in the database or in memory. {emailDelivery === "outbox" ? "Confirmation messages stay in the local outbox. No email company is connected." : "Email is not sent, so new accounts stay unverified and can still sign in."} Instagram, payments, and cloud file storage are not connected.</p>
-            <form method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
-            <form method="post" action="/api/auth/google/start"><input type="hidden" name="intent" value="link" /><button type="submit">Connect Google</button></form>
+            <SessionActions signedIn={signedIn} />
           </div>
         )}
         {mode === "demo" && (

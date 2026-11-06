@@ -3,10 +3,9 @@ import { formatCount, formatDuration, formatStorage } from "./format.ts";
 import { MediaSelection } from "./MediaSelection.tsx";
 
 /** Small preview image. The browser asks our server for it; the server re-checks access on every request. */
-export function Thumbnail({ media }: { media: { id: string; hasThumbnail: boolean } }) {
-  return media.hasThumbnail
-    ? <img src={`/api/media/file?id=${encodeURIComponent(media.id)}&variant=thumbnail`} alt="" width={80} loading="lazy" />
-    : <span className="muted">No preview</span>;
+export function Thumbnail({ media }: { media: { id: string; hasThumbnail: boolean; kind?: "video" | "image" } }) {
+  if (media.hasThumbnail) return <img src={`/api/media/file?id=${encodeURIComponent(media.id)}&variant=thumbnail`} alt="" width={80} loading="lazy" />;
+  return <span className="muted">{media.kind === "video" ? "No preview image. The original video is unchanged." : "No preview image."}</span>;
 }
 
 function mediaHref(library: MediaLibraryData, page: number): string {
