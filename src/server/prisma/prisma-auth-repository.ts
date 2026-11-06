@@ -1,5 +1,5 @@
 // Prisma version of AuthRepository. NOT RUN against the real Prisma Client (see prisma-client-like.ts).
-import type { AuthRepository, AuthTokenKind, AuthTokenRecord, SessionRecord, UserRecord } from "../auth/auth-repository.ts";
+import type { AuthRepository, AuthTokenKind, AuthTokenRecord, GoogleIdentityRecord, SessionRecord, UserRecord } from "../auth/auth-repository.ts";
 import { isUniqueViolation, type PrismaClientLike, type Row } from "./prisma-client-like.ts";
 
 const rowToUser = (r: Row): UserRecord => ({ id: r["id"], email: r["email"], emailVerifiedAt: r["emailVerified"] ?? null, passwordHash: r["passwordHash"] ?? null, name: r["name"] ?? null, role: r["role"], createdAt: r["createdAt"] });
@@ -36,4 +36,39 @@ export class PrismaAuthRepository implements AuthRepository {
     return row ? rowToToken(row) : null;
   }
   async invalidateAuthTokens(userId: string, kind: AuthTokenKind, now: Date): Promise<void> { await this.db.authToken.updateMany({ where: { userId, kind, usedAt: null }, data: { usedAt: now } }); }
+
+  async getGoogleIdentityBySub(googleSub: string): Promise<GoogleIdentityRecord | null> {
+    const row = await this.db.googleIdentity.findUnique({ where: { googleSub } }); return row ? rowToGoogle(row) : null;
+  }
+  async getGoogleIdentityByUserId(userId: string): Promise<GoogleIdentityRecord | null> {
+    const row = await this.db.googleIdentity.findUnique({ where: { userId } }); return row ? rowToGoogle(row) : null;
+  }
+  async linkGoogleIdentity(identity: GoogleIdentityRecord): Promise<boolean> {
+    if (!await this.getUserById(identity.userId)) return false;
+    if (await this.getGoogleIdentityByUserId(identity.userId) || await this.getGoogleIdentityBySub(identity.googleSub)) return false;
+    try {
+      await this.db.googleIdentity.create({ data: { id: identity.id, userId: identity.userId, googleSub: identity.googleSub, createdAt: identity.createdAt } });
+      return true;
+    } catch (error) { if (isUniqueViolation(error)) return false; throw error; }
+  }
+  async createGoogleUser(user: UserRecord, identity: GoogleIdentityRecord): Promise<"created" | "email_taken" | "sub_taken"> {
+    if (identity.userId !== user.id) return "sub_taken";
+    try {
+      await this.db.$transaction(async (tx) => {
+        await tx.user.create({ data: { id: user.id, email: user.email, emailVerified: user.emailVerifiedAt, passwordHash: user.passwordHash, name: user.name, role: user.role, createdAt: user.createdAt } });
+        await tx.googleIdentity.create({ data: { id: identity.id, userId: identity.userId, googleSub: identity.googleSub, createdAt: identity.createdAt } });
+      });
+      return "created";
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const subOwner = await this.getGoogleIdentityBySub(identity.googleSub);
+      if (subOwner) {
+        await this.db.user.deleteMany({ where: { id: user.id, email: user.email } });
+        return "sub_taken";
+      }
+      return "email_taken";
+    }
+  }
 }
+
+const rowToGoogle = (r: Row): GoogleIdentityRecord => ({ id: r["id"], userId: r["userId"], googleSub: r["googleSub"], createdAt: r["createdAt"] });

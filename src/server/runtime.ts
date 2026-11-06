@@ -126,6 +126,10 @@ function guardAuthRepository(inner: AuthRepository): AuthRepository {
     createAuthToken: (token) => run(() => inner.createAuthToken(token)),
     consumeAuthToken: (kind, tokenHash, now) => run(() => inner.consumeAuthToken(kind, tokenHash, now)),
     invalidateAuthTokens: (userId, kind, now) => run(() => inner.invalidateAuthTokens(userId, kind, now)),
+    getGoogleIdentityBySub: (googleSub) => run(() => inner.getGoogleIdentityBySub(googleSub)),
+    getGoogleIdentityByUserId: (userId) => run(() => inner.getGoogleIdentityByUserId(userId)),
+    linkGoogleIdentity: (identity) => run(() => inner.linkGoogleIdentity(identity)),
+    createGoogleUser: (user, identity) => run(() => inner.createGoogleUser(user, identity)),
   };
 }
 
@@ -154,6 +158,10 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
     createAuthToken: async (token) => (await ready).auth.createAuthToken(token),
     consumeAuthToken: async (kind, tokenHash, now) => (await ready).auth.consumeAuthToken(kind, tokenHash, now),
     invalidateAuthTokens: async (userId, kind, now) => (await ready).auth.invalidateAuthTokens(userId, kind, now),
+    getGoogleIdentityBySub: async (googleSub) => (await ready).auth.getGoogleIdentityBySub(googleSub),
+    getGoogleIdentityByUserId: async (userId) => (await ready).auth.getGoogleIdentityByUserId(userId),
+    linkGoogleIdentity: async (identity) => (await ready).auth.linkGoogleIdentity(identity),
+    createGoogleUser: async (user, identity) => (await ready).auth.createGoogleUser(user, identity),
   });
   const email = opts.email ?? createEmailSetup();
   const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? process.env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000"), requireVerifiedEmail: email.requireVerifiedEmail, ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };

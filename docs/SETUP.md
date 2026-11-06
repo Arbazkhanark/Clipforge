@@ -16,6 +16,16 @@ Uploads in demo mode: files go to server memory by default. To keep the FILES on
 
 Local accounts (real sign-up/sign-in, memory only): set `CLIPFORGE_LOCAL_AUTH=true` (and optionally `CLIPFORGE_BASE_URL`). Confirmation and reset links appear on `/dev/outbox`; no email is sent. This mode is refused when `NODE_ENV=production`.
 
+Google sign-in uses the same session cookie as email/password. It stays off until you create an OAuth client yourself and replace the placeholders in `.env.local` (never commit them):
+
+1. In Google Cloud Console, create an OAuth client of type Web application. Do not commit the client secret.
+2. Add this authorised redirect URI exactly: `http://localhost:3000/api/auth/google/callback`.
+3. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_OAUTH_REDIRECT_URI` to that client. `replace-me` is treated as not configured.
+4. Apply `prisma/migrations/20261106163300_google_identity` on a database you choose. It is not applied to Neon from this repo.
+5. Email/password register, login, logout, verification, and password reset stay as they are. A signed-in user connects Google from the app banner. A matching email is not linked automatically.
+
+The buttons do not pretend a Google login happened when those variables are still placeholders.
+
 Rendering and upload tests need `ffmpeg`/`ffprobe` on the PATH (skipped if ffmpeg is missing).
 No AWS account, credentials or resources are needed or used: see docs/COST_GUARDRAILS.md.
 

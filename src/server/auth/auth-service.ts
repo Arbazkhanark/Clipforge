@@ -5,7 +5,8 @@
 //  - repeated failures lock an email for a while (rate limiter),
 //  - every login creates a NEW session (no session fixation); a password reset ends ALL sessions,
 //  - emailed tokens are single-use and expire (24h verification, 1h reset).
-// Google sign-in is NOT implemented. Nothing here sends real email (see email.ts).
+// Google sign-in is completeGoogleSignIn. It reuses these sessions and does not store Google tokens.
+// Nothing here sends real email (see email.ts).
 import { DEFAULT_SCRYPT_PARAMS, checkPasswordPolicy, hashPassword, makeDummyHash, needsRehash, verifyPassword, type ScryptParams } from "./password.ts";
 import { generateToken, hashToken } from "./tokens.ts";
 import type { AuthRepository, UserRecord } from "./auth-repository.ts";
@@ -35,6 +36,13 @@ export type RegisterResult = { ok: true } | { ok: false; problems: string[] };
 export type LoginResult =
   | { ok: true; sessionToken: string; expiresAt: Date; userId: string }
   | { ok: false; code: "invalid_credentials" | "email_not_verified" | "rate_limited"; retryAfterSeconds?: number };
+
+/** Claims read from a verified Google ID token. No access token is included. */
+export interface GoogleProfile { sub: string; email: string; emailVerified: boolean; name: string | null; }
+export type GoogleSignInCode = "google_email_unverified" | "google_account_exists" | "google_identity_taken" | "google_link_mismatch" | "google_invalid_profile";
+export type GoogleSignInResult =
+  | { ok: true; sessionToken: string; expiresAt: Date; userId: string; created: boolean }
+  | { ok: false; code: GoogleSignInCode };
 
 const EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,}$/;
 export const normaliseEmail = (email: string): string => email.trim().toLowerCase();
@@ -111,10 +119,64 @@ export class AuthService {
     for (const key of keys) limiter.reset(key);
     if (needsRehash(user.passwordHash, config.scrypt)) await repo.setPasswordHash(user.id, await hashPassword(password, config.scrypt));
 
+    return { ok: true, ...(await this.openSession(user.id)) };
+  }
+
+  private async openSession(userId: string): Promise<{ sessionToken: string; expiresAt: Date; userId: string }> {
+    const now = this.deps.now();
     const { token, tokenHash } = generateToken();
-    const expiresAt = new Date(now.getTime() + config.sessionAbsoluteMs);
-    await repo.createSession({ id: this.deps.newId(), userId: user.id, tokenHash, createdAt: now, lastUsedAt: now, expiresAt, revokedAt: null });
-    return { ok: true, sessionToken: token, expiresAt, userId: user.id };
+    const expiresAt = new Date(now.getTime() + this.deps.config.sessionAbsoluteMs);
+    await this.deps.repo.createSession({ id: this.deps.newId(), userId, tokenHash, createdAt: now, lastUsedAt: now, expiresAt, revokedAt: null });
+    return { sessionToken: token, expiresAt, userId };
+  }
+
+  /**
+   * Sign in, sign up, or link a Google account.
+   * linkUserId is set only when this browser already has a ClipForge session and asked to connect Google.
+   * A matching email never links by itself.
+   */
+  async completeGoogleSignIn(profile: GoogleProfile, linkUserId: string | null): Promise<GoogleSignInResult> {
+    const sub = typeof profile.sub === "string" ? profile.sub.trim() : "";
+    const email = typeof profile.email === "string" ? normaliseEmail(profile.email) : "";
+    const name = typeof profile.name === "string" ? profile.name.trim().slice(0, 100) : "";
+    if (!/^[\x21-\x7E]{1,255}$/.test(sub) || !EMAIL_PATTERN.test(email) || email.length > 320) return { ok: false, code: "google_invalid_profile" };
+    if (profile.emailVerified !== true) return { ok: false, code: "google_email_unverified" };
+
+    const { repo } = this.deps;
+    const existing = await repo.getGoogleIdentityBySub(sub);
+    if (existing) {
+      if (linkUserId && linkUserId !== existing.userId) return { ok: false, code: "google_identity_taken" };
+      return { ok: true, created: false, ...(await this.openSession(existing.userId)) };
+    }
+
+    if (linkUserId) {
+      const user = await repo.getUserById(linkUserId);
+      if (!user || !user.emailVerifiedAt || normaliseEmail(user.email) !== email) return { ok: false, code: "google_link_mismatch" };
+      const already = await repo.getGoogleIdentityByUserId(user.id);
+      if (already) return { ok: false, code: "google_identity_taken" };
+      const linked = await repo.linkGoogleIdentity({ id: this.deps.newId(), userId: user.id, googleSub: sub, createdAt: this.deps.now() });
+      if (!linked) {
+        const winner = await repo.getGoogleIdentityBySub(sub);
+        if (winner?.userId === user.id) return { ok: true, created: false, ...(await this.openSession(user.id)) };
+        return { ok: false, code: "google_identity_taken" };
+      }
+      return { ok: true, created: false, ...(await this.openSession(user.id)) };
+    }
+
+    if (await repo.getUserByEmail(email)) return { ok: false, code: "google_account_exists" };
+    const now = this.deps.now();
+    const userId = this.deps.newId();
+    const outcome = await repo.createGoogleUser(
+      { id: userId, email, emailVerifiedAt: now, passwordHash: null, name: name || null, role: "user", createdAt: now },
+      { id: this.deps.newId(), userId, googleSub: sub, createdAt: now },
+    );
+    if (outcome === "email_taken") return { ok: false, code: "google_account_exists" };
+    if (outcome === "sub_taken") {
+      const winner = await repo.getGoogleIdentityBySub(sub);
+      if (!winner) return { ok: false, code: "google_identity_taken" };
+      return { ok: true, created: false, ...(await this.openSession(winner.userId)) };
+    }
+    return { ok: true, created: true, ...(await this.openSession(userId)) };
   }
 
   /** Who is this cookie? Null when missing, unknown, revoked, expired, or idle for too long. */

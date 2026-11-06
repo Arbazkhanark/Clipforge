@@ -17,7 +17,7 @@
 //    in prisma/manual-constraints.sql, and created by
 //    prisma/migrations/20261106162016_integrity_constraints.
 //  - The one-pending access-request rule is the partial unique index on CollectionAccessRequest.
-//  - Auth.js / session tables are added in Phase 2 when the auth library is chosen.
+//  - Sessions stay in this schema (custom scrypt auth). GoogleIdentity stores the Google subject only.
 //  - The plan catalog (Free/Creator/Pro/Agency) is code, not a table, so prices live in ONE place.
 
 generator client {
@@ -227,8 +227,9 @@ model User {
   role          UserRole  @default(user)
   createdAt     DateTime  @default(now())
 
-  sessions       Session[]
-  authTokens     AuthToken[]
+  sessions        Session[]
+  authTokens      AuthToken[]
+  googleIdentity  GoogleIdentity?
   subscription   Subscription?
   socialAccounts SocialAccount[]
   mediaAssets    MediaAsset[]
@@ -268,6 +269,16 @@ model AuthToken {
   createdAt DateTime      @default(now())
 
   @@index([userId, kind])
+}
+
+/// One Google account per ClipForge user. The subject is Google's stable account id.
+/// Access tokens and refresh tokens are not stored.
+model GoogleIdentity {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  googleSub String   @unique
+  createdAt DateTime @default(now())
 }
 
 model Subscription {

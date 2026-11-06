@@ -29,6 +29,7 @@ export const FLASH_NOTICES = {
   collection_updated: "Collection details saved.",
   collection_media_saved: "The videos in this collection were saved.",
   videos_removed: "Videos removed from the cycle. Already-published posts are not affected.",
+  google_connected: "Google is connected to this account. Email and password sign-in still works.",
 } as const;
 
 export const FLASH_ERRORS = {
@@ -57,6 +58,16 @@ export const FLASH_ERRORS = {
   payload_too_large: "That request is too large.",
   length_required: "The upload did not say how large it is, so it was refused.",
   error: "Something went wrong. Please try again.",
+  google_not_configured: "Google sign-in is not connected yet. Email and password still work.",
+  google_cancelled: "Google sign-in was cancelled. No account was changed.",
+  google_invalid_state: "That Google sign-in attempt expired or did not match this browser. Please try again.",
+  google_expired_code: "That Google sign-in code expired. Please try again.",
+  google_email_unverified: "Google did not confirm that email address, so no account was created or linked.",
+  google_account_exists: "An account with that email already exists. Sign in with your password, then connect Google from the app.",
+  google_identity_taken: "That Google account is already connected to a ClipForge account.",
+  google_link_mismatch: "Google was not connected. Sign in with the password for this verified email, then try again.",
+  google_callback_error: "Google sign-in could not be completed. Please try again.",
+  google_invalid_profile: "Google did not return a usable account, so nothing was changed.",
 } as const;
 
 export type FlashNoticeCode = keyof typeof FLASH_NOTICES;

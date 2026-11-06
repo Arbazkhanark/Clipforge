@@ -1,4 +1,4 @@
-import type { AuthRepository, AuthTokenKind, AuthTokenRecord, SessionRecord, UserRecord } from "./auth-repository.ts";
+import type { AuthRepository, AuthTokenKind, AuthTokenRecord, GoogleIdentityRecord, SessionRecord, UserRecord } from "./auth-repository.ts";
 
 const clone = <T>(v: T): T => structuredClone(v);
 const tick = (): Promise<void> => Promise.resolve();
@@ -7,6 +7,7 @@ export class MemoryAuthRepository implements AuthRepository {
   users = new Map<string, UserRecord>();
   sessions = new Map<string, SessionRecord>();
   tokens = new Map<string, AuthTokenRecord>();
+  googleIdentities = new Map<string, GoogleIdentityRecord>();
 
   async createUser(user: UserRecord): Promise<boolean> {
     await tick();
@@ -35,5 +36,28 @@ export class MemoryAuthRepository implements AuthRepository {
   async invalidateAuthTokens(userId: string, kind: AuthTokenKind, now: Date): Promise<void> {
     await tick();
     for (const t of this.tokens.values()) if (t.userId === userId && t.kind === kind && t.usedAt === null) t.usedAt = now;
+  }
+
+  async getGoogleIdentityBySub(googleSub: string): Promise<GoogleIdentityRecord | null> {
+    await tick(); const found = [...this.googleIdentities.values()].find((row) => row.googleSub === googleSub); return found ? clone(found) : null;
+  }
+  async getGoogleIdentityByUserId(userId: string): Promise<GoogleIdentityRecord | null> {
+    await tick(); const found = [...this.googleIdentities.values()].find((row) => row.userId === userId); return found ? clone(found) : null;
+  }
+  async linkGoogleIdentity(identity: GoogleIdentityRecord): Promise<boolean> {
+    await tick();
+    if (!this.users.has(identity.userId)) return false;
+    if ([...this.googleIdentities.values()].some((row) => row.userId === identity.userId || row.googleSub === identity.googleSub)) return false;
+    this.googleIdentities.set(identity.id, clone(identity));
+    return true;
+  }
+  async createGoogleUser(user: UserRecord, identity: GoogleIdentityRecord): Promise<"created" | "email_taken" | "sub_taken"> {
+    await tick();
+    if (identity.userId !== user.id) return "sub_taken";
+    if ([...this.users.values()].some((row) => row.email === user.email)) return "email_taken";
+    if ([...this.googleIdentities.values()].some((row) => row.googleSub === identity.googleSub || row.userId === user.id)) return "sub_taken";
+    this.users.set(user.id, clone(user));
+    this.googleIdentities.set(identity.id, clone(identity));
+    return "created";
   }
 }

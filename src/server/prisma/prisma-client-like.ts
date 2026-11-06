@@ -22,7 +22,7 @@ export interface ModelDelegate {
 }
 
 export interface PrismaClientLike {
-  user: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate;
+  user: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate; googleIdentity: ModelDelegate;
   mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate;
   publishingCycle: ModelDelegate; cycleItem: ModelDelegate; captionRevision: ModelDelegate;
   auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; usageRecord: ModelDelegate;

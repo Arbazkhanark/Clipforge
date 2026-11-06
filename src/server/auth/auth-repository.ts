@@ -3,6 +3,8 @@ export interface UserRecord { id: string; email: string; emailVerifiedAt: Date |
 export interface SessionRecord { id: string; userId: string; tokenHash: string; createdAt: Date; lastUsedAt: Date; expiresAt: Date; revokedAt: Date | null; }
 export type AuthTokenKind = "email_verification" | "password_reset";
 export interface AuthTokenRecord { id: string; userId: string; kind: AuthTokenKind; tokenHash: string; expiresAt: Date; usedAt: Date | null; createdAt: Date; }
+/** Google subject only. No access token or refresh token. */
+export interface GoogleIdentityRecord { id: string; userId: string; googleSub: string; createdAt: Date; }
 
 export interface AuthRepository {
   /** Returns false (and creates nothing) if the email is already registered. Must be atomic: a UNIQUE constraint in PostgreSQL. */
@@ -23,4 +25,14 @@ export interface AuthRepository {
   consumeAuthToken(kind: AuthTokenKind, tokenHash: string, now: Date): Promise<AuthTokenRecord | null>;
   /** Makes every unused token of this kind for the user unusable (called when a new one is issued). */
   invalidateAuthTokens(userId: string, kind: AuthTokenKind, now: Date): Promise<void>;
+
+  getGoogleIdentityBySub(googleSub: string): Promise<GoogleIdentityRecord | null>;
+  getGoogleIdentityByUserId(userId: string): Promise<GoogleIdentityRecord | null>;
+  /** False when the user is missing or the user id / Google subject is already used. */
+  linkGoogleIdentity(identity: GoogleIdentityRecord): Promise<boolean>;
+  /**
+   * Creates a passwordless verified user and the Google identity together.
+   * email_taken and sub_taken must not leave a new user row behind.
+   */
+  createGoogleUser(user: UserRecord, identity: GoogleIdentityRecord): Promise<"created" | "email_taken" | "sub_taken">;
 }

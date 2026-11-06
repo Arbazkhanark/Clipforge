@@ -15,12 +15,14 @@ export function AppShell({ mode, emailDelivery, children }: { mode: RuntimeMode;
           <div role="note" className="notice" data-local-banner>
             <p>Local development mode: accounts and data live in server memory and disappear when the server restarts. No email is sent (see <a href="/dev/outbox">the outbox</a>).</p>
             <form method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
+            <form method="post" action="/api/auth/google/start"><input type="hidden" name="intent" value="link" /><button type="submit">Connect Google</button></form>
           </div>
         )}
         {mode === "database" && (
           <div role="note" className="notice" data-database-banner>
             <p>Accounts, media details, collections, and publishing cycles are stored in the database. Uploaded files are saved in a private folder on this computer when that folder is configured, and they are not stored in the database or in memory. {emailDelivery === "outbox" ? "Confirmation messages stay in the local outbox. No email company is connected." : "Email is not sent, so new accounts stay unverified and can still sign in."} Instagram, payments, and cloud file storage are not connected.</p>
             <form method="post" action="/api/auth/logout"><button type="submit">Sign out</button></form>
+            <form method="post" action="/api/auth/google/start"><input type="hidden" name="intent" value="link" /><button type="submit">Connect Google</button></form>
           </div>
         )}
         {mode === "demo" && (

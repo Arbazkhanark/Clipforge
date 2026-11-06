@@ -1,7 +1,7 @@
 // A reusable test suite: every AuthRepository implementation (memory now, Prisma later) must pass it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { AuthRepository, AuthTokenRecord, SessionRecord, UserRecord } from "../../src/server/auth/auth-repository.ts";
+import type { AuthRepository, AuthTokenRecord, GoogleIdentityRecord, SessionRecord, UserRecord } from "../../src/server/auth/auth-repository.ts";
 
 const T0 = new Date("2026-06-01T12:00:00Z");
 const at = (ms: number) => new Date(T0.getTime() + ms);
@@ -72,5 +72,31 @@ export function runAuthRepositoryContract(name: string, factory: () => Promise<A
     assert.equal(await repo.consumeAuthToken("email_verification", "h1", at(6)), null);
     assert.notEqual(await repo.consumeAuthToken("password_reset", "h2", at(6)), null);
     assert.notEqual(await repo.consumeAuthToken("email_verification", "h3", at(6)), null);
+  });
+
+  const google = (over: Partial<GoogleIdentityRecord> = {}): GoogleIdentityRecord => ({ id: "g1", userId: "u1", googleSub: "sub-1", createdAt: T0, ...over });
+
+  test(`[${name}] google identity: one subject and one user, lookup, duplicate refused`, async () => {
+    const repo = await factory();
+    await repo.createUser(user());
+    await repo.createUser(user({ id: "u2", email: "b@example.com" }));
+    assert.equal(await repo.linkGoogleIdentity(google()), true);
+    assert.equal((await repo.getGoogleIdentityBySub("sub-1"))!.userId, "u1");
+    assert.equal((await repo.getGoogleIdentityByUserId("u1"))!.googleSub, "sub-1");
+    assert.equal(await repo.linkGoogleIdentity(google({ id: "g2" })), false);
+    assert.equal(await repo.linkGoogleIdentity(google({ id: "g3", userId: "u2", googleSub: "sub-1" })), false);
+    assert.equal(await repo.linkGoogleIdentity(google({ id: "g4", userId: "u2", googleSub: "sub-2" })), true);
+    assert.equal(await repo.linkGoogleIdentity(google({ id: "missing", userId: "nobody", googleSub: "sub-3" })), false);
+  });
+
+  test(`[${name}] google user: email or subject already used does not leave a new user`, async () => {
+    const repo = await factory();
+    await repo.createUser(user());
+    assert.equal(await repo.createGoogleUser(user({ id: "new", email: "a@example.com", passwordHash: null, emailVerifiedAt: T0 }), google({ id: "g-new", userId: "new", googleSub: "sub-new" })), "email_taken");
+    assert.equal(await repo.getUserById("new"), null);
+    assert.equal(await repo.createGoogleUser(user({ id: "guser", email: "fresh@example.com", passwordHash: null, emailVerifiedAt: T0 }), google({ id: "gid", userId: "guser", googleSub: "sub-fresh" })), "created");
+    assert.equal(await repo.createGoogleUser(user({ id: "other", email: "other@example.com", passwordHash: null, emailVerifiedAt: T0 }), google({ id: "gid2", userId: "other", googleSub: "sub-fresh" })), "sub_taken");
+    assert.equal(await repo.getUserById("other"), null);
+    assert.equal((await repo.getGoogleIdentityBySub("sub-fresh"))!.userId, "guser");
   });
 }

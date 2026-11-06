@@ -27,6 +27,12 @@ export function AuthForm({ mode, demoMode, available = false, flash = null, toke
         {needsPassword && <p><label>{mode === "reset" ? "New password" : "Password"}<br /><input type="password" name="password" autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={mode === "login" ? undefined : 10} required /></label></p>}
         <button type="submit" disabled={!available}>{available ? BUTTONS[mode] : `${BUTTONS[mode]} (not available yet)`}</button>
       </form>
+      {available && (mode === "login" || mode === "register") && (
+        <form method="post" action="/api/auth/google/start">
+          <input type="hidden" name="intent" value="login" />
+          <button type="submit">Continue with Google</button>
+        </form>
+      )}
       {mode === "login" && <p>{available && <><a href="/forgot-password">Forgot your password?</a> - </>}New here? <a href="/register">Create an account</a></p>}
       {isRegister && <p>Already have an account? <a href="/login">Sign in</a></p>}
       {demoMode && <p role="note">Demo mode is on: you are already using a sample user. <a href="/dashboard">Open the dashboard</a></p>}
