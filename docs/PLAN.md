@@ -1,5 +1,7 @@
 # ClipForge — Project Plan (synced with actual state)
 
+> Status checked out at commit `bcb4bb3` was re-audited on 2026-11-06. Prefer `docs/FEATURE_STATUS.md`, `docs/PROJECT_CONTEXT.md`, `docs/ROADMAP.md`, and the 2026-11-06 section of `docs/VERIFICATION.md` when this file disagrees with them.
+
 Legend: ✅ done & tested · 🟡 partial · ⬜ not started
 
 ## Current honest status

@@ -12,5 +12,6 @@ type Search = Record<string, string | string[] | undefined>;
 export default async function ResetPasswordPage(props: { searchParams?: Promise<Search> | Search } = {}) {
   const search = await props.searchParams;
   const token = typeof search?.["token"] === "string" && /^[A-Za-z0-9_-]{20,100}$/.test(search["token"]) ? search["token"] : null;
-  return <AuthForm mode="reset" demoMode={false} available={getRuntime().auth !== undefined && token !== null} token={token} flash={parseFlash(search)} />;
+  const runtime = getRuntime();
+  return <AuthForm mode="reset" demoMode={false} available={runtime.auth !== undefined && token !== null} persistence={runtime.mode === "database" ? "database" : "memory"} token={token} flash={parseFlash(search)} />;
 }

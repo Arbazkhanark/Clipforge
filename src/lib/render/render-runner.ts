@@ -3,14 +3,17 @@
 import { spawn } from "node:child_process";
 import { buildRenderArgs, parseProgressSeconds, progressPercent, validateRenderOutput, type ProbeResult, type RenderSettings, type SourceVideoInfo } from "./ffmpeg-command.ts";
 
-function runCommand(command: string, args: string[], onStdout?: (chunk: string) => void): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runCommand(command: string, args: string[], onStdout?: (chunk: string) => void, timeoutMs?: number): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", stderr = "";
+    let stdout = "", stderr = "", settled = false, timedOut = false;
+    const timer = timeoutMs && timeoutMs > 0 ? setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs) : null;
+    const finish = (value: { code: number | null; stdout: string; stderr: string; timedOut: boolean }) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); resolve(value); };
+    const fail = (error: Error) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); reject(error); };
     child.stdout.on("data", (d: Buffer) => { const text = d.toString(); stdout += text; onStdout?.(text); });
     child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); if (stderr.length > 20_000) stderr = stderr.slice(-20_000); });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("error", fail);
+    child.on("close", (code) => finish({ code, stdout, stderr, timedOut }));
   });
 }
 
@@ -36,19 +39,20 @@ export interface RenderResult {
 }
 
 export async function renderVideo(args: {
-  inputPath: string; outputPath: string; logoPath?: string; settings: RenderSettings;
-  onProgress?: (percent: number) => void;
+  inputPath: string; outputPath: string; logoPath?: string; backgroundImagePath?: string; settings: RenderSettings;
+  timeoutMs?: number; onProgress?: (percent: number) => void;
 }): Promise<RenderResult> {
   const startedAt = Date.now();
   const sourceProbe = await probeVideo(args.inputPath);
   const source: SourceVideoInfo = { width: sourceProbe.width, height: sourceProbe.height, durationSeconds: sourceProbe.durationSeconds };
-  const plan = buildRenderArgs({ inputPath: args.inputPath, outputPath: args.outputPath, logoPath: args.logoPath, source, settings: args.settings });
+  const plan = buildRenderArgs({ inputPath: args.inputPath, outputPath: args.outputPath, logoPath: args.logoPath, backgroundImagePath: args.backgroundImagePath, source, settings: args.settings });
 
-  const { code, stderr } = await runCommand("ffmpeg", plan.args, (chunk) => {
+  const { code, stderr, timedOut } = await runCommand("ffmpeg", plan.args, (chunk) => {
     const percent = progressPercent(parseProgressSeconds(chunk), source.durationSeconds);
     if (percent !== null) args.onProgress?.(percent);
-  });
+  }, args.timeoutMs);
   const processingSeconds = (Date.now() - startedAt) / 1000;
+  if (timedOut) return { succeeded: false, outputValidated: false, problems: ["Rendering took too long and was stopped."], processingSeconds, outputProbe: null };
   if (code !== 0) return { succeeded: false, outputValidated: false, problems: [`ffmpeg exited with code ${code}: ${stderr.slice(-300)}`], processingSeconds, outputProbe: null };
 
   const outputProbe = await probeVideo(args.outputPath);

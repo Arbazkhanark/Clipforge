@@ -4,7 +4,8 @@
 import type { PlanId } from "../lib/billing/catalog.ts";
 import type { CaptionRevision } from "../lib/domain/caption-cover-updates.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
-import type { AuditEntry, CycleRecord, EditingTemplateRecord, Repository, SocialAccountRecord } from "./repository.ts";
+import type { UsageRecordDraft } from "../lib/domain/usage-accounting.ts";
+import type { AuditEntry, CycleRecord, EditingTemplateRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "./repository.ts";
 
 const clone = <T>(value: T): T => structuredClone(value);
 /** Fields a version-checked save may change; identity fields (id, cycleId, cycleOwnerId) never do. */
@@ -22,6 +23,8 @@ export class MemoryRepository implements Repository {
   captionRevisions: CaptionRevision[] = [];
   audit: AuditEntry[] = [];
   templates = new Map<string, EditingTemplateRecord>();
+  renders = new Map<string, RenderOutputRecord & { storageKey: string; settingsHash: string }>();
+  usageKeys = new Set<string>();
   storageKeys = new Map<string, string>();
   thumbnailKeys = new Map<string, string | null>();
   /** Usage per user AND month, like the UsageRecord table. Use setUsage() to fill it. */
@@ -101,7 +104,9 @@ export class MemoryRepository implements Repository {
   async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { await tick(); return [...this.cycles.values()].filter((c) => c.ownerId === userId).map(clone); }
   async getStorageUsedBytes(userId: string): Promise<number> {
     await tick();
-    return [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
+    const mediaBytes = [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
+    const renderBytes = [...this.renders.values()].filter((r) => r.ownerId === userId).reduce((sum, r) => sum + r.sizeBytes, 0);
+    return mediaBytes + renderBytes;
   }
   async getMonthlyUsage(userId: string, monthStart: Date): Promise<{ processingSeconds: number; exports: number }> {
     await tick(); const u = this.usageByMonth.get(`${userId}|${monthStart.toISOString()}`);
@@ -109,6 +114,29 @@ export class MemoryRepository implements Repository {
   }
 
   async getCollection(collectionId: string): Promise<VideoCollection | null> { await tick(); const c = this.collections.get(collectionId); return c ? clone(c) : null; }
+  async createCollection(collection: VideoCollection): Promise<boolean> {
+    await tick();
+    if (this.collections.has(collection.id)) return false;
+    if (new Set(collection.mediaIds).size !== collection.mediaIds.length) return false;
+    if (collection.mediaIds.some((id) => !this.media.has(id))) return false;
+    this.collections.set(collection.id, clone(collection));
+    return true;
+  }
+  async updateCollection(collectionId: string, details: { name: string; description: string | null; visibility: VideoCollection["visibility"]; archived: boolean }): Promise<boolean> {
+    await tick();
+    const current = this.collections.get(collectionId);
+    if (!current) return false;
+    this.collections.set(collectionId, { ...current, name: details.name, ...(details.description ? { description: details.description } : {}), visibility: details.visibility, archived: details.archived });
+    if (!details.description) delete this.collections.get(collectionId)!.description;
+    return true;
+  }
+  async replaceCollectionMedia(collectionId: string, mediaIds: string[]): Promise<boolean> {
+    await tick();
+    const current = this.collections.get(collectionId);
+    if (!current || new Set(mediaIds).size !== mediaIds.length || mediaIds.some((id) => !this.media.has(id))) return false;
+    this.collections.set(collectionId, { ...current, mediaIds: [...mediaIds] });
+    return true;
+  }
   async getGrants(collectionId: string): Promise<CollectionPermissionGrant[]> { await tick(); return this.grants.filter((g) => g.collectionId === collectionId).map(clone); }
   async upsertGrant(grant: CollectionPermissionGrant): Promise<void> {
     await tick();
@@ -130,10 +158,63 @@ export class MemoryRepository implements Repository {
   }
   async createTemplateIfWithinLimit(template: EditingTemplateRecord, limit: number): Promise<boolean> {
     await tick(); // no await between the count and the write: atomic
-    if ([...this.templates.values()].filter((t) => t.ownerId === template.ownerId).length + 1 > limit) return false;
+    const named = [...this.templates.values()].filter((t) => t.ownerId === template.ownerId && !t.name.startsWith("v:")).length;
+    if (named + 1 > limit) return false;
     this.templates.set(template.id, clone(template)); return true;
   }
+  async saveVideoSettings(template: EditingTemplateRecord): Promise<void> {
+    await tick();
+    const existing = [...this.templates.values()].find((t) => t.ownerId === template.ownerId && t.name === template.name);
+    if (existing) { existing.settings = clone(template.settings); return; }
+    this.templates.set(template.id, clone(template));
+  }
+  async listAuditsForEntities(entityType: string, entityIds: string[]): Promise<{ entityId: string; action: string; metadata: Record<string, unknown> | null }[]> {
+    await tick();
+    const wanted = new Set(entityIds);
+    return this.audit.filter((entry) => entry.entityType === entityType && wanted.has(entry.entityId)).map((entry) => ({ entityId: entry.entityId, action: entry.action, metadata: entry.metadata ?? null }));
+  }
 
+  async findRenderOutput(ownerId: string, sourceMediaId: string, settingsHash: string): Promise<{ id: string; sizeBytes: number } | null> {
+    await tick();
+    const found = [...this.renders.values()].find((r) => r.ownerId === ownerId && r.sourceMediaId === sourceMediaId && r.settingsHash === settingsHash);
+    return found ? { id: found.id, sizeBytes: found.sizeBytes } : null;
+  }
+  async countRenderOutputsSince(ownerId: string, since: Date): Promise<number> {
+    await tick();
+    return [...this.renders.values()].filter((r) => r.ownerId === ownerId && r.createdAt >= since).length;
+  }
+  async saveRenderOutput(record: { id: string; sourceMediaId: string; ownerId: string; storageKey: string; sizeBytes: number; settingsHash: string; createdAt: Date }, limitBytes: number): Promise<SaveRenderResult> {
+    await tick();
+    const existing = [...this.renders.values()].find((r) => r.ownerId === record.ownerId && r.sourceMediaId === record.sourceMediaId && r.settingsHash === record.settingsHash);
+    if (existing) return { status: "duplicate", id: existing.id };
+    const mediaBytes = [...this.media.values()].filter((m) => m.ownerId === record.ownerId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
+    const renderBytes = [...this.renders.values()].filter((r) => r.ownerId === record.ownerId).reduce((sum, r) => sum + r.sizeBytes, 0);
+    if (mediaBytes + renderBytes + record.sizeBytes > limitBytes) return { status: "over_quota" };
+    this.renders.set(record.id, clone(record));
+    return { status: "saved", id: record.id };
+  }
+  async listRenderOutputsForOwner(ownerId: string): Promise<RenderOutputRecord[]> {
+    await tick();
+    return [...this.renders.values()].filter((r) => r.ownerId === ownerId).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id)).slice(0, 20).map((row) => ({ id: row.id, sourceMediaId: row.sourceMediaId, ownerId: row.ownerId, sizeBytes: row.sizeBytes, createdAt: row.createdAt }));
+  }
+  async getRenderOutput(id: string): Promise<{ id: string; ownerId: string; sourceMediaId: string; sizeBytes: number; storageKey: string } | null> {
+    await tick();
+    const row = this.renders.get(id);
+    return row ? { id: row.id, ownerId: row.ownerId, sourceMediaId: row.sourceMediaId, sizeBytes: row.sizeBytes, storageKey: row.storageKey } : null;
+  }
+  async addUsageRecords(records: UsageRecordDraft[]): Promise<void> {
+    await tick();
+    for (const record of records) {
+      if (this.usageKeys.has(record.idempotencyKey)) continue;
+      this.usageKeys.add(record.idempotencyKey);
+      const key = `${record.userId}|${record.periodStart.toISOString()}`;
+      const current = this.usageByMonth.get(key) ?? { processingSeconds: 0, exports: 0, scheduledItems: 0 };
+      if (record.kind === "processing_seconds") current.processingSeconds += record.amount;
+      if (record.kind === "exports") current.exports += record.amount;
+      if (record.kind === "scheduled_items") current.scheduledItems += record.amount;
+      this.usageByMonth.set(key, current);
+    }
+  }
   async saveCaptionRevisions(revisions: CaptionRevision[]): Promise<void> { await tick(); this.captionRevisions.push(...revisions.map(clone)); }
   async appendAudit(entry: AuditEntry): Promise<void> { await tick(); this.audit.push(clone(entry)); }
 }

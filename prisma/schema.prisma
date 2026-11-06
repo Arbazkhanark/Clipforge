@@ -1,7 +1,7 @@
 // ClipForge database schema (PostgreSQL is the durable source of truth).
 //
-// STATUS: written without the Prisma CLI (no network in the dev sandbox). It has NOT been run through
-// `prisma validate` or `prisma migrate`. tests/schema-sanity.test.ts only catches obvious mistakes.
+// STATUS: enum values are listed one per line because Prisma 7.10 rejects several values on one line.
+// The values, models, fields, relations and indexes are otherwise unchanged. Migrations are not applied.
 //
 // TARGET: Prisma ORM 7 (checked against the official migration guide, docs.prisma.io, 2026-10-28):
 //  - the connection URL is NOT allowed in this file any more; it lives in prisma.config.ts,
@@ -27,44 +27,200 @@ datasource db {
 }
 
 // ============================ Enums ============================
-enum UserRole              { user admin }
-enum MediaKind             { video image }
-enum MediaStatus           { active pending_deletion deleted }
-enum DerivativeKind        { thumbnail render compressed }
-enum CollectionVisibility  { private link public_view }
-enum Capability            { view use_in_cycle import_copy download manage }
-enum GrantStatus           { active revoked }
-enum AccessRequestStatus   { pending approved rejected }
-enum ImportStatus          { pending copying verifying succeeded failed }
-enum CycleStatus           { draft running paused stopped completed }
-enum CycleItemStatus       { upcoming scheduled processing publishing published needs_review failed cancelled }
-enum SourceKind            { owned shared_reference imported_copy }
-enum CaptionSource         { none individual bulk }
-enum CoverState            { none saved_internally applied_on_instagram }
-enum CaptionChangeSource   { bulk individual }
-enum RepeatBehavior        { never ask automatic }
-enum OrderMode             { manual upload_order oldest_first newest_first smallest_first largest_first shuffle }
-enum JobStatus             { queued running succeeded failed cancelled }
-enum JobKind               { render thumbnail import cleanup }
-enum PublishOutcome        { in_progress success definite_failure ambiguous }
-enum SocialPlatform        { instagram youtube_shorts tiktok }
-enum SocialAccountStatus   { connected token_expired revoked disconnected }
-enum BillingInterval       { weekly monthly }
-enum SubscriptionStatus    { created authenticated active pending halted paused cancelled completed expired }
-enum UsageKind             { storage_bytes processing_seconds exports scheduled_items }
-enum AuthTokenKind        { email_verification password_reset }
-enum WebhookEventStatus    { received processed failed ignored }
+enum UserRole {
+  user
+  admin
+}
+
+enum MediaKind {
+  video
+  image
+}
+
+enum MediaStatus {
+  active
+  pending_deletion
+  deleted
+}
+
+enum DerivativeKind {
+  thumbnail
+  render
+  compressed
+}
+
+enum CollectionVisibility {
+  private
+  link
+  public_view
+}
+
+enum Capability {
+  view
+  use_in_cycle
+  import_copy
+  download
+  manage
+}
+
+enum GrantStatus {
+  active
+  revoked
+}
+
+enum AccessRequestStatus {
+  pending
+  approved
+  rejected
+}
+
+enum ImportStatus {
+  pending
+  copying
+  verifying
+  succeeded
+  failed
+}
+
+enum CycleStatus {
+  draft
+  running
+  paused
+  stopped
+  completed
+}
+
+enum CycleItemStatus {
+  upcoming
+  scheduled
+  processing
+  publishing
+  published
+  needs_review
+  failed
+  cancelled
+}
+
+enum SourceKind {
+  owned
+  shared_reference
+  imported_copy
+}
+
+enum CaptionSource {
+  none
+  individual
+  bulk
+}
+
+enum CoverState {
+  none
+  saved_internally
+  applied_on_instagram
+}
+
+enum CaptionChangeSource {
+  bulk
+  individual
+}
+
+enum RepeatBehavior {
+  never
+  ask
+  automatic
+}
+
+enum OrderMode {
+  manual
+  upload_order
+  oldest_first
+  newest_first
+  smallest_first
+  largest_first
+  shuffle
+}
+
+enum JobStatus {
+  queued
+  running
+  succeeded
+  failed
+  cancelled
+}
+
+enum JobKind {
+  render
+  thumbnail
+  import
+  cleanup
+}
+
+enum PublishOutcome {
+  in_progress
+  success
+  definite_failure
+  ambiguous
+}
+
+enum SocialPlatform {
+  instagram
+  youtube_shorts
+  tiktok
+}
+
+enum SocialAccountStatus {
+  connected
+  token_expired
+  revoked
+  disconnected
+}
+
+enum BillingInterval {
+  weekly
+  monthly
+}
+
+enum SubscriptionStatus {
+  created
+  authenticated
+  active
+  pending
+  halted
+  paused
+  cancelled
+  completed
+  expired
+}
+
+enum UsageKind {
+  storage_bytes
+  processing_seconds
+  exports
+  scheduled_items
+}
+
+enum AuthTokenKind {
+  email_verification
+  password_reset
+}
+
+enum WebhookEventStatus {
+  received
+  processed
+  failed
+  ignored
+}
 
 // ============================ Users & billing ============================
 model User {
-  id             String    @id @default(cuid())
+  id            String    @id @default(cuid())
   /// Stored lowercase and trimmed by the application (see src/server/auth/auth-service.ts).
-  email          String    @unique
-  emailVerified  DateTime?
-  passwordHash   String?   // null for Google-only accounts
-  name           String?
-  role           UserRole  @default(user)
-  createdAt      DateTime  @default(now())
+  email         String    @unique
+  emailVerified DateTime?
+  passwordHash  String? // null for Google-only accounts
+  name          String?
+  role          UserRole  @default(user)
+  createdAt     DateTime  @default(now())
 
   sessions       Session[]
   authTokens     AuthToken[]
@@ -113,11 +269,13 @@ model Subscription {
   id                     String             @id @default(cuid())
   userId                 String             @unique
   user                   User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  planId                 String             // "free" | "creator" | "pro" | "agency" (validated by catalog.ts)
+  planId                 String // "free" | "creator" | "pro" | "agency" (validated by catalog.ts)
   interval               BillingInterval
   status                 SubscriptionStatus @default(created)
   razorpaySubscriptionId String?            @unique
-  /** Unix seconds of the last webhook event applied (ignores stale, out-of-order events). */
+  /**
+   * Unix seconds of the last webhook event applied (ignores stale, out-of-order events).
+   */
   lastEventAt            BigInt             @default(0)
   /// Unix seconds when a free trial ends (the start_at sent to Razorpay), or null.
   trialEndsAt            BigInt?
@@ -128,7 +286,9 @@ model Subscription {
 
 model WebhookEvent {
   id              String             @id @default(cuid())
-  /** Razorpay's event id: the unique key that makes webhook handling idempotent. */
+  /**
+   * Razorpay's event id: the unique key that makes webhook handling idempotent.
+   */
   providerEventId String             @unique
   eventType       String
   status          WebhookEventStatus @default(received)
@@ -141,7 +301,7 @@ model PaymentRecord {
   id                String   @id @default(cuid())
   userId            String
   providerPaymentId String   @unique
-  amountPaise       Int      // integer paise, never floats
+  amountPaise       Int // integer paise, never floats
   currency          String   @default("INR")
   status            String
   createdAt         DateTime @default(now())
@@ -157,57 +317,69 @@ model SocialAccount {
   platform             SocialPlatform
   externalAccountId    String
   username             String?
-  /** Encrypted at rest by the application. Never log this. */
+  /**
+   * Encrypted at rest by the application. Never log this.
+   */
   encryptedAccessToken String?
   tokenExpiresAt       DateTime?
   status               SocialAccountStatus @default(connected)
   createdAt            DateTime            @default(now())
 
-  cycles               PublishingCycle[]
+  cycles PublishingCycle[]
 
   @@unique([userId, platform, externalAccountId])
 }
 
 // ============================ Media ============================
 model MediaAsset {
-  id               String       @id @default(cuid())
-  /** The OWNER. Using a shared video never changes this. */
-  ownerId          String
-  owner            User         @relation(fields: [ownerId], references: [id], onDelete: Restrict)
-  kind             MediaKind
-  status           MediaStatus  @default(active)
-  originalFilename String
-  mimeType         String
-  /** Key of the private S3 object. One physical object per row. */
-  storageKey       String       @unique
-  sizeBytes        BigInt
-  durationMs       Int?
-  width            Int?
-  height           Int?
-  checksumSha256   String?
+  id                String       @id @default(cuid())
+  /**
+   * The OWNER. Using a shared video never changes this.
+   */
+  ownerId           String
+  owner             User         @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  kind              MediaKind
+  status            MediaStatus  @default(active)
+  originalFilename  String
+  mimeType          String
+  /**
+   * Key of the private S3 object. One physical object per row.
+   */
+  storageKey        String       @unique
+  sizeBytes         BigInt
+  durationMs        Int?
+  width             Int?
+  height            Int?
+  checksumSha256    String?
   /// Storage key of the small JPEG preview image (or null if none could be made). Never sent to browsers.
-  thumbnailKey     String?
+  thumbnailKey      String?
   /// true = ffprobe decoded the file; false = accepted by file signature only (metadata check incomplete)
-  metadataValidated Boolean     @default(false)
-  /** Set while status = pending_deletion: recipients keep access until this moment. */
-  deleteAfter      DateTime?
-  /** Provenance when this row is an independent import of someone else's video. */
-  importedFromId   String?
-  importedFrom     MediaAsset?  @relation("ImportedCopies", fields: [importedFromId], references: [id], onDelete: SetNull)
-  importedCopies   MediaAsset[] @relation("ImportedCopies")
-  createdAt        DateTime     @default(now())
+  metadataValidated Boolean      @default(false)
+  /**
+   * Set while status = pending_deletion: recipients keep access until this moment.
+   */
+  deleteAfter       DateTime?
+  /**
+   * Provenance when this row is an independent import of someone else's video.
+   */
+  importedFromId    String?
+  importedFrom      MediaAsset?  @relation("ImportedCopies", fields: [importedFromId], references: [id], onDelete: SetNull)
+  importedCopies    MediaAsset[] @relation("ImportedCopies")
+  createdAt         DateTime     @default(now())
 
-  derivatives      MediaDerivative[]
-  collectionItems  CollectionItem[]
-  cycleItems       CycleItem[]       @relation("CycleItemMedia")
-  coverForItems    CycleItem[]       @relation("CycleItemCover")
-  importJobs       MediaImportJob[]  @relation("ImportSource")
+  derivatives     MediaDerivative[]
+  collectionItems CollectionItem[]
+  cycleItems      CycleItem[]       @relation("CycleItemMedia")
+  coverForItems   CycleItem[]       @relation("CycleItemCover")
+  importJobs      MediaImportJob[]  @relation("ImportSource")
 
   @@index([ownerId, status, createdAt])
   @@index([status, deleteAfter])
 }
 
-/** Thumbnails and rendered outputs. Owned by whoever caused the render (may differ from the source owner). */
+/**
+ * Thumbnails and rendered outputs. Owned by whoever caused the render (may differ from the source owner).
+ */
 model MediaDerivative {
   id           String         @id @default(cuid())
   mediaAssetId String
@@ -216,7 +388,9 @@ model MediaDerivative {
   kind         DerivativeKind
   storageKey   String         @unique
   sizeBytes    BigInt
-  /** Hash of the render settings. Same source + same settings = reuse, do not render again. */
+  /**
+   * Hash of the render settings. Same source + same settings = reuse, do not render again.
+   */
   settingsHash String
   createdAt    DateTime       @default(now())
 
@@ -259,7 +433,9 @@ model CollectionShareLink {
   id           String          @id @default(cuid())
   collectionId String
   collection   VideoCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
-  /** SHA-256 of the token. The token itself is shown once and never stored. */
+  /**
+   * SHA-256 of the token. The token itself is shown once and never stored.
+   */
   tokenHash    String          @unique
   capabilities Capability[]
   expiresAt    DateTime?
@@ -279,12 +455,14 @@ model CollectionAccessRequest {
   decidedById           String?
   decidedAt             DateTime?
   createdAt             DateTime            @default(now())
+  // "Only one pending request per user per collection" is enforced in manual-constraints.sql.
 
   @@index([collectionId, status])
-  // "Only one pending request per user per collection" is enforced in manual-constraints.sql.
 }
 
-/** One row per (collection, person). Merges the brief's "CollectionPermission" and "MediaUsageGrant". */
+/**
+ * One row per (collection, person). Merges the brief's "CollectionPermission" and "MediaUsageGrant".
+ */
 model CollectionPermission {
   id           String          @id @default(cuid())
   collectionId String
@@ -310,9 +488,13 @@ model MediaImportJob {
   sourceMedia        MediaAsset   @relation("ImportSource", fields: [sourceMediaId], references: [id], onDelete: Restrict)
   sourceCollectionId String?
   status             ImportStatus @default(pending)
-  /** importer + source: a retry can never create a second copy. */
+  /**
+   * importer + source: a retry can never create a second copy.
+   */
   idempotencyKey     String       @unique
-  /** Where the new copy is being written. Used to delete orphans if the job fails. */
+  /**
+   * Where the new copy is being written. Used to delete orphans if the job fails.
+   */
   newObjectKey       String?
   resultMediaAssetId String?      @unique
   failureReason      String?
@@ -328,7 +510,9 @@ model EditingTemplate {
   ownerId   String
   owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   name      String
-  /** Aspect ratio, background, zoom, border, overlays... validated in application code. */
+  /**
+   * Aspect ratio, background, zoom, border, overlays... validated in application code.
+   */
   settings  Json
   isDefault Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -349,53 +533,65 @@ model PublishingCycle {
   orderMode            OrderMode      @default(manual)
   repeatBehavior       RepeatBehavior @default(never)
   timezone             String         @default("Asia/Kolkata")
-  /** Interval, days of week, time windows, daily maximum, end date. Validated in application code. */
+  /**
+   * Interval, days of week, time windows, daily maximum, end date. Validated in application code.
+   */
   scheduleSettings     Json
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
 
-  items                CycleItem[]
+  items CycleItem[]
 
   @@index([ownerId, status])
 }
 
 model CycleItem {
-  id                String          @id @default(cuid())
-  cycleId           String
-  cycle             PublishingCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
-  /** The user running the cycle (needed to re-check shared permissions). */
-  cycleOwnerId      String
-  /** Restrict: a database cascade must never remove a video someone still needs. */
-  mediaAssetId      String
-  mediaAsset        MediaAsset      @relation("CycleItemMedia", fields: [mediaAssetId], references: [id], onDelete: Restrict)
-  sourceKind        SourceKind
+  id                 String          @id @default(cuid())
+  cycleId            String
+  cycle              PublishingCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  /**
+   * The user running the cycle (needed to re-check shared permissions).
+   */
+  cycleOwnerId       String
+  /**
+   * Restrict: a database cascade must never remove a video someone still needs.
+   */
+  mediaAssetId       String
+  mediaAsset         MediaAsset      @relation("CycleItemMedia", fields: [mediaAssetId], references: [id], onDelete: Restrict)
+  sourceKind         SourceKind
   sourceCollectionId String?
-  status            CycleItemStatus @default(upcoming)
-  position          Int
-  /** Optimistic lock. Every UPDATE must use WHERE id = ? AND version = ? and increase it by 1. */
-  version           Int             @default(1)
-  scheduledFor      DateTime?
-  /** Recipient-specific edit settings (aspect ratio, border, overlays...). The source is never modified. */
-  editingSettings   Json?
-  templateId        String?
-  captionText       String          @default("")
-  captionSource     CaptionSource   @default(none)
-  coverMediaId      String?
-  coverMedia        MediaAsset?     @relation("CycleItemCover", fields: [coverMediaId], references: [id], onDelete: SetNull)
-  coverIsCustom     Boolean         @default(false)
-  /** saved_internally = stored in ClipForge only. applied_on_instagram is set ONLY by the publisher. */
-  coverState        CoverState      @default(none)
-  lockedBy          String?
-  lockExpiresAt     DateTime?
-  reviewReason      String?
-  externalPostId    String?
-  publishedAt       DateTime?
-  createdAt         DateTime        @default(now())
+  status             CycleItemStatus @default(upcoming)
+  position           Int
+  /**
+   * Optimistic lock. Every UPDATE must use WHERE id = ? AND version = ? and increase it by 1.
+   */
+  version            Int             @default(1)
+  scheduledFor       DateTime?
+  /**
+   * Recipient-specific edit settings (aspect ratio, border, overlays...). The source is never modified.
+   */
+  editingSettings    Json?
+  templateId         String?
+  captionText        String          @default("")
+  captionSource      CaptionSource   @default(none)
+  coverMediaId       String?
+  coverMedia         MediaAsset?     @relation("CycleItemCover", fields: [coverMediaId], references: [id], onDelete: SetNull)
+  coverIsCustom      Boolean         @default(false)
+  /**
+   * saved_internally = stored in ClipForge only. applied_on_instagram is set ONLY by the publisher.
+   */
+  coverState         CoverState      @default(none)
+  lockedBy           String?
+  lockExpiresAt      DateTime?
+  reviewReason       String?
+  externalPostId     String?
+  publishedAt        DateTime?
+  createdAt          DateTime        @default(now())
 
-  captionRevisions  CaptionRevision[]
-  coverChanges      CoverImageSelection[]
-  publishAttempts   PublishingJob[]
-  processingJobs    ProcessingJob[]
+  captionRevisions CaptionRevision[]
+  coverChanges     CoverImageSelection[]
+  publishAttempts  PublishingJob[]
+  processingJobs   ProcessingJob[]
 
   /// The scheduler's main query: due items of running cycles.
   @@index([status, scheduledFor])
@@ -416,51 +612,55 @@ model CaptionRevision {
   @@index([cycleItemId, changedAt])
 }
 
-/** History of cover choices. "saved" does not mean Instagram accepted it - see CycleItem.coverState. */
+/**
+ * History of cover choices. "saved" does not mean Instagram accepted it - see CycleItem.coverState.
+ */
 model CoverImageSelection {
-  id                 String    @id @default(cuid())
-  cycleItemId        String
-  cycleItem          CycleItem @relation(fields: [cycleItemId], references: [id], onDelete: Cascade)
-  previousCoverId    String?
-  newCoverId         String?
-  changedById        String
-  changedAt          DateTime  @default(now())
+  id              String    @id @default(cuid())
+  cycleItemId     String
+  cycleItem       CycleItem @relation(fields: [cycleItemId], references: [id], onDelete: Cascade)
+  previousCoverId String?
+  newCoverId      String?
+  changedById     String
+  changedAt       DateTime  @default(now())
 
   @@index([cycleItemId, changedAt])
 }
 
 // ============================ Jobs ============================
 model ProcessingJob {
-  id               String    @id @default(cuid())
-  ownerId          String
-  kind             JobKind
-  status           JobStatus @default(queued)
-  cycleItemId      String?
-  cycleItem        CycleItem? @relation(fields: [cycleItemId], references: [id], onDelete: SetNull)
-  mediaAssetId     String?
-  progressPercent  Int       @default(0)
-  attempts         Int       @default(0)
-  idempotencyKey   String    @unique
-  lockedBy         String?
-  lockExpiresAt    DateTime?
-  errorMessage     String?
-  createdAt        DateTime  @default(now())
-  finishedAt       DateTime?
+  id              String     @id @default(cuid())
+  ownerId         String
+  kind            JobKind
+  status          JobStatus  @default(queued)
+  cycleItemId     String?
+  cycleItem       CycleItem? @relation(fields: [cycleItemId], references: [id], onDelete: SetNull)
+  mediaAssetId    String?
+  progressPercent Int        @default(0)
+  attempts        Int        @default(0)
+  idempotencyKey  String     @unique
+  lockedBy        String?
+  lockExpiresAt   DateTime?
+  errorMessage    String?
+  createdAt       DateTime   @default(now())
+  finishedAt      DateTime?
 
   @@index([status, createdAt])
 }
 
-/** One row per attempt to publish. Ambiguous results are kept for human review, never auto-retried. */
+/**
+ * One row per attempt to publish. Ambiguous results are kept for human review, never auto-retried.
+ */
 model PublishingJob {
-  id               String         @id @default(cuid())
-  cycleItemId      String
-  cycleItem        CycleItem      @relation(fields: [cycleItemId], references: [id], onDelete: Cascade)
-  attemptNumber    Int
-  idempotencyKey   String         @unique
-  outcome          PublishOutcome @default(in_progress)
-  errorMessage     String?
-  startedAt        DateTime       @default(now())
-  finishedAt       DateTime?
+  id             String         @id @default(cuid())
+  cycleItemId    String
+  cycleItem      CycleItem      @relation(fields: [cycleItemId], references: [id], onDelete: Cascade)
+  attemptNumber  Int
+  idempotencyKey String         @unique
+  outcome        PublishOutcome @default(in_progress)
+  errorMessage   String?
+  startedAt      DateTime       @default(now())
+  finishedAt     DateTime?
 
   @@unique([cycleItemId, attemptNumber])
 }
@@ -472,7 +672,9 @@ model Notification {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   type      String
   payload   Json
-  /** Same event + same user = same key, so job retries cannot send duplicates. */
+  /**
+   * Same event + same user = same key, so job retries cannot send duplicates.
+   */
   dedupeKey String    @unique
   readAt    DateTime?
   createdAt DateTime  @default(now())
@@ -487,7 +689,9 @@ model UsageRecord {
   kind           UsageKind
   amount         BigInt
   periodStart    DateTime
-  /** Retries of the same job cannot be counted twice. */
+  /**
+   * Retries of the same job cannot be counted twice.
+   */
   idempotencyKey String    @unique
   createdAt      DateTime  @default(now())
 
@@ -500,7 +704,9 @@ model AuditLog {
   action     String
   entityType String
   entityId   String
-  /** Never put secrets, tokens or signed URLs in here. */
+  /**
+   * Never put secrets, tokens or signed URLs in here.
+   */
   metadata   Json?
   createdAt  DateTime @default(now())
 

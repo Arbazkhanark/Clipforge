@@ -1,5 +1,41 @@
 # External behaviour: what is verified, and what is not
 
+## Stability pass — 2026-11-06, after the audit
+
+Node v22.23.4. Commands and results:
+
+| Command | Result |
+|---|---|
+| `npm ci` | Exit 0. 184 packages from `package-lock.json`. |
+| `npm test` | Exit 0. 395 passed, 1 skipped, 0 failed. |
+| `npm run typecheck` | Exit 0. Requires `prisma generate` first because `src/generated/prisma` is gitignored. |
+| `DATABASE_URL=postgresql://127.0.0.1:5432/clipforge npx prisma validate` | Exit 0. Schema valid. This URL was not used to connect or migrate. |
+| `npm run build` | Exit 0. Next.js 16.4.5 compiled, typechecked, and generated 28 static pages. A second build also exited 0. |
+
+`package.json` no longer uses `latest`. Pinned versions: Next 16.4.5, React 19.3.1, React DOM 19.3.1, TypeScript 7.0.2, tsx 4.23.15, Prisma 7.10.1, `@prisma/client` 7.10.1, `@prisma/adapter-pg` 7.10.1, `pg` 8.23.1, `@types/node` 26.6.6, `@types/react` 19.3.0, `@types/react-dom` 19.3.0, `@types/pg` 8.23.1. Engines: `>=22.12.0 <23`.
+
+## Repository audit — 2026-11-06 (commit `bcb4bb3`)
+
+This section is the latest local run. Older sections below remain as historical notes from the sandbox that had no network. Where they say a command was never run, this section replaces that claim.
+
+Machine: macOS, system Node v23.6.0 (Prisma 7.10.1 refuses it), Homebrew Node v20.18.0 also present (below Prisma's Node 20.19 minimum). Commands below used a downloaded Node v22.23.4 kept in gitignored `.local-node/`. FFmpeg 9.0.2 and ffprobe 9.0.2 were on `PATH`. `pg_isready` reported localhost:5432 accepting connections. `redis-cli ping` returned `PONG`. No `DATABASE_URL` is configured in the repo. `psql` asked for a password for the local user and this audit did not supply one, did not create a database, and did not run migrations.
+
+| Check | Result |
+|---|---|
+| `npm install` on system Node 23.6.0 | Failed. Prisma 7.10.1 preinstall rejects Node 23. |
+| `npm install` on Node 22.23.4 | Succeeded. 183 packages. Created an uncommitted `package-lock.json`. `package.json` still says `latest` for most packages. Resolved today: Next 16.4.5, React 19.3.1, React DOM 19.3.1, TypeScript 7.0.2, tsx 4.23.15, Prisma and `@prisma/client` and `@prisma/adapter-pg` 7.10.1, `pg` 8.23.1. |
+| `npm test` | **395 passed, 1 skipped, 0 failed** (396 tests). The skip is `tests/typecheck.test.ts`, which steps aside once real `@types` are installed and tells you to run `npm run typecheck`. |
+| `npm run typecheck` (`tsc --noEmit`) | **Failed. 15 errors in 4 files:** `src/server/prisma/create-client.ts` (generated client missing), `tests/auth-routes.test.tsx`, `tests/forms.test.tsx`, `tests/storage.test.ts`. |
+| `npm run build` (Next.js 16.4.5) | Compile step succeeded. TypeScript step failed with the same 15 errors. Build did not finish. Next rewrote `tsconfig.json` and added `next-env.d.ts`; both automatic edits were removed so this audit did not keep an unreviewed compiler config. |
+| `npx prisma validate` | **Failed. 103 errors** on Prisma 7.10.1. The first errors say one-line enums such as `enum UserRole { user admin }` are not valid enum-value definitions, so the parser never closes those enums. Later "unknown type" and "index refers to relation fields" errors follow from that. `prisma generate` and `prisma migrate` were not run. |
+| Real PostgreSQL repository tests | Not run. No app database was created. |
+| Next.js dev server, browser against `next dev` | Not run. |
+| S3, Razorpay live/test API, Instagram API, email delivery, Redis/BullMQ inside the app | Not run. Redis the process is installed; the app has no Redis client. |
+
+`npm test` uses Node's test runner and imports the app modules directly. A passing test here still does not mean `next dev`, PostgreSQL, or a production session works.
+
+## Historical notes (2026-10-28 and 2026-11-03)
+
 Verified by reading OFFICIAL documentation via web search/fetch on **2026-10-28**. The development sandbox has no network, so
 nothing here has been exercised against a live service. Re-check before launch; these APIs change.
 

@@ -18,11 +18,12 @@ export interface ModelDelegate {
   updateMany(args: { where?: Where; data: Row }): Promise<{ count: number }>;
   upsert(args: { where: Where; create: Row; update: Row }): Promise<Row>;
   aggregate(args: { where?: Where; _sum: Record<string, true> }): Promise<{ _sum: Record<string, bigint | number | null> }>;
+  deleteMany(args?: { where?: Where }): Promise<{ count: number }>;
 }
 
 export interface PrismaClientLike {
   user: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate;
-  mediaAsset: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate;
+  mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate;
   publishingCycle: ModelDelegate; cycleItem: ModelDelegate; captionRevision: ModelDelegate;
   auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; usageRecord: ModelDelegate;
   /** Runs `work` in a database transaction. */

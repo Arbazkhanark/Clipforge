@@ -76,6 +76,13 @@ class FakeDelegate implements ModelDelegate {
     if (existing) { for (const [k, v] of Object.entries(args.update)) if (v !== undefined) existing[k] = structuredClone(v); return structuredClone(existing); }
     return structuredClone(this.insert(args.create));
   }
+  async deleteMany(args: { where?: Where } = {}): Promise<{ count: number }> {
+    await tick();
+    const targets = new Set(this.find(args.where));
+    const before = this.rows.length;
+    this.rows = this.rows.filter((row) => !targets.has(row));
+    return { count: before - this.rows.length };
+  }
   async aggregate(args: { where?: Where; _sum: Record<string, true> }): Promise<{ _sum: Record<string, bigint | number | null> }> {
     await tick(); const rows = this.find(args.where); const out: Record<string, bigint | number | null> = {};
     for (const field of Object.keys(args._sum)) {
@@ -88,7 +95,7 @@ class FakeDelegate implements ModelDelegate {
 
 export class FakePrismaClient implements PrismaClientLike {
   user = new FakeDelegate([["email"]]); session = new FakeDelegate([["tokenHash"]]); authToken = new FakeDelegate([["tokenHash"]]);
-  mediaAsset = new FakeDelegate([["storageKey"]]); videoCollection = new FakeDelegate([]); collectionItem = new FakeDelegate([["collectionId", "mediaAssetId"]]);
+  mediaAsset = new FakeDelegate([["storageKey"]]); mediaDerivative = new FakeDelegate([["storageKey"], ["mediaAssetId", "ownerId", "kind", "settingsHash"]]); videoCollection = new FakeDelegate([]); collectionItem = new FakeDelegate([["collectionId", "mediaAssetId"]]);
   collectionPermission = new FakeDelegate([["collectionId", "granteeId"]], { collectionId_granteeId: ["collectionId", "granteeId"] });
   publishingCycle = new FakeDelegate([]); cycleItem = new FakeDelegate([]); captionRevision = new FakeDelegate([]); auditLog = new FakeDelegate([]); editingTemplate = new FakeDelegate([]);
   socialAccount = new FakeDelegate([]); subscription = new FakeDelegate([["userId"]]); usageRecord = new FakeDelegate([["idempotencyKey"]]);

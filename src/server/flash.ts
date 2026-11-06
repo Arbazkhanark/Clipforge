@@ -12,11 +12,22 @@ export const FLASH_NOTICES = {
   covers_applied: "Cover update finished. Covers are saved in ClipForge; Instagram has not received them.",
   videos_added: "Videos added to the cycle.",
   registered: "If that email address can be used, we sent a confirmation link. Check your inbox (in local development mode the message is on the outbox page).",
+  registered_no_email: "If that email address can be used, the account is saved in the database. Email confirmation is not available yet, so no message was sent. You can sign in, and the account stays unverified until email delivery is configured.",
+  reset_unavailable: "Password reset by email is not available yet. No message was sent.",
   verified: "Your email is confirmed. You can sign in now.",
   logged_out: "You are signed out.",
   reset_email_sent: "If that email belongs to a confirmed account, we sent a password reset link.",
   password_changed: "Your password was changed and you were signed out everywhere. Sign in with the new password.",
   template_saved: "Template saved. Your original video was not changed.",
+  template_exists: "That template is already saved, so no duplicate was created.",
+  settings_saved: "Settings saved for this video. The original file was not changed.",
+  bulk_review: "Review these changes. Nothing has been saved yet.",
+  bulk_applied: "Bulk edit applied. Only the ticked settings changed, and each original file was kept.",
+  renders_queued: "Rendering has started for the videos below. Each one is a new file. The originals are kept.",
+  render_queued: "Rendering has started. This page updates until the export is ready. The original video is not changed.",
+  collection_created: "Collection saved in the database.",
+  collection_updated: "Collection details saved.",
+  collection_media_saved: "The videos in this collection were saved.",
   videos_removed: "Videos removed from the cycle. Already-published posts are not affected.",
 } as const;
 
@@ -29,16 +40,19 @@ export const FLASH_ERRORS = {
   invalid_email: "Enter a valid email address.",
   auth_not_available: "Sign-in is not available in this build.",
   validation_failed: "Some of the fields are not valid. Check them and try again.",
-  not_authenticated: "Please sign in first. (Real sign-in is not available yet in this build.)",
+  not_authenticated: "Please sign in first.",
+  database_unavailable: "The database could not complete that request. Nothing was saved in memory.",
   not_found: "We could not find that, or you do not have access to it.",
   forbidden: "You are not allowed to do that.",
-  plan_limit: "Your plan does not allow that (for example a storage or campaign limit).",
+  plan_limit: "Your plan does not allow that many at once. Nothing was changed.",
   conflict: "Someone or something else changed this at the same moment. Reload the page and try again.",
   preflight_failed: "This cycle cannot start yet. See the checks below.",
   file_too_large: "That file is too large for one upload.",
   unsupported_media_type: "That file is not a supported video or image, or its contents do not match its type.",
   invalid_media: "That file could not be read as valid media, so it was not saved.",
   storage_not_configured: "Uploads are not available: no storage is configured.",
+  storage_unavailable: "The private media folder is not available. Nothing was saved in memory.",
+  email_not_configured: "Email delivery is not configured. No message was sent.",
   not_configured: "This feature is not connected yet in this build.",
   payload_too_large: "That request is too large.",
   length_required: "The upload did not say how large it is, so it was refused.",
@@ -66,7 +80,7 @@ export function flashCodeForError(error: unknown): FlashErrorCode {
 const SAFE_PATH = /^\/[A-Za-z0-9_\/-]{0,200}$/;
 
 /** Builds the redirect target. The path must be a plain internal path (no "//", no scheme, no query). */
-const EXTRA_KEYS = ["media"] as const;
+const EXTRA_KEYS = ["media", "job", "draft", "batch"] as const;
 const EXTRA_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export function buildFlashLocation(path: string, kind: "notice" | "error", code: string, counts: Partial<Record<(typeof COUNT_KEYS)[number], number>> = {}, extra: Partial<Record<(typeof EXTRA_KEYS)[number], string>> = {}): string {

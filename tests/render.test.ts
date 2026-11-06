@@ -58,6 +58,13 @@ test("the plan's resolution cap is applied to the actual command", () => {
   assert.equal(free.canvas.width, 720); assert.equal(pro.canvas.width, 1080);
 });
 
+test("an image background is a separate input, never a filter string from the user", () => {
+  const plan = buildRenderArgs({ inputPath: "in.mp4", outputPath: "out.mp4", backgroundImagePath: "bg.png", source: SOURCE, settings: settings({ background: { kind: "image" }, border: { thicknessPx: 0, colorHex: "#000000" } }) });
+  assert.ok(plan.args.includes("bg.png"));
+  assert.ok(plan.args.includes("-loop"));
+  assert.throws(() => buildRenderArgs({ inputPath: "in.mp4", outputPath: "out.mp4", source: SOURCE, settings: settings({ background: { kind: "image" } }) }), /background image/);
+});
+
 test("args never use a shell string and keep paths as separate arguments", () => {
   const path = "my video; rm -rf /.mp4";
   const plan = buildRenderArgs({ inputPath: path, outputPath: "out.mp4", source: SOURCE, settings: settings() });

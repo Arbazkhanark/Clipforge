@@ -189,17 +189,17 @@ test("page data: your video only; other users' videos, images and missing ids al
 test("page: without a video it lists yours to choose from; templates show 'N of limit'", async () => {
   const none = html(await EditorPage({}));
   assert.ok(none.includes("Choose a video")); assert.ok(none.includes('href="/editor?media=v1"')); assert.ok(none.includes("Clip")); assert.ok(!none.includes("Eve clip"));
-  assert.ok(none.includes("Your templates (0 of 3)")); assert.ok(none.includes("Rendering is not connected yet"));
+  assert.ok(none.includes("Your templates (0 of 3)")); assert.ok(none.includes("The original video is kept"));
   await save("bob", { name: "Saved look", settings: goodSettings() });
   const withTemplate = html(await EditorPage({})); assert.ok(withTemplate.includes("Your templates (1 of 3)")); assert.ok(withTemplate.includes("Saved look")); assert.ok(withTemplate.includes("1:1, blurred background, zoom 1.2, 8px border"));
 });
 
-test("page: the form has every control, two clearly different buttons, no enabled render button, and a labelled sketch", async () => {
+test("page: the form has every control, two clearly different buttons, a render action, and a labelled sketch", async () => {
   const page = html(await EditorPage({ searchParams: { media: "v1" } }));
   for (const name of ['name="aspect"', 'name="zoom"', 'name="offsetX"', 'name="offsetY"', 'name="bg"', 'name="blur"', 'name="bgColor"', 'name="borderPx"', 'name="borderColor"', 'name="logoMedia"', 'name="logoWidth"', 'name="logoX"', 'name="logoY"', 'name="logoOpacity"', 'name="media"', 'name="name"']) assert.ok(page.includes(name), name);
   for (const label of ["9:16 (Reels, recommended)", "4:5", "1:1", "16:9", "Original"]) assert.ok(page.includes(label), label);
   assert.ok(/formNoValidate/i.test(page)); assert.ok(/formAction="\/api\/forms\/editor-save"/i.test(page)); assert.ok(/formMethod="post"/i.test(page)); assert.ok(page.includes('method="get"') && page.includes('action="/editor"'));
-  assert.ok(page.includes("Layout sketch")); assert.ok(page.includes("not a rendered video")); assert.ok(/<button type="button" disabled="">Render video \(not available yet\)/.test(page));
+  assert.ok(page.includes("Layout sketch")); assert.ok(page.includes("not a rendered video")); assert.ok(page.includes('formAction="/api/forms/render"') && page.includes("Render video"));
   assert.ok(page.includes("never change the original")); assert.ok(page.includes("up to 720p"));                                  // Free plan cap, from the catalog
   assert.ok(page.includes('role="img"') && page.includes('aria-label="Layout sketch of the edited video"'));
   assert.ok(page.includes("api/media/file?id=v1&amp;variant=thumbnail")); assert.ok(!/storageKey|media\/bob/.test(page));

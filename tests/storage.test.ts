@@ -25,11 +25,11 @@ test("storage contract (both adapters): stage -> inspect -> commit -> exists; co
   for (const [name, storage] of await adapters()) {
     await storage.stage("staging/u1", BYTES);
     assert.equal(await storage.runWithStagedFile("staging/u1", async (file) => existsSync(file)), true, name);
-    await assert.rejects(() => storage.stage("staging/u1", BYTES), undefined, `${name}: staging must not overwrite`);
+    await assert.rejects(() => storage.stage("staging/u1", BYTES), `${name}: staging must not overwrite`);
     await storage.commit("staging/u1", "media/bob/m1");
     assert.equal(await storage.exists("media/bob/m1"), true, name);
     await storage.stage("staging/u2", BYTES);
-    await assert.rejects(() => storage.commit("staging/u2", "media/bob/m1"), undefined, `${name}: commit must not overwrite an existing object`);
+    await assert.rejects(() => storage.commit("staging/u2", "media/bob/m1"), `${name}: commit must not overwrite an existing object`);
     assert.equal(await storage.exists("media/bob/m1"), true);
     await storage.discardStaged("staging/u2");
     await storage.discardStaged("staging/never-existed"); // missing is fine
@@ -102,7 +102,8 @@ test("local disk refuses a root inside a web-served folder (public/)", async () 
 test("storage descriptions keep demo memory, local disk and cloud clearly apart", () => {
   assert.match(describeStorage("memory").warning, /discarded when the server restarts/);
   assert.equal(describeStorage("memory").persistent, false);
-  assert.match(describeStorage("local-disk").warning, /list of files is still held in memory/);
+  assert.match(describeStorage("local-disk").warning, /private folder on this computer/);
+  assert.match(describeStorage("local-disk").warning, /not stored in the database/);
   assert.equal(describeStorage("local-disk").persistent, true);
   assert.match(describeStorage("s3").warning, /not connected/);
   assert.match(describeStorage(null).label, /Not available/);

@@ -21,10 +21,12 @@ export interface AuthConfig {
   resetTtlMs: number;
   /** Save "last used" at most this often, so every request is not a database write. */
   touchEveryMs: number;
+  /** Local mode requires a confirmation link. Database mode turns this off until a real email provider exists. */
+  requireVerifiedEmail: boolean;
 }
 export const DEFAULT_AUTH_CONFIG = (baseUrl: string): AuthConfig => ({
   baseUrl, scrypt: DEFAULT_SCRYPT_PARAMS, sessionAbsoluteMs: 30 * 86_400_000, sessionIdleMs: 7 * 86_400_000,
-  verificationTtlMs: 24 * 3_600_000, resetTtlMs: 3_600_000, touchEveryMs: 60_000,
+  verificationTtlMs: 24 * 3_600_000, resetTtlMs: 3_600_000, touchEveryMs: 60_000, requireVerifiedEmail: true,
 });
 
 export interface AuthDeps { repo: AuthRepository; email: EmailSender; limiter: RateLimiter; now: () => Date; newId: () => string; config: AuthConfig; }
@@ -56,7 +58,7 @@ export class AuthService {
     if (problems.length > 0) return { ok: false, problems };
 
     const user: UserRecord = { id: this.deps.newId(), email, emailVerifiedAt: null, passwordHash: await hashPassword(password, config.scrypt), name: name || null, role: "user", createdAt: this.deps.now() };
-    if (await repo.createUser(user)) await this.issueToken(user.id, email, "email_verification");
+    if (await repo.createUser(user) && config.requireVerifiedEmail) await this.issueToken(user.id, email, "email_verification");
     return { ok: true };
   }
 
@@ -66,14 +68,22 @@ export class AuthService {
     const { token, tokenHash } = generateToken();
     const ttl = kind === "email_verification" ? config.verificationTtlMs : config.resetTtlMs;
     await repo.createAuthToken({ id: this.deps.newId(), userId, kind, tokenHash, expiresAt: new Date(now.getTime() + ttl), usedAt: null, createdAt: now });
-    await this.deps.email.send(kind === "email_verification" ? verificationEmail(email, config.baseUrl, token) : passwordResetEmail(email, config.baseUrl, token));
+    try {
+      await this.deps.email.send(kind === "email_verification" ? verificationEmail(email, config.baseUrl, token) : passwordResetEmail(email, config.baseUrl, token));
+    } catch (error) {
+      await repo.invalidateAuthTokens(userId, kind, now); // a failed send must not leave a usable link
+      throw error;
+    }
   }
 
   async verifyEmail(token: unknown): Promise<{ ok: boolean }> {
     if (typeof token !== "string" || token.length < 20 || token.length > 100) return { ok: false };
-    const record = await this.deps.repo.consumeAuthToken("email_verification", hashToken(token), this.deps.now());
-    if (!record) return { ok: false };
-    await this.deps.repo.markEmailVerified(record.userId, this.deps.now());
+    const key = `verify:${hashToken(token)}`; const now = this.deps.now();
+    if (!this.deps.limiter.check(key, now).allowed) return { ok: false };
+    const record = await this.deps.repo.consumeAuthToken("email_verification", hashToken(token), now);
+    if (!record) { this.deps.limiter.recordFailure(key, now); return { ok: false }; }
+    this.deps.limiter.reset(key);
+    await this.deps.repo.markEmailVerified(record.userId, now);
     return { ok: true };
   }
 
@@ -96,7 +106,7 @@ export class AuthService {
     // Always do one hash comparison, even when the account does not exist.
     const passwordOk = await verifyPassword(password, user?.passwordHash ?? (await this.dummyHash));
     if (!user || !user.passwordHash || !passwordOk) { for (const key of keys) limiter.recordFailure(key, now); return { ok: false, code: "invalid_credentials" }; }
-    if (!user.emailVerifiedAt) return { ok: false, code: "email_not_verified" };
+    if (config.requireVerifiedEmail && !user.emailVerifiedAt) return { ok: false, code: "email_not_verified" };
 
     for (const key of keys) limiter.reset(key);
     if (needsRehash(user.passwordHash, config.scrypt)) await repo.setPasswordHash(user.id, await hashPassword(password, config.scrypt));
@@ -123,11 +133,14 @@ export class AuthService {
     if (session) await this.deps.repo.revokeSession(session.id, this.deps.now());
   }
 
-  /** Always answers ok (no account enumeration). Only verified accounts get a reset email. */
+  /** Always answers ok (no account enumeration). Only verified accounts get a reset email. Repeated requests are slowed down and still get the same answer. */
   async requestPasswordReset(emailInput: unknown): Promise<{ ok: true }> {
     const email = typeof emailInput === "string" ? normaliseEmail(emailInput) : "";
+    const key = `reset:${hashToken(email || "blank")}`; const now = this.deps.now();
+    if (!this.deps.limiter.check(key, now).allowed) return { ok: true };
+    this.deps.limiter.recordFailure(key, now);
     const user = email ? await this.deps.repo.getUserByEmail(email) : null;
-    if (user?.emailVerifiedAt) await this.issueToken(user.id, user.email, "password_reset");
+    if (this.deps.config.requireVerifiedEmail && user?.emailVerifiedAt) await this.issueToken(user.id, user.email, "password_reset");
     return { ok: true };
   }
 

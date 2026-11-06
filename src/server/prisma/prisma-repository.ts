@@ -9,9 +9,10 @@ import { effectivePlanId, type SubscriptionState } from "../../lib/billing/subsc
 import type { PlanId } from "../../lib/billing/catalog.ts";
 import type { CaptionRevision } from "../../lib/domain/caption-cover-updates.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../../lib/domain/types.ts";
-import type { AuditEntry, CycleRecord, EditingTemplateRecord, Repository, SocialAccountRecord } from "../repository.ts";
+import type { UsageRecordDraft } from "../../lib/domain/usage-accounting.ts";
+import type { AuditEntry, CycleRecord, EditingTemplateRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "../repository.ts";
 import { cycleToRow, grantToRow, itemToMutableData, itemToRow, mediaToRow, rowToCollection, rowToCycle, rowToGrant, rowToItem, rowToMedia, rowToSocialAccount } from "./mappers.ts";
-import type { PrismaClientLike } from "./prisma-client-like.ts";
+import { isUniqueViolation, type PrismaClientLike } from "./prisma-client-like.ts";
 
 const ACTIVE_CYCLE_STATUSES = ["draft", "running", "paused"];
 
@@ -55,8 +56,11 @@ export class PrismaRepository implements Repository {
     return { items: rows.map(rowToMedia), total };
   }
   async getStorageUsedBytes(userId: string): Promise<number> {
-    const sum = await this.db.mediaAsset.aggregate({ where: { ownerId: userId, status: { not: "deleted" } }, _sum: { sizeBytes: true } });
-    return Number(sum._sum["sizeBytes"] ?? 0);
+    const [mediaSum, renderSum] = await Promise.all([
+      this.db.mediaAsset.aggregate({ where: { ownerId: userId, status: { not: "deleted" } }, _sum: { sizeBytes: true } }),
+      this.db.mediaDerivative.aggregate({ where: { ownerId: userId, kind: "render" }, _sum: { sizeBytes: true } }),
+    ]);
+    return Number(mediaSum._sum["sizeBytes"] ?? 0) + Number(renderSum._sum["sizeBytes"] ?? 0);
   }
 
   async addMediaIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, limitBytes: number): Promise<boolean> {
@@ -85,6 +89,34 @@ export class PrismaRepository implements Repository {
   async getCollection(collectionId: string): Promise<VideoCollection | null> {
     const row = await this.db.videoCollection.findUnique({ where: { id: collectionId } });
     return row ? (await this.collectionsFromRows([row]))[0] ?? null : null;
+  }
+  private async mediaRowsExist(db: PrismaClientLike, mediaIds: string[]): Promise<boolean> {
+    if (new Set(mediaIds).size !== mediaIds.length) return false;
+    if (mediaIds.length === 0) return true;
+    return (await db.mediaAsset.count({ where: { id: { in: mediaIds } } })) === mediaIds.length;
+  }
+  async createCollection(collection: VideoCollection): Promise<boolean> {
+    if (!(await this.mediaRowsExist(this.db, collection.mediaIds))) return false;
+    try {
+      await this.db.$transaction(async (tx) => {
+        await tx.videoCollection.create({ data: { id: collection.id, ownerId: collection.ownerId, name: collection.name ?? collection.id, description: collection.description ?? null, visibility: collection.visibility, archived: collection.archived } });
+        if (collection.mediaIds.length > 0) await tx.collectionItem.createMany({ data: collection.mediaIds.map((mediaAssetId, position) => ({ collectionId: collection.id, mediaAssetId, position })) });
+      });
+      return true;
+    } catch (error) { if (isUniqueViolation(error)) return false; throw error; }
+  }
+  async updateCollection(collectionId: string, details: { name: string; description: string | null; visibility: VideoCollection["visibility"]; archived: boolean }): Promise<boolean> {
+    const result = await this.db.videoCollection.updateMany({ where: { id: collectionId }, data: { name: details.name, description: details.description, visibility: details.visibility, archived: details.archived } });
+    return result.count === 1;
+  }
+  async replaceCollectionMedia(collectionId: string, mediaIds: string[]): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      if (!(await tx.videoCollection.findUnique({ where: { id: collectionId } }))) return false;
+      if (!(await this.mediaRowsExist(tx, mediaIds))) return false;
+      await tx.collectionItem.deleteMany({ where: { collectionId } });
+      if (mediaIds.length > 0) await tx.collectionItem.createMany({ data: mediaIds.map((mediaAssetId, position) => ({ collectionId, mediaAssetId, position })) });
+      return true;
+    });
   }
   async listCollectionsForOwner(userId: string): Promise<VideoCollection[]> { return this.collectionsFromRows(await this.db.videoCollection.findMany({ where: { ownerId: userId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })); }
   async listCollectionsSharedWith(userId: string, now: Date): Promise<VideoCollection[]> {
@@ -132,14 +164,62 @@ export class PrismaRepository implements Repository {
   async createTemplateIfWithinLimit(template: EditingTemplateRecord, limit: number): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${template.ownerId} FOR UPDATE`; // serialise this user's saves
-      if ((await tx.editingTemplate.count({ where: { ownerId: template.ownerId } })) + 1 > limit) return false;
+      const rows = await tx.editingTemplate.findMany({ where: { ownerId: template.ownerId } });
+      const named = rows.filter((row) => !String(row["name"]).startsWith("v:")).length;
+      if (named + 1 > limit) return false;
       await tx.editingTemplate.create({ data: { id: template.id, ownerId: template.ownerId, name: template.name, settings: template.settings, isDefault: false, createdAt: template.createdAt } });
       return true;
     });
   }
+  async saveVideoSettings(template: EditingTemplateRecord): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      const existing = await tx.editingTemplate.findFirst({ where: { ownerId: template.ownerId, name: template.name } });
+      if (existing) { await tx.editingTemplate.update({ where: { id: existing["id"] as string }, data: { settings: template.settings } }); return; }
+      await tx.editingTemplate.create({ data: { id: template.id, ownerId: template.ownerId, name: template.name, settings: template.settings, isDefault: false, createdAt: template.createdAt } });
+    });
+  }
+  async listAuditsForEntities(entityType: string, entityIds: string[]): Promise<{ entityId: string; action: string; metadata: Record<string, unknown> | null }[]> {
+    if (entityIds.length === 0) return [];
+    const rows = await this.db.auditLog.findMany({ where: { entityType, entityId: { in: entityIds } } });
+    return rows.map((row) => ({ entityId: row["entityId"] as string, action: row["action"] as string, metadata: (row["metadata"] as Record<string, unknown> | null) ?? null }));
+  }
 
   async saveCaptionRevisions(revisions: CaptionRevision[]): Promise<void> {
     if (revisions.length > 0) await this.db.captionRevision.createMany({ data: revisions.map((r) => ({ cycleItemId: r.itemId, previousText: r.previousText, newText: r.newText, source: r.source, changedById: r.changedBy, changedAt: r.changedAt })) });
+  }
+  async findRenderOutput(ownerId: string, sourceMediaId: string, settingsHash: string): Promise<{ id: string; sizeBytes: number } | null> {
+    const row = await this.db.mediaDerivative.findFirst({ where: { ownerId, mediaAssetId: sourceMediaId, kind: "render", settingsHash } });
+    return row ? { id: row["id"], sizeBytes: Number(row["sizeBytes"]) } : null;
+  }
+  async countRenderOutputsSince(ownerId: string, since: Date): Promise<number> {
+    return this.db.mediaDerivative.count({ where: { ownerId, kind: "render", createdAt: { gte: since } } });
+  }
+  async saveRenderOutput(record: { id: string; sourceMediaId: string; ownerId: string; storageKey: string; sizeBytes: number; settingsHash: string; createdAt: Date }, limitBytes: number): Promise<SaveRenderResult> {
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${record.ownerId} FOR UPDATE`;
+      const existing = await tx.mediaDerivative.findFirst({ where: { ownerId: record.ownerId, mediaAssetId: record.sourceMediaId, kind: "render", settingsHash: record.settingsHash } });
+      if (existing) return { status: "duplicate", id: existing["id"] as string };
+      const mediaSum = await tx.mediaAsset.aggregate({ where: { ownerId: record.ownerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } });
+      const renderSum = await tx.mediaDerivative.aggregate({ where: { ownerId: record.ownerId, kind: "render" }, _sum: { sizeBytes: true } });
+      if (Number(mediaSum._sum["sizeBytes"] ?? 0) + Number(renderSum._sum["sizeBytes"] ?? 0) + record.sizeBytes > limitBytes) return { status: "over_quota" };
+      await tx.mediaDerivative.create({ data: { id: record.id, mediaAssetId: record.sourceMediaId, ownerId: record.ownerId, kind: "render", storageKey: record.storageKey, sizeBytes: BigInt(record.sizeBytes), settingsHash: record.settingsHash, createdAt: record.createdAt } });
+      return { status: "saved", id: record.id };
+    });
+  }
+  async listRenderOutputsForOwner(ownerId: string): Promise<RenderOutputRecord[]> {
+    const rows = await this.db.mediaDerivative.findMany({ where: { ownerId, kind: "render" }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 20 });
+    return rows.map((row) => ({ id: row["id"], sourceMediaId: row["mediaAssetId"], ownerId: row["ownerId"], sizeBytes: Number(row["sizeBytes"]), createdAt: row["createdAt"] }));
+  }
+  async getRenderOutput(id: string): Promise<{ id: string; ownerId: string; sourceMediaId: string; sizeBytes: number; storageKey: string } | null> {
+    const row = await this.db.mediaDerivative.findUnique({ where: { id } });
+    return row && row["kind"] === "render" ? { id: row["id"], ownerId: row["ownerId"], sourceMediaId: row["mediaAssetId"], sizeBytes: Number(row["sizeBytes"]), storageKey: row["storageKey"] } : null;
+  }
+  async addUsageRecords(records: UsageRecordDraft[]): Promise<void> {
+    for (const record of records) {
+      try {
+        await this.db.usageRecord.create({ data: { userId: record.userId, kind: record.kind, amount: BigInt(record.amount), periodStart: record.periodStart, idempotencyKey: record.idempotencyKey } });
+      } catch (error) { if (!isUniqueViolation(error)) throw error; }
+    }
   }
   async appendAudit(entry: AuditEntry): Promise<void> {
     await this.db.auditLog.create({ data: { actorId: entry.actorId, action: entry.action, entityType: entry.entityType, entityId: entry.entityId, metadata: entry.metadata ?? null } });

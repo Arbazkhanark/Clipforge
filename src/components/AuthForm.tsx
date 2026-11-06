@@ -10,14 +10,15 @@ const BUTTONS: Record<Mode, string> = { login: "Sign in", register: "Create acco
  * Account forms. They are ENABLED only when the runtime really provides authentication (`available`). Otherwise the fields
  * are shown but the button is disabled and says why - nothing pretends to work.
  */
-export function AuthForm({ mode, demoMode, available = false, flash = null, token = null }: { mode: Mode; demoMode: boolean; available?: boolean; flash?: Flash | null; token?: string | null }) {
+export function AuthForm({ mode, demoMode, available = false, flash = null, token = null, persistence = "memory" }: { mode: Mode; demoMode: boolean; available?: boolean; flash?: Flash | null; token?: string | null; persistence?: "memory" | "database" }) {
   const isRegister = mode === "register"; const needsEmail = mode === "login" || mode === "register" || mode === "forgot"; const needsPassword = mode === "login" || mode === "register" || mode === "reset";
   return (
     <section aria-labelledby="auth-heading" className="auth-card">
       <h1 id="auth-heading">{TITLES[mode]}</h1>
       <FlashMessage flash={flash} />
       {!available && <p role="note" className="notice">Accounts and sign-in are not available yet: there is no authentication or database in this build. The form below cannot be submitted.</p>}
-      {available && <p role="note" className="notice" data-auth-mode="local">Local development accounts: they live in server memory and disappear when the server restarts.</p>}
+      {available && persistence === "memory" && <p role="note" className="notice" data-auth-mode="local">Local development accounts: they live in server memory and disappear when the server restarts.</p>}
+      {available && persistence === "database" && <p role="note" className="notice" data-auth-mode="database">Accounts and sessions are stored in the database and remain after a restart. Email confirmation and password-reset email are not available yet, so no message is sent and the account stays unverified.</p>}
       <form method="post" action={available ? ACTIONS[mode] : "#"} aria-describedby="auth-heading">
         {mode === "verify" && <p>Press the button to confirm that this is your email address.</p>}
         {(mode === "verify" || mode === "reset") && <input type="hidden" name="token" value={token ?? ""} />}

@@ -1,5 +1,5 @@
 // In-memory storage for demo mode and tests. Bytes vanish when the server restarts - the UI says so.
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseStorageKey, type MediaStorage } from "./media-storage.ts";
@@ -44,4 +44,19 @@ export class MemoryMediaStorage implements MediaStorage {
     return new Response(slice).body as ReadableStream<Uint8Array>;
   }
   async deleteUnreferencedUpload(finalKey: string): Promise<void> { parseStorageKey(finalKey); this.objects.delete(finalKey); }
+  async runWithCommittedFile<T>(key: string, work: (filePath: string) => Promise<T>): Promise<T> {
+    parseStorageKey(key);
+    const bytes = this.objects.get(key);
+    if (!bytes) throw new Error("No such object.");
+    const dir = await mkdtemp(path.join(tmpdir(), "clipforge-object-"));
+    try { const file = path.join(dir, "object.bin"); await writeFile(file, bytes, { mode: 0o600 }); return await work(file); }
+    finally { await rm(dir, { recursive: true, force: true }); }
+  }
+  async importLocalFile(finalKey: string, sourcePath: string): Promise<number> {
+    parseStorageKey(finalKey);
+    if (this.objects.has(finalKey)) throw new Error("An object already exists under that key.");
+    const bytes = await readFile(sourcePath);
+    this.objects.set(finalKey, bytes);
+    return bytes.length;
+  }
 }

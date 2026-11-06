@@ -4,7 +4,7 @@ import { ASPECT_RATIOS, computeRenderLayout, validateRenderSettings, type Aspect
 
 export interface EditingSettings {
   aspect: AspectRatio;
-  background: { kind: "solid"; colorHex: string } | { kind: "blur"; strength: number };
+  background: { kind: "solid"; colorHex: string } | { kind: "blur"; strength: number } | { kind: "image"; mediaId: string };
   zoom: number;
   offsetX: number;
   offsetY: number;
@@ -17,6 +17,10 @@ export interface EditingSettings {
 export const DEFAULT_EDITING_SETTINGS: EditingSettings = {
   aspect: "9:16", background: { kind: "blur", strength: 20 }, zoom: 1, offsetX: 0, offsetY: 0, border: { thicknessPx: 0, colorHex: "#ffffff" }, logo: null,
 };
+
+/** Per-video saved settings use this name in the template table. They are not user templates and do not use the template cap. */
+export const videoSettingsName = (mediaId: string): string => `v:${mediaId}`;
+export const isReservedTemplateName = (name: string): boolean => name.startsWith("v:");
 
 /** Only used to run the range checks; the real source dimensions do not affect which values are allowed. */
 const NOMINAL_SOURCE = { width: 1920, height: 1080, durationSeconds: 1 };
@@ -40,7 +44,10 @@ export function parseEditingSettings(raw: unknown): ParsedSettings {
   if (!isObject(bg)) problems.push("Choose a background.");
   else if (bg["kind"] === "solid") background = { kind: "solid", colorHex: typeof bg["colorHex"] === "string" ? bg["colorHex"] : "" };
   else if (bg["kind"] === "blur") background = { kind: "blur", strength: num(bg["strength"], "Blur strength") };
-  else problems.push("Background must be a solid colour or blurred.");
+  else if (bg["kind"] === "image") {
+    if (typeof bg["mediaId"] !== "string" || !ID.test(bg["mediaId"])) problems.push("The background image must be one of your images.");
+    else background = { kind: "image", mediaId: bg["mediaId"] };
+  } else problems.push("Background must be a solid colour, a blurred copy of the video, or one of your images.");
 
   const border = isObject(raw["border"]) ? raw["border"] : null;
   if (!border) problems.push("Border settings are missing.");
@@ -65,7 +72,7 @@ export function parseEditingSettings(raw: unknown): ParsedSettings {
 /** Editing settings -> renderer settings. The resolution cap comes from the PLAN, never from the saved settings. */
 export function toRenderSettings(s: EditingSettings, maxResolution: MaxResolution): RenderSettings {
   return {
-    aspect: s.aspect, maxResolution, background: s.background, zoom: s.zoom, offsetX: s.offsetX, offsetY: s.offsetY, border: s.border,
+    aspect: s.aspect, maxResolution, background: s.background.kind === "image" ? { kind: "image" } : s.background, zoom: s.zoom, offsetX: s.offsetX, offsetY: s.offsetY, border: s.border,
     ...(s.logo ? { logo: { widthFraction: s.logo.widthFraction, centerX: s.logo.centerX, centerY: s.logo.centerY, opacity: s.logo.opacity } } : {}),
   };
 }
@@ -103,10 +110,10 @@ export function editorCandidateFromFields(get: (key: string) => string | undefin
     const v = get(key); if (v === undefined || v === "") return fallback;
     const n = Number(v); return Number.isFinite(n) ? n : onBadNumber(label, fallback);
   };
-  const d = DEFAULT_EDITING_SETTINGS; const logoMedia = get("logoMedia");
+  const d = DEFAULT_EDITING_SETTINGS; const logoMedia = get("logoMedia"); const bg = get("bg") ?? d.background.kind;
   return {
     aspect: get("aspect") ?? d.aspect,
-    background: (get("bg") ?? d.background.kind) === "solid" ? { kind: "solid", colorHex: get("bgColor") ?? "#000000" } : { kind: "blur", strength: number("blur", 20, "Blur strength") },
+    background: bg === "solid" ? { kind: "solid", colorHex: get("bgColor") ?? "#000000" } : bg === "image" ? { kind: "image", mediaId: get("bgImage") ?? "" } : { kind: "blur", strength: number("blur", 20, "Blur strength") },
     zoom: number("zoom", d.zoom, "Zoom"), offsetX: number("offsetX", 0, "Horizontal position"), offsetY: number("offsetY", 0, "Vertical position"),
     border: { thicknessPx: number("borderPx", 0, "Border thickness"), colorHex: get("borderColor") ?? "#ffffff" },
     logo: logoMedia ? { mediaId: logoMedia, widthFraction: number("logoWidth", 0.2, "Logo width"), centerX: number("logoX", 0.85, "Logo horizontal position"), centerY: number("logoY", 0.1, "Logo vertical position"), opacity: number("logoOpacity", 1, "Logo opacity") } : null,

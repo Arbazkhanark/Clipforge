@@ -1,4 +1,5 @@
 import { ASPECT_RATIOS } from "../lib/render/ffmpeg-command.ts";
+import { EditorSession } from "./EditorSession.tsx";
 import { LogoDragger } from "./LogoDragger.tsx";
 import { Thumbnail } from "./MediaTable.tsx";
 import type { EditorPageData } from "../server/queries.ts";
@@ -27,7 +28,7 @@ export function EditorPreview({ data }: { data: EditorPageData }) {
           )}
         </g>
       </svg>
-      <figcaption className="muted">Layout sketch ({canvas.width} × {canvas.height}), not a rendered video. {data.assumedSourceSize ? "The video's size is unknown, so a 16:9 picture is assumed. " : ""}Background rendering is not connected yet.</figcaption>
+      <figcaption className="muted">Layout sketch ({canvas.width} × {canvas.height}), not a rendered video. {data.assumedSourceSize ? "The video's size is unknown, so a 16:9 picture is assumed. " : ""}The exported file is a separate video.</figcaption>
       {logo && <LogoDragger svgId="editor-preview" formId="editor-form" />}
     </figure>
   );
@@ -52,9 +53,11 @@ export function EditorForm({ data }: { data: EditorPageData }) {
       <fieldset>
         <legend>Background</legend>
         <p><label><input type="radio" name="bg" value="blur" defaultChecked={settings.background.kind === "blur"} /> Blurred copy of the video</label>{" "}
-          <label><input type="radio" name="bg" value="solid" defaultChecked={settings.background.kind === "solid"} /> Solid colour</label></p>
+          <label><input type="radio" name="bg" value="solid" defaultChecked={settings.background.kind === "solid"} /> Solid colour</label>{" "}
+          <label><input type="radio" name="bg" value="image" defaultChecked={settings.background.kind === "image"} /> One of your images</label></p>
         <Range name="blur" label="Blur strength" min={1} max={40} step={1} value={settings.background.kind === "blur" ? settings.background.strength : 20} />
         <p><label>Colour<br /><input type="color" name="bgColor" defaultValue={settings.background.kind === "solid" ? settings.background.colorHex : "#000000"} /></label></p>
+        {data.logoChoices.length > 0 && <p><label>Background image<br /><select name="bgImage" defaultValue={settings.background.kind === "image" ? settings.background.mediaId : ""}><option value="">Choose an image</option>{data.logoChoices.map((m) => <option key={m.id} value={m.id}>{m.title}</option>)}</select></label></p>}
       </fieldset>
       <fieldset>
         <legend>Border (around the video itself)</legend>
@@ -74,12 +77,15 @@ export function EditorForm({ data }: { data: EditorPageData }) {
           </>
         )}
       </fieldset>
-      <p><button type="submit" formNoValidate>Update preview</button></p>
+      <p><button type="submit" formNoValidate>Update preview</button> <EditorSession formId="editor-form" /> <a href={`/editor?media=${encodeURIComponent(source.id)}`}>Reset</a> <a href={`/media/${encodeURIComponent(source.id)}`}>Cancel</a></p>
+      <p className="muted">{data.settingsSource === "template" ? "This preview is the whole template. It is not saved on the video until you choose Save settings. Reset returns to the saved settings." : data.settingsSource === "preview" ? "This is an unsaved preview. Save settings to keep it, or Reset to return to the saved settings." : "These are the saved settings for this video."}</p>
+      <p><button type="submit" formMethod="post" formAction="/api/forms/editor-settings" formNoValidate>Save settings</button></p>
       <fieldset>
         <legend>Save these settings</legend>
         <p><label>Template name<br /><input type="text" name="name" maxLength={100} required /></label></p>
         <button type="submit" formMethod="post" formAction="/api/forms/editor-save">Save as template</button>
-        <p className="muted">Templates hold only the settings. The original video is never changed.</p>
+        <p className="muted">Templates hold only the settings. The original video is never changed. Saving the same name and settings again does not create a duplicate.</p>
+        {data.templates.length >= data.templateLimit && <p role="status">Your plan allows {data.templateLimit} saved template{data.templateLimit === 1 ? "" : "s"}, and that limit is reached.</p>}
       </fieldset>
     </form>
   );
@@ -90,7 +96,7 @@ export function EditorView({ data }: { data: EditorPageData }) {
   return (
     <>
       <h1>Editor</h1>
-      <p role="note" className="notice">Rendering is not connected yet: this editor builds and saves settings and shows a layout sketch. No video is rendered, exported or published from here.</p>
+      <p role="note" className="notice">Rendering runs on this server and writes a new file. The original video is kept.</p>
       {data.problems.length > 0 && <ul role="alert" className="notice">{data.problems.map((p) => <li key={p}>{p}</li>)}</ul>}
       {!source ? (
         <section aria-labelledby="choose-heading">
@@ -104,13 +110,22 @@ export function EditorView({ data }: { data: EditorPageData }) {
           <h2>{source.title}</h2>
           <p className="muted">Your plan renders up to {data.maxResolution === "original" ? "the original resolution" : data.maxResolution}. These settings never change the original file.</p>
           <div className="editor-grid"><EditorPreview data={data} /><EditorForm data={data} /></div>
-          <p><button type="button" disabled>Render video (not available yet)</button></p>
+          <p><button type="submit" form="editor-form" formAction="/api/forms/render" formMethod="post" formNoValidate>Render video</button></p>
+          {data.job && (
+            <section aria-labelledby="render-status-heading">
+              <h2 id="render-status-heading">Render status</h2>
+              {data.job.refreshPath && <meta httpEquiv="refresh" content={`2;url=${data.job.refreshPath}`} />}
+              <p>Status: {data.job.status}{data.job.message ? `. ${data.job.message}` : ""}</p>
+              {data.job.status === "completed" && data.job.outputId && <p><a href={`/api/renders/file?id=${encodeURIComponent(data.job.outputId)}`}>Download export</a></p>}
+            </section>
+          )}
         </>
       )}
       <section aria-labelledby="templates-heading">
         <h2 id="templates-heading">Your templates ({data.templates.length} of {data.templateLimit})</h2>
-        {data.templates.length === 0 ? <p>No templates yet.</p> : <ul>{data.templates.map((t) => <li key={t.id}><strong>{t.name}</strong> <span className="muted">{t.summary}</span></li>)}</ul>}
-        <p className="muted">Applying a template to videos in a cycle is not available yet.</p>
+        {data.templates.length === 0 ? <p>No templates yet.</p> : <ul>{data.templates.map((t) => <li key={t.id}><strong>{t.name}</strong> <span className="muted">{t.summary}</span> {source ? <a href={`/editor?media=${encodeURIComponent(source.id)}&template=${encodeURIComponent(t.id)}`}>Apply</a> : null}</li>)}</ul>}
+        <h3>Exports</h3>
+        {data.exports.length === 0 ? <p>No finished exports yet. A render is listed here only after its file has been checked.</p> : <ul>{data.exports.map((item) => <li key={item.id}><a href={`/api/renders/file?id=${encodeURIComponent(item.id)}`}>Download {item.sourceTitle}</a> <span className="muted">{item.aspect}, {item.createdOn}</span></li>)}</ul>}
       </section>
     </>
   );

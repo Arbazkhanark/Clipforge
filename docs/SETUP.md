@@ -1,11 +1,13 @@
 # Setup
 
-Requires Node >= 22.18.
+Requires Node.js 22, at least 22.12 and below 23. Prisma 7.10 rejects Node 23. This repo was checked on Node 22.23.4.
 
-    npm install      # first time (needs network); then pin the "latest" versions in package.json
+    npm ci           # install the exact versions in package-lock.json
+    DATABASE_URL="postgresql://127.0.0.1:5432/clipforge" npx prisma generate
     npm test         # all tests (rules, server layer, FFmpeg rendering, UI/page rendering, API routes)
     npm run typecheck
-    npm run dev      # Next.js dev server (never run yet - see docs/PLAN.md)
+    npm run build    # production build; verified on 2026-11-06
+    npm run dev      # Next.js dev server (not exercised in that verification)
 
 Local demo (once Next.js is installed): set `CLIPFORGE_DEMO_MODE=true` in `.env` to browse built-in SAMPLE data. Without it the
 app shows "sign in required" (there is no real authentication yet).

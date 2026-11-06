@@ -60,7 +60,7 @@ test("redirect locations: only plain internal paths; unknown codes can never be 
   assert.equal(buildFlashLocation("/cycles/abc", "notice", "cycle_created"), "/cycles/abc?notice=cycle_created");
   assert.equal(buildFlashLocation("/media", "error", "not-a-code"), "/media?error=error");
   assert.equal(buildFlashLocation("/x", "error", "conflict", { updated: 2, skipped: -1, conflicts: 1.5, blocked: 99999 }), "/x?error=conflict&updated=2");
-  for (const path of ["//evil.example", "https://evil.example", "/a?b=c", "/a\nSet-Cookie: x", "", "/a b", "/../x%00"]) assert.throws(() => buildFlashLocation(path, "notice", "cycle_created"), undefined, JSON.stringify(path));
+  for (const path of ["//evil.example", "https://evil.example", "/a?b=c", "/a\nSet-Cookie: x", "", "/a b", "/../x%00"]) assert.throws(() => buildFlashLocation(path, "notice", "cycle_created"), JSON.stringify(path));
   assert.throws(() => buildFlashLocation("/x", "notice", "evil"));
 });
 
@@ -143,7 +143,12 @@ test("form route protections: cross-site refused, wrong content type, not signed
 // ---------- upload route ----------
 async function multipart(bytes: Uint8Array | string, filename: string, type: string, opts: { fieldName?: string; accept?: string; length?: string | null; headers?: Record<string, string> } = {}) {
   const form = new FormData();
-  if (typeof bytes === "string") form.set(opts.fieldName ?? "file", bytes); else form.set(opts.fieldName ?? "file", new File([bytes], filename, { type }));
+  if (typeof bytes === "string") form.set(opts.fieldName ?? "file", bytes);
+  else {
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    form.set(opts.fieldName ?? "file", new File([copy], filename, { type }));
+  }
   const packed = new Response(form);
   const body = new Uint8Array(await packed.arrayBuffer());
   const headers: Record<string, string> = { host: "localhost:3000", "content-type": packed.headers.get("content-type")!, ...(opts.accept ? { accept: opts.accept } : {}), ...opts.headers };
@@ -216,7 +221,7 @@ test("media page: says where files go (memory vs local disk vs none), shows flas
   assert.ok(memory.includes("up to 5 MB per file"));
   setRuntimeForTests(runtime(DEMO_USER_ID, await mediaServices({ disk: true })));
   const disk = html(await MediaPage({}));
-  assert.ok(disk.includes("Local disk (development only)")); assert.ok(disk.includes("list of files is still held in memory")); assert.ok(!disk.includes("discarded when the server restarts"));
+  assert.ok(disk.includes("Private folder on this computer")); assert.ok(disk.includes("not stored in the database")); assert.ok(!disk.includes("discarded when the server restarts"));
   setRuntimeForTests(runtime(DEMO_USER_ID));
   const none = html(await MediaPage({}));
   assert.ok(none.includes("Uploads are not available")); assert.ok(!none.includes('action="/api/forms/media-upload"'));

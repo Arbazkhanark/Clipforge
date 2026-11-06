@@ -1,11 +1,11 @@
-// Prisma 7 CLI configuration (connection URL lives here, not in schema.prisma).
-// Not yet run: the Prisma CLI could not be installed in the dev sandbox (no network).
-// Prisma 7 does not load .env by itself; run commands with the variable set (e.g. `node --env-file=.env ...`)
-// or add `import "dotenv/config"` once dotenv is installed.
+// Prisma 7 CLI configuration. The connection URL stays out of schema.prisma.
+// Prisma 7 does not load .env files. The db:* scripts pass --env-file=.env.local.
+// This file's URL is the direct Neon connection (DIRECT_URL). Migrations need it.
+// The running app must use DATABASE_URL, the pooled Neon connection.
 import { defineConfig, env } from "prisma/config";
 
 export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: { path: "prisma/migrations" },
-  datasource: { url: env("DATABASE_URL") },
+  datasource: { url: env("DIRECT_URL") },
 });

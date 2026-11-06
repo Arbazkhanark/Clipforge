@@ -2,6 +2,7 @@
 // All are POST-only form posts that redirect with short whitelisted codes, never echoing user text.
 // Protections: same-origin check (also covers login CSRF), size caps, no-store, HttpOnly + SameSite=Lax cookies (+ Secure on https),
 // and identical answers for unknown/wrong accounts (see AuthService). Real email delivery does not exist.
+import { AppError } from "../errors.ts";
 import { buildFlashLocation, type FlashErrorCode } from "../flash.ts";
 import { readUrlEncoded, redirectResponse, type FormFields } from "../form-routes.ts";
 import { checkSameOrigin } from "../http.ts";
@@ -28,14 +29,19 @@ async function authRoute(request: Request, runtime: RuntimeProvider, work: (auth
   const rt = runtime();
   if (!rt.auth) return respond(buildFlashLocation(failurePath, "error", "auth_not_available"));
   try { return await work(rt.auth, await readUrlEncoded(request), rt); }
-  catch { return respond(buildFlashLocation(failurePath, "error", "error")); }
+  catch (error) {
+    const code: FlashErrorCode = error instanceof AppError && error.code === "database_unavailable" ? "database_unavailable"
+      : error instanceof AppError && error.code === "email_not_configured" ? "email_not_configured" : "error";
+    return respond(buildFlashLocation(failurePath, "error", code));
+  }
 }
 
 export const registerRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
-  authRoute(request, runtime, async (auth, f) => {
+  authRoute(request, runtime, async (auth, f, rt) => {
     const result = await auth.register({ email: f.get("email"), password: f.get("password"), name: f.get("name") });
     if (!result.ok) { const code: FlashErrorCode = result.problems.some((p) => /email/i.test(p) && /valid/i.test(p)) ? "invalid_email" : "weak_password"; return respond(buildFlashLocation("/register", "error", code)); }
-    return respond(buildFlashLocation("/login", "notice", "registered"));   // the same answer whether or not the email already existed
+    const notice = rt.emailDelivery === "unavailable" ? "registered_no_email" : "registered";
+    return respond(buildFlashLocation("/login", "notice", notice));   // the same answer whether or not the email already existed
   }, "/register");
 
 export const loginRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
@@ -58,7 +64,7 @@ export const verifyEmailRoute = (runtime: RuntimeProvider = getRuntime) => (requ
   }, "/login");
 
 export const forgotPasswordRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
-  authRoute(request, runtime, async (auth, f) => { await auth.requestPasswordReset(f.get("email")); return respond(buildFlashLocation("/forgot-password", "notice", "reset_email_sent")); }, "/forgot-password");
+  authRoute(request, runtime, async (auth, f, rt) => { await auth.requestPasswordReset(f.get("email")); return respond(buildFlashLocation("/forgot-password", "notice", rt.emailDelivery === "unavailable" ? "reset_unavailable" : "reset_email_sent")); }, "/forgot-password");
 
 export const resetPasswordRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
   authRoute(request, runtime, async (auth, f) => {

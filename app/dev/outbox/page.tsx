@@ -3,11 +3,10 @@ import { getRuntime } from "../../../src/server/runtime.ts";
 export const metadata = { title: "Dev outbox", robots: { index: false } };
 export const dynamic = "force-dynamic";
 
-// DEVELOPMENT ONLY. In local mode there is no email provider, so this lists the messages that WOULD have been sent
-// (including the links). It exists only in local mode and never in production; elsewhere it looks like a missing page.
+// DEVELOPMENT ONLY. Lists messages the mock provider kept. Never shown in production, and never when no outbox exists.
 export default function DevOutboxPage() {
   const runtime = getRuntime();
-  if (runtime.mode !== "local" || !runtime.outbox || process.env["NODE_ENV"] === "production") return <section><h1>Not found</h1></section>;
+  if (!runtime.outbox || process.env["NODE_ENV"] === "production") return <section><h1>Not found</h1></section>;
   return (
     <section>
       <h1>Local outbox</h1>

@@ -17,7 +17,7 @@ export default async function EditorPage(props: { searchParams?: Promise<Search>
   const result = await loadPageData((ctx) => getEditorPageData(ctx, { mediaId: media, search }));
   return (
     <>
-      <FlashMessage flash={parseFlash(search)} />
+      <FlashMessage flash={result.ok && result.data.job && result.data.job.status !== "queued" && result.data.job.status !== "processing" && parseFlash(search)?.message.startsWith("Rendering has started. This page updates") ? null : parseFlash(search)} />
       {result.ok ? <EditorView data={result.data} /> : <ErrorState error={result.error} />}
     </>
   );

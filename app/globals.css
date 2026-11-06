@@ -49,3 +49,7 @@ textarea, select { max-width: 100%; box-sizing: border-box; }
 video, img { max-width: 100%; height: auto; }
 .editor-grid { display: grid; gap: 1.5rem; grid-template-columns: 1fr; align-items: start; }
 @media (min-width: 60rem) { .editor-grid { grid-template-columns: minmax(16rem, 24rem) 1fr; } }
+.library-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.75rem 0; }
+.library-actions p { margin: 0; }
+.button-link { display: inline-block; padding: 0.35rem 0.75rem; border-radius: 0.5rem; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+@media (max-width: 40rem) { .hide-narrow { display: none; } }

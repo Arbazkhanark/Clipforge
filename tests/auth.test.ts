@@ -255,7 +255,9 @@ test("password reset: generic answers, verified accounts only, 1h expiry, single
   assert.deepEqual(await s.service.requestPasswordReset("ann@example.com"), { ok: true });
   const t2 = s.tokenFromEmail(); s.advance(3_600_001);
   assert.equal((await s.service.resetPassword(t2, "yet another password")).ok, false);                            // expired
+  s.advance(900_001);                                                                                             // the reset rate limit unlocked
   await s.service.requestPasswordReset("ann@example.com"); const t3 = s.tokenFromEmail();
+  s.advance(900_001);
   await s.service.requestPasswordReset("ann@example.com");                                                         // newer request replaces older link
   assert.equal((await s.service.resetPassword(t3, "yet another password")).ok, false);
 });

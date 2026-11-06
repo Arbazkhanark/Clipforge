@@ -169,6 +169,30 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     assert.equal(results.filter(Boolean).length, 3); assert.equal((await h.repo.listTemplatesForOwner("bob")).length, 3);
   });
 
+  t("collections can be created, renamed, reordered, and a duplicate or missing file writes nothing", async (h) => {
+    await h.seedMedia(media("m1", "owner")); await h.seedMedia(media("m2", "owner"));
+    assert.equal(await h.repo.createCollection(collection("c-new", "owner", ["m2", "m1"], { name: "Named", description: "D" })), true);
+    assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m2", "m1"]);
+    assert.equal(await h.repo.createCollection(collection("c-new", "owner", [])), false);
+    assert.equal((await h.repo.listCollectionsForOwner("owner")).filter((c) => c.id === "c-new").length, 1);
+    assert.equal(await h.repo.createCollection(collection("c-dup-media", "owner", ["m1", "m1"])), false);
+    assert.equal(await h.repo.getCollection("c-dup-media"), null);
+    assert.equal(await h.repo.createCollection(collection("c-missing-media", "owner", ["no-such-file"])), false);
+    assert.equal(await h.repo.updateCollection("c-new", { name: "Renamed", description: null, visibility: "link", archived: true }), true);
+    const updated = await h.repo.getCollection("c-new");
+    assert.equal(updated?.name, "Renamed"); assert.equal(updated?.description, undefined); assert.equal(updated?.visibility, "link"); assert.equal(updated?.archived, true);
+    assert.deepEqual(updated?.mediaIds, ["m2", "m1"]);
+    assert.equal(await h.repo.replaceCollectionMedia("c-new", ["m1", "m2"]), true);
+    assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2"]);
+    assert.equal(await h.repo.replaceCollectionMedia("c-new", ["m1", "m2"]), true);
+    assert.equal(await h.repo.replaceCollectionMedia("c-new", ["m1", "m1"]), false);
+    assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2"]);
+    assert.equal(await h.repo.replaceCollectionMedia("c-new", ["missing-media"]), false);
+    assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2"]);
+    assert.equal(await h.repo.replaceCollectionMedia("missing", []), false);
+    assert.equal(await h.repo.updateCollection("missing", { name: "x", description: null, visibility: "private", archived: false }), false);
+  });
+
   t("audit and caption revisions are appended", async (h) => {
     await h.repo.appendAudit({ actorId: "bob", action: "x.did", entityType: "T", entityId: "1", metadata: { n: 1 } }); await h.repo.appendAudit({ actorId: null, action: "y.did", entityType: "T", entityId: "2" });
     assert.deepEqual((await h.auditActions()).sort(), ["x.did", "y.did"]);

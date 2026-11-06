@@ -30,6 +30,7 @@ export interface UploadResult {
 export async function uploadMedia(ctx: RequestContext, input: UploadInput): Promise<UploadResult> {
   const userId = requireUser(ctx);
   if (!ctx.media) throw new AppError(503, "storage_not_configured", "Uploads are not available: no storage is configured.");
+  if (ctx.media.unavailable) throw new AppError(503, "storage_unavailable", ctx.media.unavailable);
   const { storage, probe, maxUploadBytes } = ctx.media;
   const makeThumbnail = ctx.media.thumbnail ?? null;
 

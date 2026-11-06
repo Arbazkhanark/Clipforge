@@ -28,7 +28,7 @@ export function MediaDetailView({ detail, timeZone }: { detail: MediaDetail; tim
         </dl>
       </section>
       <p><a href={fileUrl(m.id, "download")} download>Download the original</a></p>
-      <p><a href={`/editor?media=${encodeURIComponent(m.id)}`}>Open in the editor</a> <span className="muted">(editing settings are saved separately and never change this original)</span></p>
+      {m.kind === "video" && <p><a href={`/editor?media=${encodeURIComponent(m.id)}`}>Edit</a> <span className="muted">(editing settings are saved separately and never change this original)</span></p>}
     </>
   );
 }

@@ -10,30 +10,30 @@
     "start": "next start",
     "test": "node --import tsx --import ./tests/helpers/register-css.mjs --test \"tests/**/*.test.ts\" \"tests/**/*.test.tsx\"",
     "typecheck": "tsc --noEmit",
-    "db:validate": "prisma validate",
-    "db:migrate": "prisma migrate dev",
-    "db:generate": "prisma generate",
+    "db:validate": "node --env-file=.env.local ./node_modules/prisma/build/index.js validate",
+    "db:migrate": "node --env-file=.env.local ./node_modules/prisma/build/index.js migrate dev",
+    "db:generate": "node --env-file=.env.local ./node_modules/prisma/build/index.js generate",
     "verify:harness": "CLIPFORGE_LOCAL_AUTH=true node --import tsx --import ./tests/helpers/register-css.mjs scripts/verify-harness.ts",
     "verify:browser": "node scripts/browser-check.mjs"
   },
   "dependencies": {
-    "next": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "@prisma/client": "^7",
-    "@prisma/adapter-pg": "^7",
-    "pg": "latest"
+    "next": "16.4.5",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "@prisma/client": "7.10.1",
+    "@prisma/adapter-pg": "7.10.1",
+    "pg": "8.23.1"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "tsx": "latest",
-    "typescript": "latest",
-    "prisma": "^7",
-    "@types/pg": "latest"
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "prisma": "7.10.1",
+    "@types/pg": "8.23.1"
   },
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.12.0 <23"
   }
 }

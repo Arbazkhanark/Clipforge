@@ -168,12 +168,14 @@ test("PASSWORD RESET: generic answers, link only shows a form, a typo does not b
 
 test("CSRF: cross-site posts to every auth route are refused (403) and change nothing; other content types never succeed", async () => {
   await post.register("ann@example.com"); const token = lastToken();
-  const attacks: [Parameters<typeof registerRoute>[0], string, [string, string][]][] = [
+  type AuthFormRoute = typeof registerRoute;
+  const attacks: [AuthFormRoute, string, [string, string][]][] = [
     [registerRoute, "/api/auth/register", [["email", "x@example.com"], ["password", GOOD]]], [loginRoute, "/api/auth/login", [["email", "ann@example.com"], ["password", GOOD]]],
     [logoutRoute, "/api/auth/logout", []], [verifyEmailRoute, "/api/auth/verify-email", [["token", token]]], [forgotPasswordRoute, "/api/auth/forgot-password", [["email", "ann@example.com"]]], [resetPasswordRoute, "/api/auth/reset-password", [["token", token], ["password", GOOD]]],
   ];
+  const crossSiteHeaders: Record<string, string>[] = [{ origin: "https://evil.example" }, { "sec-fetch-site": "cross-site" }];
   const sentBefore = rt.outbox!.messages.length;
-  for (const [route, path, fields] of attacks) for (const headers of [{ origin: "https://evil.example" }, { "sec-fetch-site": "cross-site" }]) {
+  for (const [route, path, fields] of attacks) for (const headers of crossSiteHeaders) {
     const r = await route(() => rt)(form(path, fields, headers)); assert.equal(r.status, 403, `${path} ${JSON.stringify(headers)}`); assert.equal(r.headers.get("set-cookie"), null);
   }
   assert.equal(rt.outbox!.messages.length, sentBefore);                                                    // nothing was triggered

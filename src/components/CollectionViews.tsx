@@ -22,7 +22,16 @@ export function CollectionsOverviewView({ owned, sharedWithMe }: { owned: Collec
   return (
     <>
       <h1>Collections</h1>
-      <section aria-labelledby="owned-heading"><h2 id="owned-heading">Your collections</h2><CollectionList collections={owned} emptyText="You have no collections yet. Creating collections is not available in the screens yet." /></section>
+      <section aria-labelledby="owned-heading"><h2 id="owned-heading">Your collections</h2><CollectionList collections={owned} emptyText="You have no collections yet." /></section>
+      <section aria-labelledby="new-collection-heading" className="card">
+        <h2 id="new-collection-heading">New collection</h2>
+        <form method="post" action="/api/forms/collection-create">
+          <p><label>Name<br /><input type="text" name="name" required maxLength={100} /></label></p>
+          <p><label>Description<br /><input type="text" name="description" maxLength={500} /></label></p>
+          <p><label>Who can open it<br /><select name="visibility"><option value="private">Private</option><option value="link">Shared by link</option><option value="public_view">Public (view only)</option></select></label></p>
+          <button type="submit">Create collection</button>
+        </form>
+      </section>
       <section aria-labelledby="shared-heading"><h2 id="shared-heading">Shared with you</h2><CollectionList collections={sharedWithMe} emptyText="Nobody has shared a collection with you." /></section>
     </>
   );
@@ -66,6 +75,31 @@ export function CollectionDetailView({ detail }: { detail: CollectionDetail }) {
         {!permissions.isOwner && <p className="muted">Permission to use content does not give you rights to redistribute it outside ClipForge.</p>}
       </section>
       <MixForm detail={detail} />
+      {permissions.isOwner && (
+        <>
+          <section aria-labelledby="edit-collection-heading" className="card">
+            <h2 id="edit-collection-heading">Collection details</h2>
+            <form method="post" action="/api/forms/collection-update">
+              <input type="hidden" name="collectionId" value={collection.id} />
+              <p><label>Name<br /><input type="text" name="name" required maxLength={100} defaultValue={collection.name} /></label></p>
+              <p><label>Description<br /><input type="text" name="description" maxLength={500} defaultValue={collection.description ?? ""} /></label></p>
+              <p><label>Who can open it<br /><select name="visibility" defaultValue={collection.visibility}><option value="private">Private</option><option value="link">Shared by link</option><option value="public_view">Public (view only)</option></select></label></p>
+              <p><label><input type="checkbox" name="archived" value="yes" defaultChecked={collection.archived} /> Archive this collection</label></p>
+              <button type="submit">Save collection</button>
+            </form>
+          </section>
+          <section aria-labelledby="membership-heading" className="card">
+            <h2 id="membership-heading">Files in this collection</h2>
+            {detail.libraryChoices.length === 0 ? <p>Upload a file in the <a href="/media">media library</a> before adding it here. The file itself is not stored in the database.</p> : (
+              <form method="post" action="/api/forms/collection-media">
+                <input type="hidden" name="collectionId" value={collection.id} />
+                {detail.libraryChoices.map((item) => <p key={item.id}><label><input type="checkbox" name="mediaIds" value={item.id} defaultChecked={videos.some((video) => video.id === item.id)} /> {item.title}</label></p>)}
+                <button type="submit">Save this list</button>
+              </form>
+            )}
+          </section>
+        </>
+      )}
       <section aria-labelledby="videos-heading">
         <h2 id="videos-heading">Videos</h2>
         {videos.length === 0 ? <p>This collection has no videos.</p> : (

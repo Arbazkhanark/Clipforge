@@ -32,6 +32,16 @@ export interface MediaStorage {
    * Never call this for media that has a record.
    */
   deleteUnreferencedUpload(finalKey: string): Promise<void>;
+  /**
+   * Run `work` with a real file path for a committed object. The path stays private:
+   * it is never returned to a browser, a log, or an error message.
+   */
+  runWithCommittedFile<T>(key: string, work: (filePath: string) => Promise<T>): Promise<T>;
+  /**
+   * Copy a local file the server just created into a new key. Refuses to overwrite.
+   * Returns the stored size. The source file is left in place for the caller to delete.
+   */
+  importLocalFile(finalKey: string, sourcePath: string): Promise<number>;
 }
 
 export class InvalidStorageKeyError extends Error {
@@ -54,6 +64,7 @@ function assertSingleSegment(id: string): void { if (typeof id !== "string" || !
 export const mediaKeyFor = (ownerId: string, mediaId: string): string => { assertSingleSegment(ownerId); assertSingleSegment(mediaId); return `media/${ownerId}/${mediaId}`; };
 export const thumbnailKeyFor = (ownerId: string, mediaId: string): string => { assertSingleSegment(ownerId); assertSingleSegment(mediaId); return `thumb/${ownerId}/${mediaId}`; };
 export const stagingKeyFor = (mediaId: string): string => { assertSingleSegment(mediaId); return `staging/${mediaId}`; };
+export const renderKeyFor = (ownerId: string, exportId: string): string => { assertSingleSegment(ownerId); assertSingleSegment(exportId); return `render/${ownerId}/${exportId}`; };
 
 export interface StorageDescription { label: string; persistent: boolean; warning: string; }
 
@@ -61,7 +72,7 @@ export interface StorageDescription { label: string; persistent: boolean; warnin
 export function describeStorage(kind: StorageKind | null): StorageDescription {
   switch (kind) {
     case "memory": return { label: "Demo storage (server memory)", persistent: false, warning: "Uploaded files are kept in server memory and are discarded when the server restarts." };
-    case "local-disk": return { label: "Local disk (development only)", persistent: true, warning: "Files are saved in a private folder on this computer. The list of files is still held in memory and is lost on restart until the database is connected." };
+    case "local-disk": return { label: "Private folder on this computer", persistent: true, warning: "Files are saved in a private folder on this computer. They are not stored in the database. Demo mode still keeps only the file list in memory." };
     case "s3": return { label: "Cloud storage", persistent: true, warning: "Cloud storage is not connected in this build." };
     default: return { label: "Not available", persistent: false, warning: "Uploads are not available: no storage is configured." };
   }

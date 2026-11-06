@@ -11,7 +11,9 @@ export type MaxResolution = "720p" | "1080p" | "original";
 
 export type BackgroundSettings =
   | { kind: "solid"; colorHex: string }
-  | { kind: "blur"; strength?: number };
+  | { kind: "blur"; strength?: number }
+  /** A still image the server already stored. The file path is chosen by the server, never by the request. */
+  | { kind: "image" };
 
 export interface BorderSettings { thicknessPx: number; colorHex: string; }
 
@@ -57,7 +59,7 @@ export function validateRenderSettings(settings: RenderSettings, source: SourceV
   if (!["720p", "1080p", "original"].includes(settings.maxResolution)) problems.push("Unsupported resolution.");
   if (settings.background.kind === "solid") { if (!HEX_COLOR.test(settings.background.colorHex)) problems.push("Background colour must look like #1A2B3C."); }
   else if (settings.background.kind === "blur") { if (settings.background.strength !== undefined && !inRange(settings.background.strength, 1, 40)) problems.push("Blur strength must be 1 to 40."); }
-  else problems.push("Unsupported background.");
+  else if (settings.background.kind !== "image") problems.push("Unsupported background.");
   if (!inRange(settings.zoom, 1, 3)) problems.push("Zoom must be between 1 and 3.");
   if (!inRange(settings.offsetX, -1, 1) || !inRange(settings.offsetY, -1, 1)) problems.push("Position offsets must be between -1 and 1.");
   if (!Number.isInteger(settings.border.thicknessPx) || !inRange(settings.border.thicknessPx, 0, 40)) problems.push("Border thickness must be a whole number from 0 to 40.");
@@ -117,11 +119,12 @@ export interface RenderPlan {
 }
 
 export function buildRenderArgs(args: {
-  inputPath: string; outputPath: string; logoPath?: string; source: SourceVideoInfo; settings: RenderSettings;
+  inputPath: string; outputPath: string; logoPath?: string; backgroundImagePath?: string; source: SourceVideoInfo; settings: RenderSettings;
 }): RenderPlan {
-  const { inputPath, outputPath, logoPath, source, settings } = args;
+  const { inputPath, outputPath, logoPath, backgroundImagePath, source, settings } = args;
   const problems = validateRenderSettings(settings, source);
   if (settings.logo && !logoPath) problems.push("A logo file is needed when a logo overlay is set.");
+  if (settings.background.kind === "image" && !backgroundImagePath) problems.push("A background image is needed when an image background is set.");
   if (problems.length > 0) throw new InvalidRenderSettingsError(problems);
 
   const layout = computeRenderLayout(settings, source);
@@ -136,6 +139,14 @@ export function buildRenderArgs(args: {
   if (settings.background.kind === "solid") {
     inputs.push("-f", "lavfi", "-i", `color=c=0x${settings.background.colorHex.slice(1)}:s=${canvas.width}x${canvas.height}:r=30`);
     filters.push(`[0:v]${mainChain}[fg]`, `[${nextInputIndex}:v][fg]overlay=${boxX}:${boxY}:shortest=1[composed]`);
+    nextInputIndex++;
+  } else if (settings.background.kind === "image") {
+    inputs.push("-loop", "1", "-i", backgroundImagePath!);
+    filters.push(
+      `[${nextInputIndex}:v]scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=increase,crop=${canvas.width}:${canvas.height}[bg]`,
+      `[0:v]${mainChain}[fg]`,
+      `[bg][fg]overlay=${boxX}:${boxY}[composed]`,
+    );
     nextInputIndex++;
   } else {
     const strength = Math.round(settings.background.strength ?? 20);

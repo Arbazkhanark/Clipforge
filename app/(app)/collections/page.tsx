@@ -1,12 +1,22 @@
 import { CollectionsOverviewView } from "../../../src/components/CollectionViews.tsx";
 import { ErrorState } from "../../../src/components/PageState.tsx";
+import { FlashMessage } from "../../../src/components/FlashMessage.tsx";
+import { parseFlash } from "../../../src/server/flash.ts";
 import { loadPageData } from "../../../src/server/page-data.ts";
 import { getCollectionsOverview } from "../../../src/server/queries.ts";
 
 export const metadata = { title: "Collections" };
 export const dynamic = "force-dynamic";
 
-export default async function CollectionsPage() {
+type Search = { notice?: string; error?: string };
+
+export default async function CollectionsPage(props: { searchParams?: Promise<Search> | Search } = {}) {
+  const searchParams = await props.searchParams;
   const result = await loadPageData((ctx) => getCollectionsOverview(ctx));
-  return result.ok ? <CollectionsOverviewView {...result.data} /> : <ErrorState error={result.error} />;
+  return (
+    <>
+      <FlashMessage flash={parseFlash(searchParams)} />
+      {result.ok ? <CollectionsOverviewView {...result.data} /> : <ErrorState error={result.error} />}
+    </>
+  );
 }

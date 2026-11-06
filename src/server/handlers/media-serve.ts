@@ -38,6 +38,7 @@ export function contentDisposition(kind: "inline" | "attachment", title: string)
 export async function serveMedia(ctx: RequestContext, input: { mediaId: unknown; variant: unknown; rangeHeader: string | null }): Promise<ServedMedia> {
   const userId = requireUser(ctx);
   if (!ctx.media) throw new AppError(503, "storage_not_configured", "Media is not available: no storage is configured.");
+  if (ctx.media.unavailable) throw new AppError(503, "storage_unavailable", ctx.media.unavailable);
   if (typeof input.mediaId !== "string" || !ID.test(input.mediaId)) throw validationFailed(["id must be a valid id."]);
   if (typeof input.variant !== "string" || !(MEDIA_VARIANTS as readonly string[]).includes(input.variant)) throw validationFailed(["variant must be thumbnail, preview or download."]);
   const variant = input.variant as MediaVariant;

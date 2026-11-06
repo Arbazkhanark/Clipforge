@@ -10,7 +10,7 @@ import type { PreflightReport } from "../lib/domain/preflight.ts";
 import { requireUser, type RequestContext } from "./context.ts";
 import { notFound, validationFailed } from "./errors.ts";
 import { describeStorage, type StorageDescription } from "./storage/media-storage.ts";
-import { computePreviewLayout, parseEditorQuery, type EditingSettings, type PreviewLayout } from "../lib/domain/editing-settings.ts";
+import { computePreviewLayout, isReservedTemplateName, parseEditingSettings, parseEditorQuery, videoSettingsName, type EditingSettings, type PreviewLayout } from "../lib/domain/editing-settings.ts";
 import type { MaxResolution } from "../lib/render/ffmpeg-command.ts";
 import { buildPreflightReport } from "./preflight-service.ts";
 import type { CycleRecord } from "./repository.ts";
@@ -74,7 +74,7 @@ export async function getCollectionsOverview(ctx: RequestContext): Promise<{ own
   return { owned: await Promise.all(owned.map((c) => toCollectionCard(ctx, userId, c))), sharedWithMe: await Promise.all(shared.map((c) => toCollectionCard(ctx, userId, c))) };
 }
 
-export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canDownload: boolean; isOwner: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; }
+export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canDownload: boolean; isOwner: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; }
 
 /** A collection you cannot view looks exactly like one that does not exist. */
 export async function getCollectionDetail(ctx: RequestContext, collectionId: string): Promise<CollectionDetail> {
@@ -86,8 +86,10 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
   if (!capabilities.has("view")) throw notFound("Collection");
   const media = (await ctx.repo.getMediaByIds(collection.mediaIds)).filter((m) => m.status !== "deleted");
   const ownCycles = capabilities.has("use_in_cycle") ? await ctx.repo.listCyclesForOwner(userId) : [];
+  const library = collection.ownerId === userId ? (await ctx.repo.listMediaForOwner(userId, { limit: 100, offset: 0 })).items : [];
   return {
     cycleChoices: ownCycles.filter((c) => c.status === "draft" || c.status === "running" || c.status === "paused").map((c) => ({ id: c.id, name: c.name })),
+    libraryChoices: library.map(toMediaCard),
     collection: await toCollectionCard(ctx, userId, collection), videos: media.map(toMediaCard),
     permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canDownload: capabilities.has("download"), isOwner: collection.ownerId === userId },
   };
@@ -131,6 +133,7 @@ export interface UploadInfo { available: boolean; storage: StorageDescription; s
 /** What the upload form needs. `available` is false when no storage is configured: the form then explains instead of failing. */
 export function getUploadInfo(ctx: RequestContext): UploadInfo {
   requireUser(ctx);
+  if (ctx.media?.unavailable) return { available: false, storage: { label: "Private folder unavailable", persistent: false, warning: ctx.media.unavailable }, storageKind: null, maxMegabytes: Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) };
   const kind = ctx.media?.storage.kind ?? null;
   return { available: ctx.media !== undefined, storage: describeStorage(kind), storageKind: kind, maxMegabytes: ctx.media ? Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) : 0 };
 }
@@ -167,10 +170,44 @@ export interface EditorPageData {
   templateLimit: number;
   maxResolution: MaxResolution;
   logoAspect: number;
+  /** Where the settings on screen came from. A preview or template is not saved until the user saves or renders. */
+  settingsSource: "saved" | "preview" | "template";
+  /** Finished exports whose files were checked. */
+  exports: { id: string; sourceTitle: string; aspect: string; createdOn: string }[];
+  /** The render started from this page, if it is still known in this process. */
+  job: { id: string; status: "queued" | "processing" | "completed" | "failed"; message: string | null; outputId: string | null; refreshPath: string | null } | null;
 }
 
-const describeSettings = (s: EditingSettings): string =>
-  `${s.aspect}, ${s.background.kind === "solid" ? `solid ${s.background.colorHex}` : "blurred background"}, zoom ${s.zoom}${s.border.thicknessPx > 0 ? `, ${s.border.thicknessPx}px border` : ""}${s.logo ? ", logo" : ""}`;
+async function verifiedExports(ctx: RequestContext, userId: string): Promise<EditorPageData["exports"]> {
+  const rows = await ctx.repo.listRenderOutputsForOwner(userId);
+  const audits = await ctx.repo.listAuditsForEntities("MediaDerivative", rows.map((row) => row.id));
+  const ready: EditorPageData["exports"] = [];
+  for (const row of rows) {
+    const info = await ctx.repo.getRenderOutput(row.id);
+    if (!info) continue;
+    if (ctx.media && !ctx.media.unavailable) {
+      const size = await ctx.media.storage.statSize(info.storageKey);
+      if (size !== info.sizeBytes) continue;
+    }
+    const source = await ctx.repo.getMedia(row.sourceMediaId);
+    const aspect = audits.find((entry) => entry.entityId === row.id && entry.action === "render.completed")?.metadata?.["aspect"];
+    ready.push({ id: row.id, sourceTitle: source?.title ?? "Untitled video", aspect: typeof aspect === "string" ? aspect : "Saved export", createdOn: row.createdAt.toISOString().slice(0, 10) });
+  }
+  return ready;
+}
+
+function jobFor(ctx: RequestContext, userId: string, jobId: string | undefined, mediaId: string | undefined): EditorPageData["job"] {
+  if (!jobId || !ctx.renders) return null;
+  const job = ctx.renders.jobs.get(jobId);
+  if (!job || job.ownerId !== userId) return null;
+  const refreshPath = mediaId && (job.status === "queued" || job.status === "processing") ? `/editor?media=${encodeURIComponent(mediaId)}&job=${encodeURIComponent(job.id)}` : null;
+  return { id: job.id, status: job.status, message: job.message, outputId: job.outputId, refreshPath };
+}
+
+const describeSettings = (s: EditingSettings): string => {
+  const background = s.background.kind === "solid" ? `solid ${s.background.colorHex}` : s.background.kind === "image" ? "image background" : "blurred background";
+  return `${s.aspect}, ${background}, zoom ${s.zoom}${s.border.thicknessPx > 0 ? `, ${s.border.thicknessPx}px border` : ""}${s.logo ? ", logo" : ""}`;
+};
 
 /**
  * Everything the editor page shows. The video must be YOURS (someone else's looks like a missing one).
@@ -181,14 +218,23 @@ export async function getEditorPageData(ctx: RequestContext, input: { mediaId: s
   const userId = requireUser(ctx);
   const planId = await ctx.repo.getPlanIdForUser(userId);
   const plan = getPlan(planId);
-  const [templates, videos, images] = await Promise.all([ctx.repo.listTemplatesForOwner(userId), ctx.repo.listMediaForOwner(userId, { limit: 12, offset: 0, kind: "video" }), ctx.repo.listMediaForOwner(userId, { limit: 50, offset: 0, kind: "image" })]);
-  const common = { videoChoices: videos.items.map(toMediaCard), logoChoices: images.items.map(toMediaCard), templates: templates.map((t) => ({ id: t.id, name: t.name, summary: describeSettings(t.settings) })), templateLimit: plan.limits.templates, maxResolution: plan.features.maxResolution };
-  if (!input.mediaId) return { ...common, source: null, settings: parseEditorQuery(undefined).settings, problems: [], layout: null, assumedSourceSize: false, logoAspect: 1 };
+  const [storedTemplates, videos, images] = await Promise.all([ctx.repo.listTemplatesForOwner(userId), ctx.repo.listMediaForOwner(userId, { limit: 12, offset: 0, kind: "video" }), ctx.repo.listMediaForOwner(userId, { limit: 50, offset: 0, kind: "image" })]);
+  const templates = storedTemplates.filter((template) => !isReservedTemplateName(template.name));
+  const common = { videoChoices: videos.items.map(toMediaCard), logoChoices: images.items.map(toMediaCard), templates: templates.map((t) => ({ id: t.id, name: t.name, summary: describeSettings(t.settings) })), templateLimit: plan.limits.templates, maxResolution: plan.features.maxResolution, exports: await verifiedExports(ctx, userId), job: jobFor(ctx, userId, typeof input.search?.["job"] === "string" ? input.search["job"] : undefined, input.mediaId) };
+  if (!input.mediaId) return { ...common, source: null, settings: parseEditorQuery(undefined).settings, settingsSource: "saved" as const, problems: [], layout: null, assumedSourceSize: false, logoAspect: 1 };
 
   const media = await ctx.repo.getMedia(input.mediaId);
   if (!media || media.ownerId !== userId || media.status === "deleted" || (media.kind ?? "video") !== "video") throw notFound("Video");
 
-  const parsed = parseEditorQuery(input.search);
+  const savedRow = storedTemplates.find((template) => template.name === videoSettingsName(media.id));
+  const savedParsed = savedRow ? parseEditingSettings(savedRow.settings) : { ok: true as const, settings: parseEditorQuery(undefined).settings };
+  const savedSettings = savedParsed.ok ? savedParsed.settings : parseEditorQuery(undefined).settings;
+  const templateId = typeof input.search?.["template"] === "string" ? input.search["template"] : undefined;
+  const previewKeys = ["aspect", "zoom", "offsetX", "offsetY", "bg", "bgColor", "bgImage", "blur", "borderPx", "borderColor", "logoMedia", "logoWidth", "logoX", "logoY", "logoOpacity"];
+  const previewing = previewKeys.some((key) => typeof input.search?.[key] === "string");
+  const fromTemplate = templateId && !previewing ? templates.find((t) => t.id === templateId)?.settings : undefined;
+  const parsed = fromTemplate ? { settings: fromTemplate, problems: [] as string[] } : previewing ? parseEditorQuery(input.search) : { settings: savedSettings, problems: savedParsed.ok ? [] : ["Saved settings could not be read, so the defaults are shown."] };
+  const settingsSource = fromTemplate ? "template" as const : previewing ? "preview" as const : "saved" as const;
   let { settings } = parsed; const problems = [...parsed.problems];
   let logoAspect = 1;
   if (settings.logo) {
@@ -196,7 +242,12 @@ export async function getEditorPageData(ctx: RequestContext, input: { mediaId: s
     if (!logo) { problems.push("The logo must be one of your own images; it was removed from the preview."); settings = { ...settings, logo: null }; }
     else if (logo.width && logo.height) logoAspect = logo.width / logo.height;
   }
+  const background = settings.background;
+  if (background.kind === "image" && !images.items.some((m) => m.id === background.mediaId)) {
+    problems.push("The background image must be one of your own images; it was removed from the preview.");
+    settings = { ...settings, background: { kind: "blur", strength: 20 } };
+  }
   const assumedSourceSize = !(media.width && media.height);
   const layout = computePreviewLayout(settings, { width: media.width ?? 1920, height: media.height ?? 1080 }, logoAspect, plan.features.maxResolution);
-  return { ...common, source: toMediaCard(media), settings, problems, layout, assumedSourceSize, logoAspect };
+  return { ...common, source: toMediaCard(media), settings, settingsSource, problems, layout, assumedSourceSize, logoAspect };
 }
