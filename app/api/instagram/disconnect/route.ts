@@ -1,0 +1,3 @@
+import { instagramDisconnectRoute } from "../../../../src/server/instagram/instagram-routes.ts";
+
+export const POST = instagramDisconnectRoute();

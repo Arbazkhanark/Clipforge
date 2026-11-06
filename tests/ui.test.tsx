@@ -9,6 +9,7 @@ import { CycleItemsTable } from "../src/components/CycleItemsTable.tsx";
 import { PreflightPanel } from "../src/components/PreflightPanel.tsx";
 import { SchedulePreview } from "../src/components/SchedulePreview.tsx";
 import { ImportWarning } from "../src/components/ImportWarning.tsx";
+import { InstagramAccountsView } from "../src/components/InstagramAccounts.tsx";
 import { StatusBadge } from "../src/components/StatusBadge.tsx";
 import { formatStorage } from "../src/components/format.ts";
 import { runPreflight } from "../src/lib/domain/preflight.ts";
@@ -102,6 +103,12 @@ test("import warning shows every required warning and a required checkbox", () =
   const out = html(<ImportWarning videoTitle="Clip <B>" sizeBytes={2 * 1024 ** 3} action="/import" />);
   for (const text of ["independent copy", "may later remove or revoke", "does not transfer copyright", "2 GB"]) assert.ok(out.includes(text), text);
   assert.ok(out.includes("required")); assert.ok(out.includes("Clip &lt;B&gt;"));
+});
+
+test("Instagram page shows connect and disconnect without a password or token", () => {
+  const out = html(<InstagramAccountsView configured={false} accounts={[{ id: "acct-1", username: "ada.clips", status: "connected", accountType: "BUSINESS", grantedScopes: ["instagram_business_content_publish"], tokenExpiresAt: "2026-08-01", hasToken: true }]} />);
+  for (const text of ["Connect Instagram", "not configured", "@ada.clips", "Disconnect", "required"]) assert.ok(out.includes(text), text);
+  assert.equal(out.includes("type=\"password\""), false);
 });
 
 test("pages render: home is honest, pricing uses the catalog, layout is accessible", () => {

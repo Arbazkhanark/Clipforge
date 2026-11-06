@@ -11,7 +11,7 @@ import type { CaptionRevision } from "../../lib/domain/caption-cover-updates.ts"
 import type { MediaSort } from "../../lib/domain/media-list.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../../lib/domain/types.ts";
 import type { UsageRecordDraft } from "../../lib/domain/usage-accounting.ts";
-import type { AuditEntry, CycleRecord, EditingTemplateRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "../repository.ts";
+import type { AuditEntry, CycleRecord, EditingTemplateRecord, InstagramConnectionWrite, PublishingJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "../repository.ts";
 import { cycleToRow, grantToRow, itemToMutableData, itemToRow, mediaToRow, rowToCollection, rowToCycle, rowToGrant, rowToItem, rowToMedia, rowToSocialAccount } from "./mappers.ts";
 import { isUniqueViolation, type PrismaClientLike } from "./prisma-client-like.ts";
 
@@ -152,6 +152,28 @@ export class PrismaRepository implements Repository {
 
   async getSocialAccount(accountId: string): Promise<SocialAccountRecord | null> { const row = await this.db.socialAccount.findUnique({ where: { id: accountId } }); return row ? rowToSocialAccount(row) : null; }
   async listSocialAccountsForOwner(userId: string): Promise<SocialAccountRecord[]> { return (await this.db.socialAccount.findMany({ where: { userId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] })).map(rowToSocialAccount); }
+  async saveInstagramConnection(connection: InstagramConnectionWrite): Promise<string> {
+    return this.db.$transaction(async (tx) => {
+      const existing = (await tx.socialAccount.findMany({ where: { userId: connection.userId, platform: "instagram", externalAccountId: connection.externalAccountId } }))[0];
+      const data = {
+        username: connection.username, accountType: connection.accountType, grantedScopes: connection.grantedScopes.join(" "),
+        tokenExpiresAt: connection.tokenExpiresAt, encryptedAccessToken: connection.encryptedAccessToken, status: "connected",
+      };
+      if (existing) {
+        await tx.socialAccount.update({ where: { id: existing["id"] }, data });
+        return existing["id"] as string;
+      }
+      await tx.socialAccount.create({ data: { id: connection.id, userId: connection.userId, platform: "instagram", externalAccountId: connection.externalAccountId, ...data } });
+      return connection.id;
+    });
+  }
+  async disconnectSocialAccount(userId: string, accountId: string): Promise<boolean> {
+    const result = await this.db.socialAccount.updateMany({
+      where: { id: accountId, userId },
+      data: { status: "disconnected", encryptedAccessToken: null, tokenExpiresAt: null, grantedScopes: null },
+    });
+    return result.count === 1;
+  }
 
   private async usageSum(userId: string, kind: string, monthStart: Date): Promise<number> {
     const sum = await this.db.usageRecord.aggregate({ where: { userId, kind, periodStart: monthStart }, _sum: { amount: true } });
@@ -232,6 +254,24 @@ export class PrismaRepository implements Repository {
         await this.db.usageRecord.create({ data: { userId: record.userId, kind: record.kind, amount: BigInt(record.amount), periodStart: record.periodStart, idempotencyKey: record.idempotencyKey } });
       } catch (error) { if (!isUniqueViolation(error)) throw error; }
     }
+  }
+  async updateCycleRepeat(cycleId: string, ownerId: string, repeatBehavior: "never" | "ask" | "automatic"): Promise<boolean> {
+    const result = await this.db.publishingCycle.updateMany({ where: { id: cycleId, ownerId }, data: { repeatBehavior } });
+    return result.count === 1;
+  }
+  async listPublishingJobsForAccount(userId: string, socialAccountId: string): Promise<PublishingJobRecord[]> {
+    const cycles = await this.db.publishingCycle.findMany({ where: { ownerId: userId, socialAccountId } });
+    if (cycles.length === 0) return [];
+    const items = await this.db.cycleItem.findMany({ where: { cycleId: { in: cycles.map((cycle) => cycle["id"]) } } });
+    if (items.length === 0) return [];
+    const rows = await this.db.publishingJob.findMany({ where: { cycleItemId: { in: items.map((item) => item["id"]) } } });
+    const outcomes = new Set(["in_progress", "success", "definite_failure", "ambiguous"]);
+    return rows.flatMap((row) => {
+      const outcome = row["outcome"];
+      const startedAt = row["startedAt"];
+      if (typeof outcome !== "string" || !outcomes.has(outcome) || !(startedAt instanceof Date)) return [];
+      return [{ id: String(row["id"]), cycleItemId: String(row["cycleItemId"]), outcome: outcome as PublishingJobRecord["outcome"], startedAt }];
+    });
   }
   async appendAudit(entry: AuditEntry): Promise<void> {
     await this.db.auditLog.create({ data: { actorId: entry.actorId, action: entry.action, entityType: entry.entityType, entityId: entry.entityId, metadata: entry.metadata ?? null } });

@@ -3,6 +3,7 @@ import { ErrorState } from "../../../../src/components/PageState.tsx";
 import { FlashMessage } from "../../../../src/components/FlashMessage.tsx";
 import { parseFlash } from "../../../../src/server/flash.ts";
 import { loadPageData } from "../../../../src/server/page-data.ts";
+import { readInstagramOAuthConfig } from "../../../../src/server/instagram/instagram-oauth.ts";
 import { getCycleDetail } from "../../../../src/server/queries.ts";
 
 export const metadata = { title: "Publishing cycle" };
@@ -18,7 +19,7 @@ export default async function CyclePage(props: { params: Promise<{ cycleId: stri
   return (
     <>
       <FlashMessage flash={parseFlash(searchParams)} />
-      {result.ok ? <CycleDetailView detail={result.data} timeZone="Asia/Kolkata" /> : <ErrorState error={result.error} />}
+      {result.ok ? <CycleDetailView detail={result.data} timeZone="Asia/Kolkata" instagramLoginConfigured={readInstagramOAuthConfig() !== null} /> : <ErrorState error={result.error} />}
     </>
   );
 }

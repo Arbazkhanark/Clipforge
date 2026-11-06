@@ -1,21 +1,37 @@
 // What we KNOW about Instagram's official publishing API, and what we do NOT know.
-// Source: Meta's official "Content Publishing" guide and "IG User Media" reference
-//   https://developers.facebook.com/docs/instagram-platform/content-publishing
-//   https://developers.facebook.com/documentation/instagram-platform/instagram-graph-api/reference/ig-user/media
-// Read on 2026-10-28. Re-check before launch: Meta changes this API often.
+// Re-read on 2026-11-06. URLs and page dates are also in docs/INSTAGRAM.md.
+//   Content Publishing (page updated Oct 20, 2026):
+//     https://developers.facebook.com/docs/instagram-platform/content-publishing
+//   IG User Media (page updated Sep 28, 2026):
+//     https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media
+//   Business Login for Instagram (page updated Mar 13, 2026):
+//     https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/business-login
+//   Oauth Authorize (page updated Jul 17, 2025):
+//     https://developers.facebook.com/docs/instagram-platform/reference/oauth-authorize
 //
-// Nothing here calls Instagram. No Instagram integration works yet (no OAuth, no credentials, no calls).
+// These constants do not call Instagram. Login can be configured; no publishing worker runs.
 
 export const INSTAGRAM_VERIFIED = {
-  readOn: "2026-10-28",
+  readOn: "2026-11-06",
   /** Posts can only be created for Instagram PROFESSIONAL accounts. Passwords are never used - OAuth only. */
   accountTypes: "Instagram professional accounts",
   /** Flow: POST /{ig-id}/media (container) -> GET /{container-id}?fields=status_code -> POST /{ig-id}/media_publish. */
   flow: ["create_container", "poll_status", "media_publish"] as const,
-  /** "Instagram accounts are limited to 100 API-published posts within a 24-hour moving period", enforced at media_publish. */
+  /** Content Publishing, updated Oct 20, 2026: "100 API-published posts within a 24-hour moving period", enforced at media_publish. */
   publishLimitPer24h: 100,
   /** The same page also says "50 published posts within a 24-hour period" in the carousel section: the docs disagree. */
-  publishLimitDocConflict: "A carousel section of the same guide mentions 50 per 24h. Ask GET /{ig-id}/content_publishing_limit at runtime.",
+  publishLimitDocConflict: "A carousel section of the same guide, still present on Oct 20, 2026, mentions 50 per 24h. Ask GET /{ig-id}/content_publishing_limit at runtime.",
+  /**
+   * IG User Media, updated Sep 28, 2026. The page says 300MB and does not define 1000 or 1024.
+   * ClipForge uses 300 × 1024 × 1024 so a file is not blocked on a tighter reading of "MB".
+   */
+  reels: {
+    container: "MOV or MP4",
+    minDurationSeconds: 3,
+    maxDurationSeconds: 15 * 60,
+    maxFileBytes: 300 * 1024 * 1024,
+    cover: "JPEG, 8MB maximum",
+  },
   /** Meta recommends apps enforce the limit themselves, especially when scheduling posts for later. */
   appShouldEnforceLimit: true,
   /** Containers expire after 24 hours; an account may create 400 containers per rolling 24 hours. */
@@ -43,16 +59,16 @@ export const INSTAGRAM_VERIFIED = {
 
 /** Things we have NOT confirmed from an official source. Do not rely on any of these. */
 export const INSTAGRAM_UNVERIFIED: readonly string[] = [
-  "Reels video requirements (maximum duration, file size, codec/container, aspect ratio): only third-party blogs were read.",
   "Maximum caption length and hashtag count (our 2,200 / 30 are from memory).",
-  "Cover image requirements (format, size, dimensions) and whether cover_url or thumb_offset wins when both are sent.",
-  "Whether Creator accounts (as opposed to Business) may publish.",
+  "Whether cover_url or thumb_offset wins when both are sent. JPEG and an 8MB cover maximum are documented.",
+  "The publishing guide says professional accounts. It does not list the account_type values BUSINESS and MEDIA_CREATOR.",
   "App Review / Advanced Access requirements before non-test users can connect.",
-  "Which Graph API version to use (examples in the docs show v25.0 and v26.0).",
-  "Whether resumable upload is usable for us (the guide says it is only for apps using Facebook Login for Business).",
+  "Which Graph API version to use (examples in the docs show more than one version).",
+  "Whether resumable upload is usable for Instagram Login (the guide limits it to Facebook Login for Business).",
+  "The IG User Media page says 300MB and does not define the byte multiple.",
 ];
 
-/** Reels can carry a custom cover through the API parameters; details above are unverified. Photo posts have no cover concept. */
+/** Reels can carry a custom cover through the API parameters. Photo posts have no cover concept. */
 export function instagramCoverSupport(kind: "reel" | "photo"): "supported" | "unsupported" {
   return kind === "reel" ? "supported" : "unsupported";
 }

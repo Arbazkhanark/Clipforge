@@ -235,7 +235,7 @@ test("cycles page: create form lists only your connected accounts (no external i
   const withAccount = html(await CyclesPage());
   assert.ok(withAccount.includes('action="/api/forms/cycle-create"')); assert.ok(withAccount.includes("Connected account 1")); assert.ok(!withAccount.includes(">demo-account<")); // the internal id is only the option value, never visible text
   repo.socialAccounts.set("demo-account", { id: "demo-account", userId: DEMO_USER_ID, status: "token_expired" });
-  assert.ok(html(await CyclesPage()).includes("Connecting accounts is not available yet"));
+  assert.ok(html(await CyclesPage()).includes("Live publishing is not configured"));
 });
 
 test("cycle page: one form wraps the table and all actions; versions only for editable items; covers are images only; start needs readiness", async () => {
@@ -247,6 +247,10 @@ test("cycle page: one form wraps the table and all actions; versions only for ed
   assert.ok(formHtml.includes("Sample cover image 29")); assert.ok(!formHtml.includes("<option value=\"demo-media-1\">"));
   assert.ok(formHtml.includes("never shown as applied on Instagram"));
   assert.ok(page.includes('action="/api/forms/cycle-start"')); assert.ok(!/<button type="submit" disabled>Start cycle/.test(page));
+  assert.ok(page.includes('action="/api/forms/cycle-repeat"'));
+  assert.ok(page.includes("Live publishing is not configured"));
+  assert.ok(page.includes("pauses new claims after 3"));
+  assert.ok(page.includes("eligible, unpublished"));
   // Blocked cycle: start button disabled.
   repo.grants.find((g) => g.collectionId === "demo-shared-col-1")!.status = "revoked";
   assert.ok(/<button type="submit" disabled="">Start cycle/.test(html(await CyclePage({ params: { cycleId: DEMO_CYCLE_ID } }))));

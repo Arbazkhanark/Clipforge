@@ -8,6 +8,7 @@ export const FLASH_NOTICES = {
   upload_incomplete: "Upload complete, but the file was accepted by its file signature only: its length and size could not be checked because ffprobe is not installed on this server.",
   cycle_created: "Publishing cycle created. Nothing is published yet.",
   cycle_started: "Cycle started.",
+  cycle_repeat_saved: "Repeat mode saved. A repeat can include only eligible unpublished items, and only when this mode says so. No Reel is sent by saving this setting.",
   captions_applied: "Caption update finished.",
   covers_applied: "Cover update finished. Covers are saved in ClipForge; Instagram has not received them.",
   videos_added: "Videos added to the cycle.",
@@ -31,6 +32,8 @@ export const FLASH_NOTICES = {
   collection_archived: "Collection archived. The videos are still in your library.",
   collection_restored: "Collection restored.",
   collection_deleted: "Collection deleted. The videos are still in your library and in any other collection.",
+  instagram_connected: "Instagram is connected. The access token stays on the server. No Reel has been published.",
+  instagram_disconnected: "Instagram is disconnected. The token was removed. Your videos and cycles were not deleted.",
   videos_removed: "Videos removed from the cycle. Already-published posts are not affected.",
   google_connected: "Google is connected to this account. Email and password sign-in still works.",
 } as const;
@@ -71,6 +74,13 @@ export const FLASH_ERRORS = {
   google_link_mismatch: "Google was not connected. Sign in with the password for this verified email, then try again.",
   google_callback_error: "Google sign-in could not be completed. Please try again.",
   google_invalid_profile: "Google did not return a usable account, so nothing was changed.",
+  instagram_not_configured: "Instagram is not configured. Add your own Meta app credentials. ClipForge does not create that app.",
+  instagram_cancelled: "Instagram connection was cancelled. No account was changed.",
+  instagram_invalid_state: "That Instagram connection expired or did not match this browser. Please try again.",
+  instagram_expired_code: "That Instagram connection code expired. Please try again.",
+  instagram_missing_permission: "Instagram did not grant the publishing permissions, so nothing was saved.",
+  instagram_unsupported_account: "Instagram professional accounts can publish. This personal account was not connected.",
+  instagram_callback_error: "Instagram could not be connected. Please try again.",
 } as const;
 
 export type FlashNoticeCode = keyof typeof FLASH_NOTICES;

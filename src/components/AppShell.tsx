@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { EmailDelivery, RuntimeMode } from "../server/runtime.ts";
 
-const LINKS: [string, string][] = [["/dashboard", "Dashboard"], ["/media", "Media library"], ["/collections", "Collections"], ["/cycles", "Publishing cycles"], ["/editor", "Editor"], ["/pricing", "Plans"]];
+const LINKS: [string, string][] = [["/dashboard", "Dashboard"], ["/media", "Media library"], ["/collections", "Collections"], ["/cycles", "Publishing cycles"], ["/instagram", "Instagram"], ["/editor", "Editor"], ["/pricing", "Plans"]];
 
 /** Navigation + content area for signed-in screens. Responsive with CSS only (sidebar on wide screens, wrapped links on narrow ones). */
 export function AppShell({ mode, emailDelivery, children }: { mode: RuntimeMode; emailDelivery?: EmailDelivery; children: ReactNode }) {

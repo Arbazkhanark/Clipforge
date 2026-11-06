@@ -4,6 +4,7 @@ import { checkLimit } from "../../lib/billing/entitlements.ts";
 import { mixVideosIntoCycle, unmixItems, type MixCandidate, type MixRejection } from "../../lib/domain/mix-unmix.ts";
 import type { PreflightReport } from "../../lib/domain/preflight.ts";
 import { startCycle as startCycleRule } from "../../lib/domain/cycle-state.ts";
+import type { RepeatBehavior } from "../../lib/domain/publish-workflow.ts";
 import type { CollectionPermissionGrant, CycleItem, VideoCollection } from "../../lib/domain/types.ts";
 import { buildPreflightReport } from "../preflight-service.ts";
 import { requireUser, type RequestContext } from "../context.ts";
@@ -35,6 +36,26 @@ export async function createCycle(ctx: RequestContext, rawInput: unknown): Promi
   await ctx.repo.createCycle({ id: cycleId, ownerId: userId, status: "draft", finalReviewConfirmed: false, name: name.trim(), socialAccountId });
   await ctx.repo.appendAudit({ actorId: userId, action: "cycle.created", entityType: "PublishingCycle", entityId: cycleId });
   return { cycleId };
+}
+
+export async function setCycleRepeat(ctx: RequestContext, rawInput: unknown): Promise<{ repeatBehavior: RepeatBehavior }> {
+  const userId = requireUser(ctx);
+  const problems = new Problems();
+  const input = readObject(rawInput, problems);
+  const cycleId = readId(input, "cycleId", problems);
+  const repeatBehavior = input["repeatBehavior"];
+  if (repeatBehavior !== "never" && repeatBehavior !== "ask" && repeatBehavior !== "automatic") {
+    problems.add("repeatBehavior must be never, ask, or automatic.");
+    problems.throwIfAny();
+    throw new Error("unreachable");
+  }
+  problems.throwIfAny();
+  const cycle = await loadOwnedCycle(ctx, userId, cycleId);
+  if (cycle.status === "stopped" || cycle.status === "completed") throw forbidden("This cycle has ended.");
+  const saved = await ctx.repo.updateCycleRepeat(cycleId, userId, repeatBehavior);
+  if (!saved) throw notFound("Publishing cycle");
+  await ctx.repo.appendAudit({ actorId: userId, action: "cycle.repeat_updated", entityType: "PublishingCycle", entityId: cycleId, metadata: { repeatBehavior } });
+  return { repeatBehavior };
 }
 
 export async function mixIntoCycle(ctx: RequestContext, rawInput: unknown): Promise<{ added: number; rejected: MixRejection[] }> {

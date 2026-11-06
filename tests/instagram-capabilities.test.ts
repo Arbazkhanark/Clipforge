@@ -11,9 +11,13 @@ test("documented constants are recorded with their conflicts and unknowns, not h
   assert.match(INSTAGRAM_VERIFIED.publishLimitDocConflict, /50/);
   assert.equal(INSTAGRAM_VERIFIED.containerLifetimeHours, 24);
   assert.equal(INSTAGRAM_VERIFIED.photoFormat, "JPEG");
+  assert.equal(INSTAGRAM_VERIFIED.reels.minDurationSeconds, 3);
+  assert.equal(INSTAGRAM_VERIFIED.reels.maxDurationSeconds, 15 * 60);
+  assert.equal(INSTAGRAM_VERIFIED.reels.maxFileBytes, 300 * 1024 * 1024);
   assert.ok(INSTAGRAM_UNVERIFIED.length >= 5);
   assert.ok(INSTAGRAM_UNVERIFIED.some((t) => /caption/i.test(t)));
-  assert.ok(INSTAGRAM_UNVERIFIED.some((t) => /Reels video requirements/.test(t)));
+  assert.ok(INSTAGRAM_UNVERIFIED.some((t) => /300MB/.test(t)));
+  assert.ok(!INSTAGRAM_UNVERIFIED.some((t) => /maximum duration/.test(t)));
 });
 
 test("cover support: Reels have cover parameters in the official reference; photo posts have no cover", () => {

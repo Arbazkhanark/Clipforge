@@ -1,7 +1,7 @@
 // The concrete form routes: how each HTML form's fields become a handler input, and where the user goes next.
 import { bulkUpdateCaptions, bulkUpdateCovers, type BulkUpdateReport } from "./handlers/captions-covers.ts";
 import { createCollection, deleteCollection, replaceCollectionMedia, setCollectionArchived, updateCollection } from "./handlers/collections.ts";
-import { createCycle, mixIntoCycle, startPublishingCycle, unmixFromCycle } from "./handlers/cycles.ts";
+import { createCycle, mixIntoCycle, setCycleRepeat, startPublishingCycle, unmixFromCycle } from "./handlers/cycles.ts";
 import { editorCandidateFromFields } from "../lib/domain/editing-settings.ts";
 import { applyBulkEdit, reviewBulkEdit, startBulkRender } from "./bulk/bulk-service.ts";
 import { saveCurrentVideoSettings, saveEditingTemplate } from "./handlers/editor.ts";
@@ -60,6 +60,13 @@ export const createCycleForm = formRoute({
   toInput: (f) => ({ name: f.get("name") ?? "", socialAccountId: f.get("socialAccountId") ?? "" }),
   success: (r) => ({ path: `/cycles/${r.cycleId}`, code: "cycle_created" }),
   failurePath: () => "/cycles",
+});
+
+export const cycleRepeatForm = formRoute({
+  handler: setCycleRepeat,
+  toInput: (f) => ({ cycleId: f.get("cycleId") ?? "", repeatBehavior: f.get("repeatBehavior") ?? "" }),
+  success: (_r, f) => ({ path: cyclePath(f), code: "cycle_repeat_saved" }),
+  failurePath: cyclePath,
 });
 
 export const startCycleForm = formRoute({

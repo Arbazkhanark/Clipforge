@@ -102,7 +102,7 @@ test("cycles: overview counts and detail with preflight and the items table", as
   assert.ok(detail.includes("Draft (not started)")); assert.ok(detail.includes("Before you start"));
   assert.ok(detail.includes("Sample clip 01")); assert.ok(detail.includes("Shared with you"));
   assert.ok(detail.includes("Saved in ClipForge (not confirmed on Instagram)"));
-  assert.ok(detail.includes("not available in the screens yet")); assert.ok(detail.includes("not connected"));
+  assert.ok(detail.includes("does not send a Reel")); assert.ok(detail.includes("not connected") || detail.includes("No Instagram access token"));
   assert.ok(!detail.includes("Applied on Instagram"));
 });
 

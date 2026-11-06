@@ -15,7 +15,7 @@ nav a { margin-right: 1rem; color: var(--accent); }
 button { padding: 0.5rem 1rem; border-radius: 0.5rem; border: 1px solid var(--border); background: var(--accent); color: #fff; }
 button[disabled] { opacity: 0.55; cursor: not-allowed; }
 .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 1rem; border: 1px solid var(--border); font-size: 0.85rem; }
-.cycle-items { width: 100%; border-collapse: collapse; overflow-x: auto; display: block; }
+.cycle-items { width: 100%; max-width: 100%; border-collapse: collapse; overflow-x: auto; display: block; }
 .cycle-items th, .cycle-items td { text-align: left; padding: 0.4rem; border-bottom: 1px solid var(--border); vertical-align: top; }
 .usage-meter progress { width: 100%; } .usage-meter-header { display: flex; justify-content: space-between; }
 @media (max-width: 40rem) { .prices { flex-direction: column; gap: 0.25rem; } }
@@ -24,7 +24,7 @@ button[disabled] { opacity: 0.55; cursor: not-allowed; }
 .app-shell { display: grid; gap: 1rem; grid-template-columns: 1fr; }
 .app-nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0; margin: 0; }
 .app-nav a { display: inline-block; padding: 0.35rem 0.6rem; border-radius: 0.4rem; border: 1px solid var(--border); text-decoration: none; }
-.app-content { min-width: 0; }
+.app-content { min-width: 0; overflow-x: auto; }
 @media (min-width: 48rem) {
   .app-shell { grid-template-columns: 13rem 1fr; align-items: start; }
   .app-nav ul { flex-direction: column; }

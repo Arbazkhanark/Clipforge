@@ -339,6 +339,10 @@ model SocialAccount {
    */
   encryptedAccessToken String?
   tokenExpiresAt       DateTime?
+  /// BUSINESS, MEDIA_CREATOR, PERSONAL, or UNKNOWN. Not a secret.
+  accountType          String?
+  /// Space-separated Meta permission names. Never an access token.
+  grantedScopes        String?
   status               SocialAccountStatus @default(connected)
   createdAt            DateTime            @default(now())
 

@@ -12,8 +12,38 @@ import type { UsageRecordDraft } from "../lib/domain/usage-accounting.ts";
 import type { MediaSort } from "../lib/domain/media-list.ts";
 import type { CollectionPermissionGrant, CollectionVisibility, CycleItem, CycleStatus, MediaAsset, PublishingCycle, VideoCollection } from "../lib/domain/types.ts";
 
-export interface CycleRecord extends PublishingCycle { name: string; socialAccountId: string; }
-export interface SocialAccountRecord { id: string; userId: string; status: "connected" | "token_expired" | "revoked" | "disconnected"; }
+export interface CycleRecord extends PublishingCycle { name: string; socialAccountId: string; repeatBehavior?: "never" | "ask" | "automatic"; }
+export const INSTAGRAM_ACCOUNT_TYPES = ["BUSINESS", "MEDIA_CREATOR", "PERSONAL", "UNKNOWN"] as const;
+export type InstagramAccountType = (typeof INSTAGRAM_ACCOUNT_TYPES)[number];
+export interface PublishingJobRecord {
+  id: string;
+  cycleItemId: string;
+  outcome: "in_progress" | "success" | "definite_failure" | "ambiguous";
+  startedAt: Date;
+}
+
+export interface SocialAccountRecord {
+  id: string;
+  userId: string;
+  status: "connected" | "token_expired" | "revoked" | "disconnected";
+  username?: string;
+  externalAccountId?: string;
+  accountType?: InstagramAccountType;
+  grantedScopes?: string[];
+  tokenExpiresAt?: Date | null;
+  /** True only when a ciphertext is stored. The token itself is never on this record. */
+  hasToken?: boolean;
+}
+export interface InstagramConnectionWrite {
+  id: string;
+  userId: string;
+  externalAccountId: string;
+  username: string | null;
+  accountType: InstagramAccountType;
+  grantedScopes: string[];
+  tokenExpiresAt: Date;
+  encryptedAccessToken: string;
+}
 export interface EditingTemplateRecord { id: string; ownerId: string; name: string; settings: EditingSettings; createdAt: Date; }
 export interface RenderOutputRecord { id: string; sourceMediaId: string; ownerId: string; sizeBytes: number; createdAt: Date; }
 export type SaveRenderResult = { status: "saved" | "duplicate"; id: string } | { status: "over_quota" };
@@ -80,6 +110,20 @@ export interface Repository {
   upsertGrant(grant: CollectionPermissionGrant): Promise<void>;
 
   getSocialAccount(accountId: string): Promise<SocialAccountRecord | null>;
+  /** Changes repeat mode on a cycle this user owns. False when the cycle is missing or belongs to someone else. */
+  updateCycleRepeat(cycleId: string, ownerId: string, repeatBehavior: "never" | "ask" | "automatic"): Promise<boolean>;
+  /**
+   * PublishingJob rows for cycles this user owns on this account, newest not guaranteed.
+   * The token is not on these rows. A browser-supplied owner id is never accepted here.
+   */
+  listPublishingJobsForAccount(userId: string, socialAccountId: string): Promise<PublishingJobRecord[]>;
+  /**
+   * Stores one Instagram connection for this user. The same external account is updated in place.
+   * `encryptedAccessToken` is ciphertext. Callers must not pass a browser-supplied owner id.
+   */
+  saveInstagramConnection(connection: InstagramConnectionWrite): Promise<string>;
+  /** Clears the token and marks the account disconnected. Does not delete cycles or media. False when it is not this user's account. */
+  disconnectSocialAccount(userId: string, accountId: string): Promise<boolean>;
   getScheduledItemsUsedThisMonth(userId: string, monthStart: Date): Promise<number>;
   getRecentPublishTimes(userId: string, since: Date): Promise<Date[]>;
 

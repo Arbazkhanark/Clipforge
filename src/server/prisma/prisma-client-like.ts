@@ -24,7 +24,7 @@ export interface ModelDelegate {
 export interface PrismaClientLike {
   user: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate; googleIdentity: ModelDelegate;
   mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate;
-  publishingCycle: ModelDelegate; cycleItem: ModelDelegate; captionRevision: ModelDelegate;
+  publishingCycle: ModelDelegate; cycleItem: ModelDelegate; publishingJob: ModelDelegate; captionRevision: ModelDelegate;
   auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; usageRecord: ModelDelegate;
   /** Runs `work` in a database transaction. */
   $transaction<T>(work: (tx: PrismaClientLike) => Promise<T>): Promise<T>;

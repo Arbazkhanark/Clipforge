@@ -7,7 +7,9 @@ import { describeUsageReset, monthStartUtc } from "../lib/domain/usage-accountin
 import { compareMedia, mediaMatchesSearch } from "../lib/domain/media-list.ts";
 import { getCollectionCapabilities } from "../lib/domain/sharing-permissions.ts";
 import type { Capability, CollectionVisibility, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
+import { INSTAGRAM_VERIFIED } from "../lib/integrations/instagram-capabilities.ts";
 import type { PreflightReport } from "../lib/domain/preflight.ts";
+import { consecutiveDefiniteFailures, itemsEligibleForRepeat, shouldPauseForAccount, type RepeatBehavior } from "../lib/domain/publish-workflow.ts";
 import { requireUser, type RequestContext } from "./context.ts";
 import { readCollectionListQuery, readCollectionVideoQuery, readMediaListQuery, type CollectionSort, type MediaListQuery } from "./library-query.ts";
 import { notFound } from "./errors.ts";
@@ -139,7 +141,18 @@ export async function getCyclesOverview(ctx: RequestContext): Promise<CycleCard[
   }));
 }
 
-export interface CycleDetail { cycle: Pick<CycleRecord, "id" | "name" | "status">; items: CycleItem[]; mediaTitles: Record<string, string>; report: PreflightReport; /** Images the user owns that can be used as covers. */ coverChoices: MediaCard[]; /** True when only the final confirmation is missing (every other check passes). */ readyToConfirm: boolean; }
+export interface CyclePublishingStatus {
+  repeatBehavior: RepeatBehavior;
+  accountStatus: "connected" | "token_expired" | "revoked" | "disconnected" | null;
+  tokenExpiresAt: string | null;
+  tokenExpired: boolean;
+  missingPermissions: string[];
+  definiteFailureStreak: number;
+  pauseReason: string | null;
+  eligibleUnpublishedCount: number;
+}
+
+export interface CycleDetail { cycle: Pick<CycleRecord, "id" | "name" | "status">; items: CycleItem[]; mediaTitles: Record<string, string>; report: PreflightReport; /** Images the user owns that can be used as covers. */ coverChoices: MediaCard[]; /** True when only the final confirmation is missing (every other check passes). */ readyToConfirm: boolean; publishing: CyclePublishingStatus; }
 
 export async function getCycleDetail(ctx: RequestContext, cycleId: string): Promise<CycleDetail> {
   const userId = requireUser(ctx);
@@ -153,7 +166,28 @@ export async function getCycleDetail(ctx: RequestContext, cycleId: string): Prom
   const report = await buildPreflightReport(ctx, userId, cycle, items, cycle.finalReviewConfirmed);
   const coverChoices = (await ctx.repo.listMediaForOwner(userId, { limit: 50, offset: 0, kind: "image" })).items.map(toMediaCard);
   const readyToConfirm = report.checks.every((c) => c.id === "final_review" || c.level === "ready" || c.level === "recommendation");
-  return { cycle: { id: cycle.id, name: cycle.name, status: cycle.status }, items, mediaTitles, report, coverChoices, readyToConfirm };
+  const ownedAccount = accountBelongsTo(await ctx.repo.getSocialAccount(cycle.socialAccountId), userId);
+  const jobs = await ctx.repo.listPublishingJobsForAccount(userId, cycle.socialAccountId);
+  const definiteFailureStreak = consecutiveDefiniteFailures(jobs);
+  const pause = ownedAccount ? shouldPauseForAccount({ status: ownedAccount.status, consecutiveDefiniteFailures: definiteFailureStreak }) : { pause: false, reason: null };
+  const requiredScopes = INSTAGRAM_VERIFIED.loginPaths.instagramLogin.permissions;
+  const grantedScopes = ownedAccount?.grantedScopes ?? [];
+  const expiresAt = ownedAccount?.tokenExpiresAt ?? null;
+  const publishing: CyclePublishingStatus = {
+    repeatBehavior: cycle.repeatBehavior ?? "never",
+    accountStatus: ownedAccount?.status ?? null,
+    tokenExpiresAt: expiresAt ? expiresAt.toISOString().slice(0, 10) : null,
+    tokenExpired: expiresAt !== null && expiresAt <= ctx.now,
+    missingPermissions: ownedAccount ? requiredScopes.filter((scope) => !grantedScopes.includes(scope)) : [],
+    definiteFailureStreak,
+    pauseReason: pause.pause ? pause.reason : null,
+    eligibleUnpublishedCount: itemsEligibleForRepeat(items).length,
+  };
+  return { cycle: { id: cycle.id, name: cycle.name, status: cycle.status }, items, mediaTitles, report, coverChoices, readyToConfirm, publishing };
+}
+
+function accountBelongsTo(account: Awaited<ReturnType<RequestContext["repo"]["getSocialAccount"]>>, userId: string) {
+  return account && account.userId === userId ? account : null;
 }
 
 export interface UploadInfo { available: boolean; storage: StorageDescription; storageKind: "memory" | "local-disk" | "s3" | null; maxMegabytes: number; }
@@ -164,6 +198,31 @@ export function getUploadInfo(ctx: RequestContext): UploadInfo {
   if (ctx.media?.unavailable) return { available: false, storage: { label: "Private folder unavailable", persistent: false, warning: ctx.media.unavailable }, storageKind: null, maxMegabytes: Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) };
   const kind = ctx.media?.storage.kind ?? null;
   return { available: ctx.media !== undefined, storage: describeStorage(kind), storageKind: kind, maxMegabytes: ctx.media ? Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) : 0 };
+}
+
+export interface InstagramAccountCard {
+  id: string;
+  username: string | null;
+  status: "connected" | "token_expired" | "revoked" | "disconnected";
+  accountType: string | null;
+  grantedScopes: string[];
+  tokenExpiresAt: string | null;
+  hasToken: boolean;
+}
+
+/** Accounts for the Instagram page. Tokens and external ids are not included. */
+export async function getInstagramAccounts(ctx: RequestContext): Promise<InstagramAccountCard[]> {
+  const userId = requireUser(ctx);
+  const accounts = await ctx.repo.listSocialAccountsForOwner(userId);
+  return accounts.map((account) => ({
+    id: account.id,
+    username: account.username ?? null,
+    status: account.status,
+    accountType: account.accountType ?? null,
+    grantedScopes: account.grantedScopes ?? [],
+    tokenExpiresAt: account.tokenExpiresAt ? account.tokenExpiresAt.toISOString().slice(0, 10) : null,
+    hasToken: account.hasToken === true,
+  }));
 }
 
 /** The user's own connected accounts for the "new cycle" form. External ids are never shown. */

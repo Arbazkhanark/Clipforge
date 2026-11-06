@@ -26,6 +26,13 @@ Google sign-in uses the same session cookie as email/password. It stays off unti
 
 The buttons do not pretend a Google login happened when those variables are still placeholders.
 
+Instagram uses Instagram Login and stays off until you create a Meta app yourself. This repo does not create that app, and it does not publish a Reel. Official page URLs and the publishing-worker design are in `docs/INSTAGRAM.md`:
+
+1. In the Meta app, add this redirect URI exactly: `http://localhost:3000/api/instagram/callback`.
+2. Set `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_OAUTH_REDIRECT_URI`, and `INSTAGRAM_TOKEN_KEY`. `replace-me` is treated as not configured. The token key is 32 bytes encoded as base64url and never goes in the browser.
+3. Apply `prisma/migrations/20261106174500_instagram_account_details` on a database you choose before database mode can store the account type and permission names. It is not applied to Neon from this repo. The encrypted token column already exists on the init migration.
+4. Connect from the Instagram page while signed in. A personal account is refused. Disconnect asks for confirmation and removes the token without deleting videos.
+
 Rendering and upload tests need `ffmpeg`/`ffprobe` on the PATH (skipped if ffmpeg is missing).
 No AWS account, credentials or resources are needed or used: see docs/COST_GUARDRAILS.md.
 

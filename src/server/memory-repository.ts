@@ -6,7 +6,7 @@ import type { CaptionRevision } from "../lib/domain/caption-cover-updates.ts";
 import { compareMedia, mediaMatchesSearch, type MediaSort } from "../lib/domain/media-list.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
 import type { UsageRecordDraft } from "../lib/domain/usage-accounting.ts";
-import type { AuditEntry, CycleRecord, EditingTemplateRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "./repository.ts";
+import type { AuditEntry, CycleRecord, EditingTemplateRecord, InstagramConnectionWrite, PublishingJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "./repository.ts";
 
 const clone = <T>(value: T): T => structuredClone(value);
 /** Fields a version-checked save may change; identity fields (id, cycleId, cycleOwnerId) never do. */
@@ -21,6 +21,9 @@ export class MemoryRepository implements Repository {
   collections = new Map<string, VideoCollection>();
   grants: CollectionPermissionGrant[] = [];
   socialAccounts = new Map<string, SocialAccountRecord>();
+  publishingJobs = new Map<string, PublishingJobRecord>();
+  /** Ciphertext only. Never copied onto SocialAccountRecord. */
+  private instagramTokens = new Map<string, string>();
   captionRevisions: CaptionRevision[] = [];
   audit: AuditEntry[] = [];
   templates = new Map<string, EditingTemplateRecord>();
@@ -47,6 +50,13 @@ export class MemoryRepository implements Repository {
     const cycle = this.cycles.get(cycleId);
     if (!cycle || cycle.status !== from) return false; // someone else already changed it
     this.cycles.set(cycleId, { ...cycle, status: to, finalReviewConfirmed });
+    return true;
+  }
+  async updateCycleRepeat(cycleId: string, ownerId: string, repeatBehavior: "never" | "ask" | "automatic"): Promise<boolean> {
+    await tick();
+    const cycle = this.cycles.get(cycleId);
+    if (!cycle || cycle.ownerId !== ownerId) return false;
+    this.cycles.set(cycleId, { ...cycle, repeatBehavior });
     return true;
   }
 
@@ -151,6 +161,36 @@ export class MemoryRepository implements Repository {
   }
 
   async getSocialAccount(accountId: string): Promise<SocialAccountRecord | null> { await tick(); const a = this.socialAccounts.get(accountId); return a ? clone(a) : null; }
+  async saveInstagramConnection(connection: InstagramConnectionWrite): Promise<string> {
+    await tick();
+    const existing = [...this.socialAccounts.values()].find((account) => account.userId === connection.userId && account.externalAccountId === connection.externalAccountId);
+    const id = existing?.id ?? connection.id;
+    this.socialAccounts.set(id, {
+      id, userId: connection.userId, status: "connected", username: connection.username ?? undefined, externalAccountId: connection.externalAccountId,
+      accountType: connection.accountType, grantedScopes: [...connection.grantedScopes], tokenExpiresAt: connection.tokenExpiresAt, hasToken: true,
+    });
+    if (!this.socialAccounts.get(id)!.username) delete this.socialAccounts.get(id)!.username;
+    this.instagramTokens.set(id, connection.encryptedAccessToken);
+    return id;
+  }
+  async disconnectSocialAccount(userId: string, accountId: string): Promise<boolean> {
+    await tick();
+    const account = this.socialAccounts.get(accountId);
+    if (!account || account.userId !== userId) return false;
+    this.instagramTokens.delete(accountId);
+    const next: SocialAccountRecord = { id: account.id, userId: account.userId, status: "disconnected" };
+    if (account.username) next.username = account.username;
+    if (account.externalAccountId) next.externalAccountId = account.externalAccountId;
+    if (account.accountType) next.accountType = account.accountType;
+    this.socialAccounts.set(accountId, next);
+    return true;
+  }
+  async listPublishingJobsForAccount(userId: string, socialAccountId: string): Promise<PublishingJobRecord[]> {
+    await tick();
+    const cycleIds = new Set([...this.cycles.values()].filter((cycle) => cycle.ownerId === userId && cycle.socialAccountId === socialAccountId).map((cycle) => cycle.id));
+    const itemIds = new Set([...this.items.values()].filter((item) => cycleIds.has(item.cycleId)).map((item) => item.id));
+    return [...this.publishingJobs.values()].filter((job) => itemIds.has(job.cycleItemId)).map((job) => clone(job));
+  }
   async getScheduledItemsUsedThisMonth(userId: string, monthStart: Date): Promise<number> { await tick(); return this.usageByMonth.get(`${userId}|${monthStart.toISOString()}`)?.scheduledItems ?? 0; }
   async getRecentPublishTimes(userId: string, since: Date): Promise<Date[]> {
     await tick();
