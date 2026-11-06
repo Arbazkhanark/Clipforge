@@ -16,6 +16,7 @@ function matches(row: Row, where: Where | undefined, compound: Record<string, st
     const value = row[key];
     if (isPlainObject(condition)) {
       for (const [op, operand] of Object.entries(condition)) {
+        if (op === "mode") continue;
         if (op === "in") { if (!(operand as unknown[]).some((o) => same(value, o))) return false; }
         else if (op === "not") { if (same(value, operand)) return false; }
         else if (op === "equals") { if (!same(value, operand)) return false; }
@@ -24,6 +25,12 @@ function matches(row: Row, where: Where | undefined, compound: Record<string, st
         else if (op === "gte") { if (!(comparable(value) >= comparable(operand))) return false; }
         else if (op === "lt") { if (!(comparable(value) < comparable(operand))) return false; }
         else if (op === "lte") { if (!(comparable(value) <= comparable(operand))) return false; }
+        else if (op === "contains") {
+          const haystack = String(value ?? "");
+          const needle = String(operand);
+          const insensitive = (condition as Row)["mode"] === "insensitive";
+          if (!(insensitive ? haystack.toLocaleLowerCase().includes(needle.toLocaleLowerCase()) : haystack.includes(needle))) return false;
+        }
         else throw new Error(`fake prisma: unsupported operator ${op}`);
       }
     } else if (!same(value, condition)) return false;

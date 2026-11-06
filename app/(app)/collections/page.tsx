@@ -8,11 +8,11 @@ import { getCollectionsOverview } from "../../../src/server/queries.ts";
 export const metadata = { title: "Collections" };
 export const dynamic = "force-dynamic";
 
-type Search = { notice?: string; error?: string };
+type Search = { notice?: string; error?: string; q?: string; sort?: string };
 
 export default async function CollectionsPage(props: { searchParams?: Promise<Search> | Search } = {}) {
   const searchParams = await props.searchParams;
-  const result = await loadPageData((ctx) => getCollectionsOverview(ctx));
+  const result = await loadPageData((ctx) => getCollectionsOverview(ctx, searchParams));
   return (
     <>
       <FlashMessage flash={parseFlash(searchParams)} />

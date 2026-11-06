@@ -42,6 +42,7 @@ export interface VideoCollection {
   mediaIds: string[];
   name?: string;
   description?: string;
+  createdAt?: Date;
 }
 
 /**

@@ -13,7 +13,7 @@ type Search = Record<string, string | string[] | undefined>;
 export default async function CollectionPage(props: { params: Promise<{ collectionId: string }> | { collectionId: string }; searchParams?: Promise<Search> | Search }) {
   const { collectionId } = await props.params;
   const searchParams = await props.searchParams;
-  const result = await loadPageData((ctx) => getCollectionDetail(ctx, collectionId));
+  const result = await loadPageData((ctx) => getCollectionDetail(ctx, collectionId, searchParams));
   return (
     <>
       <FlashMessage flash={parseFlash(searchParams)} />

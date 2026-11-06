@@ -23,7 +23,7 @@ export function rowToMedia(row: Row): MediaAsset {
 }
 
 export const rowToCollection = (row: Row, mediaIds: string[]): VideoCollection =>
-  ({ id: row["id"], ownerId: row["ownerId"], visibility: row["visibility"], archived: row["archived"], mediaIds, name: row["name"], ...(row["description"] != null ? { description: row["description"] } : {}) });
+  ({ id: row["id"], ownerId: row["ownerId"], visibility: row["visibility"], archived: row["archived"], mediaIds, name: row["name"], ...(row["description"] != null ? { description: row["description"] } : {}), ...(row["createdAt"] != null ? { createdAt: row["createdAt"] } : {}) });
 
 export function grantToRow(g: CollectionPermissionGrant): Row {
   return { collectionId: g.collectionId, granteeId: g.granteeId, capabilities: [...g.capabilities], status: g.status, expiresAt: g.expiresAt, grantedById: g.grantedById ?? null, revokedAt: g.status === "revoked" ? new Date() : null };

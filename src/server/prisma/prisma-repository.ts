@@ -8,6 +8,7 @@
 import { effectivePlanId, type SubscriptionState } from "../../lib/billing/subscription-state.ts";
 import type { PlanId } from "../../lib/billing/catalog.ts";
 import type { CaptionRevision } from "../../lib/domain/caption-cover-updates.ts";
+import type { MediaSort } from "../../lib/domain/media-list.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../../lib/domain/types.ts";
 import type { UsageRecordDraft } from "../../lib/domain/usage-accounting.ts";
 import type { AuditEntry, CycleRecord, EditingTemplateRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "../repository.ts";
@@ -50,9 +51,11 @@ export class PrismaRepository implements Repository {
 
   async getMedia(mediaId: string): Promise<MediaAsset | null> { const row = await this.db.mediaAsset.findUnique({ where: { id: mediaId } }); return row ? rowToMedia(row) : null; }
   async getMediaByIds(mediaIds: string[]): Promise<MediaAsset[]> { return mediaIds.length === 0 ? [] : (await this.db.mediaAsset.findMany({ where: { id: { in: mediaIds } } })).map(rowToMedia); }
-  async listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image" }): Promise<{ items: MediaAsset[]; total: number }> {
-    const where = { ownerId: userId, status: { not: "deleted" }, ...(page.kind ? { kind: page.kind } : {}) };
-    const [rows, total] = await Promise.all([this.db.mediaAsset.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "asc" }], skip: page.offset, take: page.limit }), this.db.mediaAsset.count({ where })]);
+  async listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image"; search?: string; sort?: MediaSort }): Promise<{ items: MediaAsset[]; total: number }> {
+    const where = { ownerId: userId, status: { not: "deleted" }, ...(page.kind ? { kind: page.kind } : {}), ...(page.search ? { originalFilename: { contains: page.search, mode: "insensitive" } } : {}) };
+    const tie = { id: "asc" as const };
+    const orderBy = page.sort === "oldest" ? [{ createdAt: "asc" as const }, tie] : page.sort === "name" ? [{ originalFilename: "asc" as const }, tie] : page.sort === "size" ? [{ sizeBytes: "desc" as const }, tie] : [{ createdAt: "desc" as const }, tie];
+    const [rows, total] = await Promise.all([this.db.mediaAsset.findMany({ where, orderBy, skip: page.offset, take: page.limit }), this.db.mediaAsset.count({ where })]);
     return { items: rows.map(rowToMedia), total };
   }
   async getStorageUsedBytes(userId: string): Promise<number> {
@@ -99,7 +102,7 @@ export class PrismaRepository implements Repository {
     if (!(await this.mediaRowsExist(this.db, collection.mediaIds))) return false;
     try {
       await this.db.$transaction(async (tx) => {
-        await tx.videoCollection.create({ data: { id: collection.id, ownerId: collection.ownerId, name: collection.name ?? collection.id, description: collection.description ?? null, visibility: collection.visibility, archived: collection.archived } });
+        await tx.videoCollection.create({ data: { id: collection.id, ownerId: collection.ownerId, name: collection.name ?? collection.id, description: collection.description ?? null, visibility: collection.visibility, archived: collection.archived, ...(collection.createdAt ? { createdAt: collection.createdAt } : {}) } });
         if (collection.mediaIds.length > 0) await tx.collectionItem.createMany({ data: collection.mediaIds.map((mediaAssetId, position) => ({ collectionId: collection.id, mediaAssetId, position })) });
       });
       return true;
@@ -116,6 +119,15 @@ export class PrismaRepository implements Repository {
       await tx.collectionItem.deleteMany({ where: { collectionId } });
       if (mediaIds.length > 0) await tx.collectionItem.createMany({ data: mediaIds.map((mediaAssetId, position) => ({ collectionId, mediaAssetId, position })) });
       return true;
+    });
+  }
+  async deleteCollection(collectionId: string): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      if (!(await tx.videoCollection.findUnique({ where: { id: collectionId } }))) return false;
+      await tx.collectionItem.deleteMany({ where: { collectionId } });
+      await tx.collectionPermission.deleteMany({ where: { collectionId } });
+      const removed = await tx.videoCollection.deleteMany({ where: { id: collectionId } });
+      return removed.count === 1;
     });
   }
   async listCollectionsForOwner(userId: string): Promise<VideoCollection[]> { return this.collectionsFromRows(await this.db.videoCollection.findMany({ where: { ownerId: userId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })); }

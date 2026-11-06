@@ -36,7 +36,7 @@ test("library: every video has an Edit button and a checkbox; images have neithe
   const html = renderToStaticMarkup(<MediaTable library={{ items: [card("v1", "video", "Clip"), card("p1", "image", "Poster")], total: 2, page: 1, pageCount: 1, pageSize: 24 }} />);
   assert.ok(html.includes('href="/editor?media=v1"') && html.includes(">Edit</a>"));
   assert.ok(html.includes('aria-label="Select Clip"'));
-  assert.ok(html.includes("Select all") && html.includes("Clear selection") && html.includes("Bulk edit") && html.includes("selected"));
+  assert.ok(html.includes("Select all on this page") && html.includes("not to every filtered result") && html.includes("Clear selection") && html.includes("Bulk edit") && html.includes("selected"));
   assert.ok(html.includes("No editor"));
   assert.equal(html.includes('value="p1"'), false);
   assert.equal(html.includes('href="/editor?media=p1"'), false);

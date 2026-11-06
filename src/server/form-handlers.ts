@@ -1,6 +1,6 @@
 // The concrete form routes: how each HTML form's fields become a handler input, and where the user goes next.
 import { bulkUpdateCaptions, bulkUpdateCovers, type BulkUpdateReport } from "./handlers/captions-covers.ts";
-import { createCollection, replaceCollectionMedia, updateCollection } from "./handlers/collections.ts";
+import { createCollection, deleteCollection, replaceCollectionMedia, setCollectionArchived, updateCollection } from "./handlers/collections.ts";
 import { createCycle, mixIntoCycle, startPublishingCycle, unmixFromCycle } from "./handlers/cycles.ts";
 import { editorCandidateFromFields } from "../lib/domain/editing-settings.ts";
 import { applyBulkEdit, reviewBulkEdit, startBulkRender } from "./bulk/bulk-service.ts";
@@ -29,8 +29,22 @@ export const createCollectionForm = formRoute({
 
 export const updateCollectionForm = formRoute({
   handler: updateCollection,
-  toInput: (f) => ({ collectionId: f.get("collectionId") ?? "", name: f.get("name") ?? "", description: f.get("description") ?? "", visibility: f.get("visibility") ?? "", archived: f.get("archived") === "yes" }),
+  toInput: (f) => ({ collectionId: f.get("collectionId") ?? "", name: f.get("name") ?? "", description: f.get("description") ?? "", visibility: f.get("visibility") ?? "" }),
   success: (_r, f) => ({ path: collectionPath(f), code: "collection_updated" }),
+  failurePath: collectionPath,
+});
+
+export const archiveCollectionForm = formRoute({
+  handler: setCollectionArchived,
+  toInput: (f) => ({ collectionId: f.get("collectionId") ?? "", archived: f.get("archived") === "yes", confirm: f.get("confirm") === "yes" }),
+  success: (_r, f) => ({ path: collectionPath(f), code: f.get("archived") === "yes" ? "collection_archived" : "collection_restored" }),
+  failurePath: collectionPath,
+});
+
+export const deleteCollectionForm = formRoute({
+  handler: deleteCollection,
+  toInput: (f) => ({ collectionId: f.get("collectionId") ?? "", confirm: f.get("confirm") === "yes" }),
+  success: () => ({ path: "/collections", code: "collection_deleted" }),
   failurePath: collectionPath,
 });
 

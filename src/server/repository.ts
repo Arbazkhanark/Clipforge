@@ -9,6 +9,7 @@ import type { PlanId } from "../lib/billing/catalog.ts";
 import type { CaptionRevision } from "../lib/domain/caption-cover-updates.ts";
 import type { EditingSettings } from "../lib/domain/editing-settings.ts";
 import type { UsageRecordDraft } from "../lib/domain/usage-accounting.ts";
+import type { MediaSort } from "../lib/domain/media-list.ts";
 import type { CollectionPermissionGrant, CollectionVisibility, CycleItem, CycleStatus, MediaAsset, PublishingCycle, VideoCollection } from "../lib/domain/types.ts";
 
 export interface CycleRecord extends PublishingCycle { name: string; socialAccountId: string; }
@@ -35,8 +36,8 @@ export interface Repository {
   getMedia(mediaId: string): Promise<MediaAsset | null>;
   /** One query for many ids (avoids N+1). Missing ids are simply absent from the result. */
   getMediaByIds(mediaIds: string[]): Promise<MediaAsset[]>;
-  /** Pages of the user's OWN media, newest first. Never loads a whole library at once. */
-  listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image" }): Promise<{ items: MediaAsset[]; total: number }>;
+  /** Pages of the user's OWN media. Default order is newest, then id. Never loads a whole library at once. */
+  listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image"; search?: string; sort?: MediaSort }): Promise<{ items: MediaAsset[]; total: number }>;
   /**
    * Adds a media record ONLY if the owner's stored bytes plus this file stay within `limitBytes`.
    * Must be atomic (a transaction in PostgreSQL) so two simultaneous uploads cannot both squeeze past the quota.
@@ -69,6 +70,12 @@ export interface Repository {
    * The same list sent twice leaves the same rows.
    */
   replaceCollectionMedia(collectionId: string, mediaIds: string[]): Promise<boolean>;
+  /**
+   * Removes the collection and its membership rows.
+   * Does not delete media files or remove those files from any other collection.
+   * Returns false when the collection does not exist. Nothing else is written in that case.
+   */
+  deleteCollection(collectionId: string): Promise<boolean>;
   getGrants(collectionId: string): Promise<CollectionPermissionGrant[]>;
   upsertGrant(grant: CollectionPermissionGrant): Promise<void>;
 

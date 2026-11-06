@@ -27,7 +27,10 @@ export const FLASH_NOTICES = {
   render_queued: "Rendering has started. This page updates until the export is ready. The original video is not changed.",
   collection_created: "Collection saved in the database.",
   collection_updated: "Collection details saved.",
-  collection_media_saved: "The videos in this collection were saved.",
+  collection_media_saved: "The videos in this collection were saved. The original files were not deleted.",
+  collection_archived: "Collection archived. The videos are still in your library.",
+  collection_restored: "Collection restored.",
+  collection_deleted: "Collection deleted. The videos are still in your library and in any other collection.",
   videos_removed: "Videos removed from the cycle. Already-published posts are not affected.",
   google_connected: "Google is connected to this account. Email and password sign-in still works.",
 } as const;

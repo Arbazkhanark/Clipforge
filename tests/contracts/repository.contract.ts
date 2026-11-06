@@ -58,6 +58,9 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     assert.deepEqual((await h.repo.listMediaForOwner("bob", { limit: 4, offset: 4 })).items.map((m) => m.id), ["v5", "img"]);
     assert.deepEqual((await h.repo.listMediaForOwner("bob", { limit: 10, offset: 0, kind: "image" })).items.map((m) => m.id), ["img"]);
     assert.equal((await h.repo.listMediaForOwner("bob", { limit: 10, offset: 99 })).items.length, 0);
+    assert.deepEqual((await h.repo.listMediaForOwner("bob", { limit: 10, offset: 0, search: "v1" })).items.map((m) => m.id), ["v1"]);
+    assert.deepEqual((await h.repo.listMediaForOwner("bob", { limit: 10, offset: 0, sort: "oldest" })).items.map((m) => m.id), ["img", "v5", "v4", "v3", "v2", "v1"]);
+    assert.deepEqual((await h.repo.listMediaForOwner("eve", { limit: 10, offset: 0, search: "v1" })).items, []);
     assert.equal(await h.repo.getStorageUsedBytes("bob"), 600); assert.equal(await h.repo.getStorageUsedBytes("nobody"), 0);
   });
 
@@ -191,6 +194,12 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2"]);
     assert.equal(await h.repo.replaceCollectionMedia("missing", []), false);
     assert.equal(await h.repo.updateCollection("missing", { name: "x", description: null, visibility: "private", archived: false }), false);
+    assert.equal(await h.repo.createCollection(collection("c-keep", "owner", ["m1"])), true);
+    assert.equal(await h.repo.deleteCollection("c-new"), true);
+    assert.equal(await h.repo.getCollection("c-new"), null);
+    assert.equal((await h.repo.getMedia("m1"))?.id, "m1");
+    assert.deepEqual((await h.repo.getCollection("c-keep"))?.mediaIds, ["m1"]);
+    assert.equal(await h.repo.deleteCollection("missing"), false);
   });
 
   t("audit and caption revisions are appended", async (h) => {

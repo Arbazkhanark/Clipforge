@@ -46,7 +46,7 @@ export async function createCollection(ctx: RequestContext, rawInput: unknown): 
 
   await ownedMediaIds(ctx, userId, mediaIds);
   const collectionId = ctx.newId();
-  const saved = await ctx.repo.createCollection({ id: collectionId, ownerId: userId, name, ...(description ? { description } : {}), visibility, archived: false, mediaIds });
+  const saved = await ctx.repo.createCollection({ id: collectionId, ownerId: userId, name, ...(description ? { description } : {}), visibility, archived: false, mediaIds, createdAt: ctx.now });
   if (!saved) throw conflict("That collection could not be saved.");
   await ctx.repo.appendAudit({ actorId: userId, action: "collection.created", entityType: "VideoCollection", entityId: collectionId });
   return { collectionId };
@@ -60,13 +60,43 @@ export async function updateCollection(ctx: RequestContext, rawInput: unknown): 
   const name = readText(input, "name", problems, { min: 1, max: 100 }).trim();
   const description = readDescription(input, problems);
   const visibility = readVisibility(input, problems);
+  problems.throwIfAny();
+
+  const current = await ownedCollection(ctx, userId, collectionId);
+  const saved = await ctx.repo.updateCollection(collectionId, { name, description, visibility, archived: current.archived });
+  if (!saved) throw notFound("Collection");
+  await ctx.repo.appendAudit({ actorId: userId, action: "collection.updated", entityType: "VideoCollection", entityId: collectionId });
+  return { collectionId };
+}
+
+export async function setCollectionArchived(ctx: RequestContext, rawInput: unknown): Promise<{ collectionId: string }> {
+  const userId = requireUser(ctx);
+  const problems = new Problems();
+  const input = readObject(rawInput, problems);
+  const collectionId = readId(input, "collectionId", problems);
   const archived = readBoolean(input, "archived", problems, false);
+  if (input["confirm"] !== true) problems.add("Tick the confirmation box before archiving or restoring a collection.");
+  problems.throwIfAny();
+
+  const current = await ownedCollection(ctx, userId, collectionId);
+  const saved = await ctx.repo.updateCollection(collectionId, { name: current.name ?? "Untitled collection", description: current.description ?? null, visibility: current.visibility, archived });
+  if (!saved) throw notFound("Collection");
+  await ctx.repo.appendAudit({ actorId: userId, action: archived ? "collection.archived" : "collection.restored", entityType: "VideoCollection", entityId: collectionId });
+  return { collectionId };
+}
+
+export async function deleteCollection(ctx: RequestContext, rawInput: unknown): Promise<{ collectionId: string }> {
+  const userId = requireUser(ctx);
+  const problems = new Problems();
+  const input = readObject(rawInput, problems);
+  const collectionId = readId(input, "collectionId", problems);
+  if (input["confirm"] !== true) problems.add("Tick the confirmation box before deleting a collection.");
   problems.throwIfAny();
 
   await ownedCollection(ctx, userId, collectionId);
-  const saved = await ctx.repo.updateCollection(collectionId, { name, description, visibility, archived });
-  if (!saved) throw notFound("Collection");
-  await ctx.repo.appendAudit({ actorId: userId, action: "collection.updated", entityType: "VideoCollection", entityId: collectionId });
+  const removed = await ctx.repo.deleteCollection(collectionId);
+  if (!removed) throw notFound("Collection");
+  await ctx.repo.appendAudit({ actorId: userId, action: "collection.deleted", entityType: "VideoCollection", entityId: collectionId });
   return { collectionId };
 }
 

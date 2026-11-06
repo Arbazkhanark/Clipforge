@@ -45,6 +45,15 @@ test("media library: first page has 24 rows, paging links work, bad page numbers
   const page2 = html(await MediaPage({ searchParams: Promise.resolve({ page: "2" }) }));
   assert.equal((page2.match(/<tr>/g) ?? []).length - 1, 6); assert.ok(page2.includes('rel="prev"')); assert.ok(!page2.includes('rel="next"'));
   for (const bad of ["0", "-1", "abc", "1.5", "99999999"]) assert.ok(html(await MediaPage({ searchParams: { page: bad } })).includes("page must be a whole number"), bad);
+  const images = html(await MediaPage({ searchParams: { kind: "image" } }));
+  assert.ok(images.includes("Sample cover image 29"));
+  assert.ok(!images.includes("Sample clip 01"));
+  assert.equal(images.includes('href="/editor?'), false);
+  const found = html(await MediaPage({ searchParams: { q: "clip 01" } }));
+  assert.ok(found.includes("Sample clip 01"));
+  assert.ok(!found.includes("Sample clip 02"));
+  assert.ok(html(await MediaPage({ searchParams: { sort: "name" } })).includes("Select all on this page"));
+  assert.ok(html(await MediaPage({ searchParams: { sort: "nope" } })).includes("sort must be newest, oldest, name, or size."));
 });
 
 test("media library never shows other people's media or storage details", async () => {
@@ -59,6 +68,10 @@ test("collections: owned and shared-with-you are separate; permissions are expla
   assert.ok(out.includes("Sample shared collection (use allowed)"));
   assert.ok(out.includes("You can: view, use in a publishing cycle."));
   assert.ok(out.includes("You can: view."));
+  const searched = html(await CollectionsPage({ searchParams: { q: "Podcast", sort: "name" } }));
+  assert.ok(searched.includes("Sample collection - Podcast clips"));
+  assert.ok(!searched.includes("Sample collection - Client A"));
+  assert.ok(html(await CollectionsPage({ searchParams: { sort: "size" } })).includes("sort must be newest, oldest, or name."));
 });
 
 test("collection detail: shared collection shows what you may do; a collection you cannot see looks missing", async () => {

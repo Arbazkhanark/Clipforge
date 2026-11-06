@@ -9,12 +9,12 @@ import { getMediaLibrary, getUploadInfo } from "../../../src/server/queries.ts";
 export const metadata = { title: "Media library" };
 export const dynamic = "force-dynamic";
 
-type Search = { page?: string; notice?: string; error?: string };
+type Search = { page?: string; q?: string; sort?: string; kind?: string; notice?: string; error?: string };
 
 // `searchParams` is a plain object in older Next.js and a Promise in newer ones; `await` handles both.
 export default async function MediaPage(props: { searchParams?: Promise<Search> | Search }) {
   const searchParams = await props.searchParams;
-  const [library, upload] = await Promise.all([loadPageData((ctx) => getMediaLibrary(ctx, searchParams?.page)), loadPageData(async (ctx) => getUploadInfo(ctx))]);
+  const [library, upload] = await Promise.all([loadPageData((ctx) => getMediaLibrary(ctx, searchParams)), loadPageData(async (ctx) => getUploadInfo(ctx))]);
   return (
     <>
       <h1>Media library</h1>

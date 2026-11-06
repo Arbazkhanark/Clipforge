@@ -3,6 +3,7 @@
 // and the version-checked save is atomic.
 import type { PlanId } from "../lib/billing/catalog.ts";
 import type { CaptionRevision } from "../lib/domain/caption-cover-updates.ts";
+import { compareMedia, mediaMatchesSearch, type MediaSort } from "../lib/domain/media-list.ts";
 import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
 import type { UsageRecordDraft } from "../lib/domain/usage-accounting.ts";
 import type { AuditEntry, CycleRecord, EditingTemplateRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "./repository.ts";
@@ -74,10 +75,11 @@ export class MemoryRepository implements Repository {
     await tick();
     return mediaIds.flatMap((id) => { const m = this.media.get(id); return m ? [this.view(m)] : []; });
   }
-  async listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image" }): Promise<{ items: MediaAsset[]; total: number }> {
+  async listMediaForOwner(userId: string, page: { limit: number; offset: number; kind?: "video" | "image"; search?: string; sort?: MediaSort }): Promise<{ items: MediaAsset[]; total: number }> {
     await tick();
-    const mine = [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted" && (page.kind === undefined || (m.kind ?? "video") === page.kind))
-      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0) || a.id.localeCompare(b.id));
+    const sort = page.sort ?? "newest";
+    const mine = [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted" && (page.kind === undefined || (m.kind ?? "video") === page.kind) && (page.search === undefined || page.search === "" || mediaMatchesSearch(m, page.search)))
+      .sort((a, b) => compareMedia(sort, a, b));
     return { items: mine.slice(page.offset, page.offset + page.limit).map((m) => this.view(m)), total: mine.length };
   }
   async addMediaIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, limitBytes: number): Promise<boolean> {
@@ -121,6 +123,10 @@ export class MemoryRepository implements Repository {
     if (collection.mediaIds.some((id) => !this.media.has(id))) return false;
     this.collections.set(collection.id, clone(collection));
     return true;
+  }
+  async deleteCollection(collectionId: string): Promise<boolean> {
+    await tick();
+    return this.collections.delete(collectionId);
   }
   async updateCollection(collectionId: string, details: { name: string; description: string | null; visibility: VideoCollection["visibility"]; archived: boolean }): Promise<boolean> {
     await tick();

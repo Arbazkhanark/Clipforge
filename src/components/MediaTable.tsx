@@ -9,15 +9,38 @@ export function Thumbnail({ media }: { media: { id: string; hasThumbnail: boolea
     : <span className="muted">No preview</span>;
 }
 
+function mediaHref(library: MediaLibraryData, page: number): string {
+  const params = new URLSearchParams();
+  if (library.search) params.set("q", library.search);
+  if (library.sort && library.sort !== "newest") params.set("sort", library.sort);
+  if (library.kind && library.kind !== "all") params.set("kind", library.kind);
+  if (page > 1) params.set("page", String(page));
+  const text = params.toString();
+  return text ? `/media?${text}` : "/media";
+}
+
 export function MediaTable({ library }: { library: MediaLibraryData }) {
+  const search = library.search ?? "";
+  const sort = library.sort ?? "newest";
+  const kind = library.kind ?? "all";
+  const filtered = library.filtered ?? false;
+  const filters = (
+    <form method="get" action="/media" className="filter-bar" role="search">
+      <p><label>Search by filename<br /><input type="search" name="q" defaultValue={search} maxLength={100} /></label></p>
+      <p><label>Sort<br /><select name="sort" defaultValue={sort} aria-label="Sort media"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="name">Name</option><option value="size">Size</option></select></label></p>
+      <p><label>Show<br /><select name="kind" defaultValue={kind} aria-label="Filter by type"><option value="all">Videos and images</option><option value="video">Videos</option><option value="image">Images</option></select></label></p>
+      <p><button type="submit">Apply</button></p>
+    </form>
+  );
   if (library.total === 0) {
-    return <p>Your library is empty. Use the upload form above to add a video or image.</p>;
+    return <>{filtered && filters}<p>{filtered ? "No files match this search or filter." : "Your library is empty. Use the upload form above to add a video or image."}</p></>;
   }
   const first = (library.page - 1) * library.pageSize + 1;
   const last = Math.min(library.total, library.page * library.pageSize);
   const videos = library.items.filter((item) => item.kind === "video");
   return (
     <>
+      {filters}
       <p className="muted">Showing {formatCount(first)}-{formatCount(last)} of {formatCount(library.total)}.</p>
       <form id="library-form" method="get" action="/editor/bulk">
         {videos.length > 0 && <MediaSelection formId="library-form" />}
@@ -43,9 +66,9 @@ export function MediaTable({ library }: { library: MediaLibraryData }) {
         </div>
       </form>
       <nav aria-label="Pages" className="pager">
-        {library.page > 1 && <a href={`/media?page=${library.page - 1}`} rel="prev">Previous</a>}
+        {library.page > 1 && <a href={mediaHref(library, library.page - 1)} rel="prev">Previous</a>}
         <span>Page {library.page} of {library.pageCount}</span>
-        {library.page < library.pageCount && <a href={`/media?page=${library.page + 1}`} rel="next">Next</a>}
+        {library.page < library.pageCount && <a href={mediaHref(library, library.page + 1)} rel="next">Next</a>}
       </nav>
     </>
   );

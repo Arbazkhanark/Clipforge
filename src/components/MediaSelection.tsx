@@ -22,10 +22,11 @@ export function MediaSelection({ formId }: { formId: string }) {
   }, [formId]);
   return (
     <div className="library-actions">
-      <button type="button" data-select="all">Select all</button>
+      <button type="button" data-select="all">Select all on this page</button>
       <button type="button" data-select="clear">Clear selection</button>
-      <p><strong data-selected-count>0</strong> selected</p>
+      <p><strong data-selected-count>0</strong> selected on this page</p>
       <button type="submit">Bulk edit</button>
+      <p className="muted">Select all applies only to the videos on this page, not to every filtered result.</p>
     </div>
   );
 }

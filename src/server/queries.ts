@@ -4,11 +4,13 @@
 //  - big lists are paged and loaded with few queries (no N+1).
 import { getPlan, type PlanId } from "../lib/billing/catalog.ts";
 import { describeUsageReset, monthStartUtc } from "../lib/domain/usage-accounting.ts";
+import { compareMedia, mediaMatchesSearch } from "../lib/domain/media-list.ts";
 import { getCollectionCapabilities } from "../lib/domain/sharing-permissions.ts";
 import type { Capability, CollectionVisibility, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
 import type { PreflightReport } from "../lib/domain/preflight.ts";
 import { requireUser, type RequestContext } from "./context.ts";
-import { notFound, validationFailed } from "./errors.ts";
+import { readCollectionListQuery, readCollectionVideoQuery, readMediaListQuery, type CollectionSort, type MediaListQuery } from "./library-query.ts";
+import { notFound } from "./errors.ts";
 import { describeStorage, type StorageDescription } from "./storage/media-storage.ts";
 import { computePreviewLayout, isReservedTemplateName, parseEditingSettings, parseEditorQuery, videoSettingsName, type EditingSettings, type PreviewLayout } from "../lib/domain/editing-settings.ts";
 import type { MaxResolution } from "../lib/render/ffmpeg-command.ts";
@@ -47,14 +49,13 @@ export async function getDashboardData(ctx: RequestContext, timeZone = "Asia/Kol
 }
 
 export const MEDIA_PAGE_SIZE = 24;
-export interface MediaLibraryData { items: MediaCard[]; total: number; page: number; pageCount: number; pageSize: number; }
+export interface MediaLibraryData { items: MediaCard[]; total: number; page: number; pageCount: number; pageSize: number; search?: string; sort?: MediaListQuery["sort"]; kind?: "all" | "video" | "image"; filtered?: boolean; }
 
-export async function getMediaLibrary(ctx: RequestContext, requestedPage: unknown): Promise<MediaLibraryData> {
+export async function getMediaLibrary(ctx: RequestContext, requested: unknown): Promise<MediaLibraryData> {
   const userId = requireUser(ctx);
-  const page = Number(requestedPage ?? 1);
-  if (!Number.isInteger(page) || page < 1 || page > 100_000) throw validationFailed(["page must be a whole number from 1."]);
-  const { items, total } = await ctx.repo.listMediaForOwner(userId, { limit: MEDIA_PAGE_SIZE, offset: (page - 1) * MEDIA_PAGE_SIZE });
-  return { items: items.map(toMediaCard), total, page, pageSize: MEDIA_PAGE_SIZE, pageCount: Math.max(1, Math.ceil(total / MEDIA_PAGE_SIZE)) };
+  const query = readMediaListQuery(typeof requested === "object" && requested !== null ? requested : { page: requested });
+  const { items, total } = await ctx.repo.listMediaForOwner(userId, { limit: MEDIA_PAGE_SIZE, offset: (query.page - 1) * MEDIA_PAGE_SIZE, ...(query.kind ? { kind: query.kind } : {}), ...(query.search ? { search: query.search } : {}), sort: query.sort });
+  return { items: items.map(toMediaCard), total, page: query.page, pageSize: MEDIA_PAGE_SIZE, pageCount: Math.max(1, Math.ceil(total / MEDIA_PAGE_SIZE)), search: query.search, sort: query.sort, kind: query.kind ?? "all", filtered: query.filtered };
 }
 
 export interface CollectionCard { id: string; name: string; description: string | null; videoCount: number; visibility: CollectionVisibility; archived: boolean; sharedByAnotherUser: boolean; capabilities: Capability[]; }
@@ -68,29 +69,56 @@ async function toCollectionCard(ctx: RequestContext, userId: string, collection:
   };
 }
 
-export async function getCollectionsOverview(ctx: RequestContext): Promise<{ owned: CollectionCard[]; sharedWithMe: CollectionCard[] }> {
-  const userId = requireUser(ctx);
-  const [owned, shared] = await Promise.all([ctx.repo.listCollectionsForOwner(userId), ctx.repo.listCollectionsSharedWith(userId, ctx.now)]);
-  return { owned: await Promise.all(owned.map((c) => toCollectionCard(ctx, userId, c))), sharedWithMe: await Promise.all(shared.map((c) => toCollectionCard(ctx, userId, c))) };
+function sortCollections(list: VideoCollection[], sort: CollectionSort): VideoCollection[] {
+  const idOnly = (a: VideoCollection, b: VideoCollection) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  const timeOnly = (a: VideoCollection, b: VideoCollection) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0);
+  const byName = (a: VideoCollection, b: VideoCollection) => {
+    const left = a.name ?? "";
+    const right = b.name ?? "";
+    if (left !== right) return left < right ? -1 : 1;
+    return idOnly(a, b);
+  };
+  const byTime = (a: VideoCollection, b: VideoCollection) => timeOnly(a, b) || idOnly(a, b);
+  return [...list].sort(sort === "name" ? byName : sort === "oldest" ? byTime : (a, b) => timeOnly(b, a) || idOnly(a, b));
 }
 
-export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canDownload: boolean; isOwner: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; }
+export async function getCollectionsOverview(ctx: RequestContext, requested?: unknown): Promise<{ owned: CollectionCard[]; sharedWithMe: CollectionCard[]; search: string; sort: CollectionSort; filtered: boolean }> {
+  const userId = requireUser(ctx);
+  const query = readCollectionListQuery(requested);
+  const needle = query.search.toLocaleLowerCase();
+  const matches = (collection: VideoCollection) => needle.length === 0 || (collection.name ?? "").toLocaleLowerCase().includes(needle);
+  const [owned, shared] = await Promise.all([ctx.repo.listCollectionsForOwner(userId), ctx.repo.listCollectionsSharedWith(userId, ctx.now)]);
+  return {
+    owned: await Promise.all(sortCollections(owned.filter(matches), query.sort).map((c) => toCollectionCard(ctx, userId, c))),
+    sharedWithMe: await Promise.all(sortCollections(shared.filter(matches), query.sort).map((c) => toCollectionCard(ctx, userId, c))),
+    search: query.search, sort: query.sort, filtered: query.filtered,
+  };
+}
+
+export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; permissions: { canUseInCycle: boolean; canImport: boolean; canDownload: boolean; isOwner: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
+
+const COLLECTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** A collection you cannot view looks exactly like one that does not exist. */
-export async function getCollectionDetail(ctx: RequestContext, collectionId: string): Promise<CollectionDetail> {
+export async function getCollectionDetail(ctx: RequestContext, collectionId: string, requested?: unknown): Promise<CollectionDetail> {
   const userId = requireUser(ctx);
+  if (!COLLECTION_ID_PATTERN.test(collectionId)) throw notFound("Collection");
+  const videoQuery = readCollectionVideoQuery(requested);
   const collection = await ctx.repo.getCollection(collectionId);
   if (!collection) throw notFound("Collection");
   const grants = await ctx.repo.getGrants(collection.id);
   const capabilities = getCollectionCapabilities(userId, collection, grants, ctx.now);
   if (!capabilities.has("view")) throw notFound("Collection");
-  const media = (await ctx.repo.getMediaByIds(collection.mediaIds)).filter((m) => m.status !== "deleted");
+  const members = (await ctx.repo.getMediaByIds(collection.mediaIds)).filter((m) => m.status !== "deleted");
+  const media = members.filter((m) => videoQuery.search.length === 0 || mediaMatchesSearch(m, videoQuery.search)).sort((a, b) => compareMedia(videoQuery.sort, a, b));
   const ownCycles = capabilities.has("use_in_cycle") ? await ctx.repo.listCyclesForOwner(userId) : [];
-  const library = collection.ownerId === userId ? (await ctx.repo.listMediaForOwner(userId, { limit: 100, offset: 0 })).items : [];
+  const library = collection.ownerId === userId ? await ctx.repo.listMediaForOwner(userId, { limit: 200, offset: 0, sort: "name" }) : { items: [], total: 0 };
   return {
     cycleChoices: ownCycles.filter((c) => c.status === "draft" || c.status === "running" || c.status === "paused").map((c) => ({ id: c.id, name: c.name })),
-    libraryChoices: library.map(toMediaCard),
-    collection: await toCollectionCard(ctx, userId, collection), videos: media.map(toMediaCard),
+    libraryChoices: library.items.map(toMediaCard),
+    libraryTruncated: library.total > library.items.length,
+    collection: await toCollectionCard(ctx, userId, collection), videos: media.map(toMediaCard), memberIds: members.map((m) => m.id),
+    videoSearch: videoQuery.search, videoSort: videoQuery.sort, videoFiltered: videoQuery.filtered,
     permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canDownload: capabilities.has("download"), isOwner: collection.ownerId === userId },
   };
 }
