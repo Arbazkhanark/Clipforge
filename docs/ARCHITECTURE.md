@@ -3,7 +3,7 @@
 ## What exists today
 ```
 prisma/schema.prisma          Database design (draft, not validated by Prisma, not migrated)
-prisma/manual-constraints.sql Extra DB constraints Prisma cannot express (not applied)
+prisma/manual-constraints.sql Documents CHECK constraints Prisma cannot express. The executable copy is prisma/migrations/20261106162016_integrity_constraints. Do not run this file separately.
 src/lib/billing/              Plans/prices (paise), limits, Razorpay signatures, subscription state machine
 src/lib/domain/               PURE business rules (no DB, no network, no Redis):
   types.ts                    Shared data shapes + status lists (checked against the Prisma enums by a test)

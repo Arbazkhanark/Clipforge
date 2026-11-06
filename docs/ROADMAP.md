@@ -14,7 +14,7 @@ Register, open `/dev/outbox`, confirm the email, sign in, upload a small file, p
 
 ## After that, in order
 
-1. **Local PostgreSQL only.** Needs a `DATABASE_URL` from the owner, kept out of git. Then `prisma migrate` and `prisma/manual-constraints.sql`. Point the contract tests at the real client and add a runtime mode that uses `PrismaRepository`. Still no AWS.
+1. **Local PostgreSQL only.** Needs a `DATABASE_URL` from the owner, kept out of git. Then apply the existing Prisma migrations, including `20261106162016_integrity_constraints`. Do not execute `prisma/manual-constraints.sql` separately. Point the contract tests at the real client and add a runtime mode that uses `PrismaRepository`. Still no AWS.
 2. **Sharing workflows that already have rules.** Access-request decisions, import, and owner deletion as server handlers and simple pages. Re-check permissions in those handlers. Keep published cycle history when a video leaves a cycle.
 3. **Wire the editor to the existing FFmpeg runner** as a local process, one video, with the usage rules that charge only a validated output. Add a queue only when a single local run is reliable.
 4. **Razorpay test mode.** Checkout and the signed webhook route, idempotent on the event id. No second payment gateway.

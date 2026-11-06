@@ -13,13 +13,18 @@
 //  - Money is NOT stored here as floats; plan prices live in src/lib/billing/catalog.ts (paise).
 //  - Media files are referenced with onDelete: Restrict. We never let a database cascade delete a
 //    video that another user's cycle might still need (see src/lib/domain/media-lifecycle.ts).
-//  - Extra constraints Prisma cannot express are in prisma/manual-constraints.sql.
+//  - CHECK constraints cannot be declared here. They are documented on the fields below,
+//    in prisma/manual-constraints.sql, and created by
+//    prisma/migrations/20261106162016_integrity_constraints.
+//  - The one-pending access-request rule is the partial unique index on CollectionAccessRequest.
 //  - Auth.js / session tables are added in Phase 2 when the auth library is chosen.
 //  - The plan catalog (Free/Creator/Pro/Agency) is code, not a table, so prices live in ONE place.
 
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  // Partial unique index on CollectionAccessRequest. CHECK constraints still cannot be declared here.
+  previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
@@ -301,6 +306,7 @@ model PaymentRecord {
   id                String   @id @default(cuid())
   userId            String
   providerPaymentId String   @unique
+  /// CHECK payment_amount_non_negative: amountPaise >= 0. Prisma cannot represent CHECK constraints.
   amountPaise       Int // integer paise, never floats
   currency          String   @default("INR")
   status            String
@@ -346,6 +352,7 @@ model MediaAsset {
    * Key of the private S3 object. One physical object per row.
    */
   storageKey        String       @unique
+  /// CHECK media_size_non_negative: sizeBytes >= 0. Prisma cannot represent CHECK constraints.
   sizeBytes         BigInt
   durationMs        Int?
   width             Int?
@@ -357,6 +364,8 @@ model MediaAsset {
   metadataValidated Boolean      @default(false)
   /**
    * Set while status = pending_deletion: recipients keep access until this moment.
+   * CHECK media_pending_deletion_has_date: status pending_deletion requires deleteAfter.
+   * Prisma cannot represent CHECK constraints.
    */
   deleteAfter       DateTime?
   /**
@@ -455,8 +464,9 @@ model CollectionAccessRequest {
   decidedById           String?
   decidedAt             DateTime?
   createdAt             DateTime            @default(now())
-  // "Only one pending request per user per collection" is enforced in manual-constraints.sql.
 
+  /// One pending request per requester per collection. Approved and rejected rows are kept.
+  @@unique([collectionId, requesterId], name: "collection_access_request_one_pending", map: "collection_access_request_one_pending", where: raw("(status = 'pending'::\"AccessRequestStatus\")"))
   @@index([collectionId, status])
 }
 
@@ -564,6 +574,7 @@ model CycleItem {
   position           Int
   /**
    * Optimistic lock. Every UPDATE must use WHERE id = ? AND version = ? and increase it by 1.
+   * CHECK cycle_item_version_positive: version >= 1. Prisma cannot represent CHECK constraints.
    */
   version            Int             @default(1)
   scheduledFor       DateTime?

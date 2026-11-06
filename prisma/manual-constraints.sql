@@ -1,16 +1,25 @@
--- Constraints Prisma's schema language cannot express. Apply in a migration (Phase 2) AFTER the
--- tables exist. NOT yet applied or tested: no database is available in this environment.
-
+-- Constraints the Prisma schema cannot express directly, plus the partial unique index
+-- that schema.prisma now declares with the partialIndexes preview.
+--
+-- Do not execute this file. The statements live in:
+--   prisma/migrations/20261106162016_integrity_constraints/migration.sql
+-- Running them again by hand is unnecessary. That migration adds each object only
+-- when it is missing, and it stops if an existing object has a different definition.
+--
 -- One pending access request per person per collection.
-CREATE UNIQUE INDEX collection_access_request_one_pending
-  ON "CollectionAccessRequest" ("collectionId", "requesterId")
-  WHERE status = 'pending';
-
--- Sanity checks that stop impossible data.
-ALTER TABLE "CycleItem"   ADD CONSTRAINT cycle_item_version_positive CHECK (version >= 1);
-ALTER TABLE "MediaAsset"  ADD CONSTRAINT media_size_non_negative    CHECK ("sizeBytes" >= 0);
-ALTER TABLE "PaymentRecord" ADD CONSTRAINT payment_amount_non_negative CHECK ("amountPaise" >= 0);
-
--- A video marked pending_deletion must say when access ends.
-ALTER TABLE "MediaAsset" ADD CONSTRAINT media_pending_deletion_has_date
-  CHECK (status <> 'pending_deletion' OR "deleteAfter" IS NOT NULL);
+-- Approved and rejected requests for the same pair stay allowed.
+-- Represented in schema.prisma:
+--   @@unique([collectionId, requesterId], map: "collection_access_request_one_pending",
+--            where: raw("(status = 'pending'::\"AccessRequestStatus\")"))
+--
+-- CREATE UNIQUE INDEX collection_access_request_one_pending
+--   ON "CollectionAccessRequest" ("collectionId", "requesterId")
+--   WHERE status = 'pending';
+--
+-- CHECK constraints. Prisma 7.10 can read them but cannot declare them in schema.prisma.
+--
+-- ALTER TABLE "CycleItem" ADD CONSTRAINT cycle_item_version_positive CHECK (version >= 1);
+-- ALTER TABLE "MediaAsset" ADD CONSTRAINT media_size_non_negative CHECK ("sizeBytes" >= 0);
+-- ALTER TABLE "PaymentRecord" ADD CONSTRAINT payment_amount_non_negative CHECK ("amountPaise" >= 0);
+-- ALTER TABLE "MediaAsset" ADD CONSTRAINT media_pending_deletion_has_date
+--   CHECK (status <> 'pending_deletion' OR "deleteAfter" IS NOT NULL);
