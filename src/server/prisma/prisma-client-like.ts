@@ -8,9 +8,9 @@ export type Row = Record<string, any>;
 export type Where = Record<string, unknown>;
 
 export interface ModelDelegate {
-  findUnique(args: { where: Where }): Promise<Row | null>;
-  findFirst(args: { where?: Where; orderBy?: Record<string, "asc" | "desc"> | Record<string, "asc" | "desc">[] }): Promise<Row | null>;
-  findMany(args?: { where?: Where; orderBy?: Record<string, "asc" | "desc"> | Record<string, "asc" | "desc">[]; skip?: number; take?: number }): Promise<Row[]>;
+  findUnique(args: { where: Where; select?: Record<string, boolean> }): Promise<Row | null>;
+  findFirst(args: { where?: Where; select?: Record<string, boolean>; orderBy?: Record<string, "asc" | "desc"> | Record<string, "asc" | "desc">[] }): Promise<Row | null>;
+  findMany(args?: { where?: Where; select?: Record<string, boolean>; orderBy?: Record<string, "asc" | "desc"> | Record<string, "asc" | "desc">[]; skip?: number; take?: number }): Promise<Row[]>;
   count(args?: { where?: Where }): Promise<number>;
   create(args: { data: Row }): Promise<Row>;
   createMany(args: { data: Row[] }): Promise<{ count: number }>;
@@ -18,14 +18,15 @@ export interface ModelDelegate {
   updateMany(args: { where?: Where; data: Row }): Promise<{ count: number }>;
   upsert(args: { where: Where; create: Row; update: Row }): Promise<Row>;
   aggregate(args: { where?: Where; _sum: Record<string, true> }): Promise<{ _sum: Record<string, bigint | number | null> }>;
+  groupBy(args: { by: string[]; where?: Where; _count: { _all: true } }): Promise<Row[]>;
   deleteMany(args?: { where?: Where }): Promise<{ count: number }>;
 }
 
 export interface PrismaClientLike {
   user: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate; googleIdentity: ModelDelegate;
-  mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate;
-  publishingCycle: ModelDelegate; cycleItem: ModelDelegate; publishingJob: ModelDelegate; captionRevision: ModelDelegate;
-  auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; usageRecord: ModelDelegate;
+  mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; mediaImportJob: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate; collectionAccessRequest: ModelDelegate; collectionShareLink: ModelDelegate;
+  publishingCycle: ModelDelegate; cycleItem: ModelDelegate; publishingJob: ModelDelegate; processingJob: ModelDelegate; captionRevision: ModelDelegate;
+  auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; razorpaySubscriptionIntent: ModelDelegate; razorpaySubscriptionContinuation: ModelDelegate; manualPaymentIntent: ModelDelegate; manualPlanAccess: ModelDelegate; promotion: ModelDelegate; promotionRedemption: ModelDelegate; promotionalAccessGrant: ModelDelegate; promotionLifecycleEvent: ModelDelegate; webhookEvent: ModelDelegate; paymentRecord: ModelDelegate; usageRecord: ModelDelegate;
   /** Runs `work` in a database transaction. */
   $transaction<T>(work: (tx: PrismaClientLike) => Promise<T>): Promise<T>;
   /** Tagged-template raw query (used only to lock a user row: SELECT ... FOR UPDATE). */

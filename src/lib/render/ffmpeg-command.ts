@@ -36,6 +36,8 @@ export interface RenderSettings {
   /** Move the main video: -1 (left/up) to 1 (right/down), as a fraction of half the canvas. */
   offsetX: number;
   offsetY: number;
+  /** Optional source-time range. Omitted or null end keeps the existing full-video export behavior. */
+  trim?: { startSeconds: number; endSeconds: number | null };
   /** The border is drawn around the MAIN VIDEO itself, not around the whole canvas. */
   border: BorderSettings;
   logo?: LogoOverlaySettings;
@@ -71,6 +73,16 @@ export function validateRenderSettings(settings: RenderSettings, source: SourceV
     if (!inRange(l.opacity, 0.1, 1)) problems.push("Logo opacity must be 10% to 100%.");
   }
   if (!(source.width > 0 && source.height > 0 && source.durationSeconds > 0)) problems.push("Source video information is missing.");
+  const trimStart = settings.trim?.startSeconds ?? 0;
+  const configuredTrimEnd = settings.trim?.endSeconds;
+  const hasValidDuration = Number.isFinite(source.durationSeconds) && source.durationSeconds > 0;
+  if (!Number.isFinite(trimStart) || trimStart < 0) problems.push("Trim start time cannot be negative.");
+  if (configuredTrimEnd !== null && configuredTrimEnd !== undefined) {
+    if (!Number.isFinite(configuredTrimEnd) || configuredTrimEnd <= trimStart) problems.push("Trim end time must be greater than the start time.");
+    else if (hasValidDuration && configuredTrimEnd > source.durationSeconds) problems.push("The trim range cannot extend past the source video's duration.");
+  } else if (hasValidDuration && source.durationSeconds <= trimStart) {
+    problems.push("Trim end time must be greater than the start time.");
+  }
   return problems;
 }
 
@@ -131,7 +143,9 @@ export function buildRenderArgs(args: {
   const { canvas, border, videoWidth, videoHeight, box } = layout;
   const boxWidth = box.width, boxHeight = box.height, boxX = box.x, boxY = box.y;
 
-  const inputs: string[] = ["-i", inputPath];
+  const trimStart = settings.trim?.startSeconds ?? 0;
+  const trimEnd = settings.trim?.endSeconds ?? source.durationSeconds;
+  const inputs: string[] = [...(trimStart > 0 ? ["-ss", trimStart.toFixed(3)] : []), "-i", inputPath];
   let nextInputIndex = 1;
   const filters: string[] = [];
   const mainChain = `scale=${videoWidth}:${videoHeight}` + (border > 0 ? `,pad=${boxWidth}:${boxHeight}:${border}:${border}:color=0x${settings.border.colorHex.slice(1)}` : "");
@@ -178,7 +192,7 @@ export function buildRenderArgs(args: {
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
     "-c:a", "aac", "-b:a", "128k",
     "-movflags", "+faststart",
-    "-t", source.durationSeconds.toFixed(3),   // stops the endless colour / looped-logo inputs
+    "-t", (trimEnd - trimStart).toFixed(3),   // stops the endless colour / looped-logo inputs
     "-progress", "pipe:1", "-nostats",
     outputPath,
   ];

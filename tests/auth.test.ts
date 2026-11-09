@@ -225,10 +225,36 @@ test("sessions: logout ends it; absolute expiry (30 days) and idle expiry (7 day
   idle.advance(6 * 86_400_000); assert.equal(await idle.service.getSessionUserId(li.sessionToken), li.userId);   // used on day 6: stays alive
   idle.advance(6 * 86_400_000); assert.equal(await idle.service.getSessionUserId(li.sessionToken), li.userId);   // day 12 but used within 7 days
   idle.advance(7 * 86_400_000 + 1); assert.equal(await idle.service.getSessionUserId(li.sessionToken), null);    // idle too long
+  assert.ok([...idle.repo.sessions.values()].some((session) => session.revokedAt));
 
   const abs = await registered(setup(), "abs@example.com"); const la = await abs.service.login({ email: "abs@example.com", password: GOOD_PASSWORD }); assert.ok(la.ok); if (!la.ok) return;
   for (let day = 0; day < 29; day++) { abs.advance(86_400_000); assert.equal(await abs.service.getSessionUserId(la.sessionToken), la.userId); }
   abs.advance(2 * 86_400_000); assert.equal(await abs.service.getSessionUserId(la.sessionToken), null);           // past 30 days even though active
+  assert.ok([...abs.repo.sessions.values()].some((session) => session.revokedAt));
+});
+
+test("login: email and IP limits are separate, a restart clears only the limiter, and the lock expires", async () => {
+  const s = await registered();
+  const ip = "203.0.113.10";
+  for (let i = 0; i < 3; i++) assert.equal((await s.service.login({ email: "ann@example.com", password: "bad password 123", ip })).ok, false);
+  const byEmail = await s.service.login({ email: "ann@example.com", password: GOOD_PASSWORD, ip: "203.0.113.11" });
+  assert.equal(!byEmail.ok && byEmail.code, "rate_limited");
+  const other = await s.service.login({ email: "ghost@example.com", password: "bad password 123", ip: "203.0.113.11" });
+  assert.equal(!other.ok && other.code, "invalid_credentials");
+  for (let i = 0; i < 3; i++) await s.service.login({ email: "ghost@example.com", password: "bad password 123", ip });
+  const byIp = await s.service.login({ email: "ghost@example.com", password: "another bad password", ip });
+  const knownOnSameIp = await s.service.login({ email: "ann@example.com", password: GOOD_PASSWORD, ip });
+  assert.equal(!byIp.ok && byIp.code, "rate_limited");
+  assert.deepEqual(knownOnSameIp, byIp);
+  const restarted = new AuthService({ repo: s.repo, email: s.outbox, limiter: new InMemoryRateLimiter(3, 600_000, 900_000), now: () => s.clock.now, newId: () => `restart-${Math.random()}`, config: { ...DEFAULT_AUTH_CONFIG("http://localhost:3000"), scrypt: FAST } });
+  assert.equal((await restarted.login({ email: "ann@example.com", password: GOOD_PASSWORD, ip })).ok, true);
+  const again = await registered();
+  for (let i = 0; i < 3; i++) await again.service.login({ email: "ann@example.com", password: "bad password 123", ip });
+  const lockedAgain = await again.service.login({ email: "ann@example.com", password: GOOD_PASSWORD, ip });
+  assert.equal(lockedAgain.ok, false);
+  if (!lockedAgain.ok) assert.equal(lockedAgain.code, "rate_limited");
+  again.advance(900_001);
+  assert.equal((await again.service.login({ email: "ann@example.com", password: GOOD_PASSWORD, ip })).ok, true);
 });
 
 // ---------- password reset ----------
@@ -260,6 +286,17 @@ test("password reset: generic answers, verified accounts only, 1h expiry, single
   s.advance(900_001);
   await s.service.requestPasswordReset("ann@example.com");                                                         // newer request replaces older link
   assert.equal((await s.service.resetPassword(t3, "yet another password")).ok, false);
+});
+
+test("password reset: a password that is the email does not consume the link, and one of two races wins", async () => {
+  const s = await registered(setup(), "clipforgeuser@example.com");
+  await s.service.requestPasswordReset("clipforgeuser@example.com");
+  const token = s.tokenFromEmail();
+  const rejected = await s.service.resetPassword(token, "clipforgeuser");
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) return;
+  assert.ok(rejected.problems.some((problem) => /email/i.test(problem)));
+  assert.equal((await s.service.resetPassword(token, "a brand new password")).ok, true);
 });
 
 test("password reset: two simultaneous uses of one link - exactly one succeeds", async () => {

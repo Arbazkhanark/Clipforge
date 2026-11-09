@@ -8,16 +8,17 @@
 // This file follows the Business Login host. It does not add PKCE, because neither page documents it.
 // This file does not run unless a test or a configured server calls exchangeInstagramCode.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { INSTAGRAM_VERIFIED } from "../../lib/integrations/instagram-capabilities.ts";
+import { INSTAGRAM_REQUIRED_SCOPES } from "../../lib/integrations/instagram-capabilities.ts";
+import { isSupportedInstagramAccountType, missingInstagramScopes, normalizeInstagramScopes } from "../../lib/integrations/instagram-eligibility.ts";
 import type { InstagramAccountType } from "../repository.ts";
 import { readInstagramTokenKey } from "./token-cipher.ts";
 
 const AUTHORIZE_URL = "https://www.instagram.com/oauth/authorize";
 const TOKEN_URL = "https://api.instagram.com/oauth/access_token";
 const GRAPH_ORIGIN = "https://graph.instagram.com";
-export const INSTAGRAM_SCOPES = INSTAGRAM_VERIFIED.loginPaths.instagramLogin.permissions;
+export const INSTAGRAM_SCOPES = INSTAGRAM_REQUIRED_SCOPES;
 const OAUTH_MAX_AGE_SECONDS = 600;
-const ACCOUNT_TYPES = ["BUSINESS", "MEDIA_CREATOR", "PERSONAL", "UNKNOWN"] as const;
+const issuedStates = new Map<string, { userId: string; expiresAt: number }>();
 
 export interface InstagramOAuthConfig { clientId: string; clientSecret: string; redirectUri: string; tokenKey: Buffer; }
 export interface InstagramConnectedProfile {
@@ -45,6 +46,18 @@ export function readInstagramOAuthConfig(env: NodeJS.ProcessEnv = process.env): 
 }
 
 export function createInstagramState(): string { return randomBytes(32).toString("base64url"); }
+
+/** Process-local one-use state storage. A shared store is required before multi-process deployment. */
+export function issueInstagramOAuthState(state: string, userId: string, now: Date): void {
+  for (const [key, value] of issuedStates) if (value.expiresAt <= now.getTime()) issuedStates.delete(key);
+  issuedStates.set(state, { userId, expiresAt: now.getTime() + OAUTH_MAX_AGE_SECONDS * 1000 });
+}
+
+export function consumeInstagramOAuthState(state: string, now: Date): string | null {
+  const issued = issuedStates.get(state);
+  issuedStates.delete(state);
+  return issued && issued.expiresAt > now.getTime() ? issued.userId : null;
+}
 
 export function instagramSafeEqual(left: string, right: string): boolean {
   const a = Buffer.from(left);
@@ -89,15 +102,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
 }
 
-function permissionList(value: unknown): string[] {
-  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,\s]+/) : [];
-  return raw.filter((entry): entry is string => typeof entry === "string" && INSTAGRAM_SCOPES.includes(entry as typeof INSTAGRAM_SCOPES[number]));
-}
-
-function accountTypeOf(value: unknown): InstagramAccountType {
-  return typeof value === "string" && (ACCOUNT_TYPES as readonly string[]).includes(value) ? value as InstagramAccountType : "UNKNOWN";
-}
-
 async function readJson(response: Response): Promise<Record<string, unknown> | null> {
   const text = await response.text();
   if (text.length > 20_000) return null;
@@ -123,8 +127,9 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   const userId = shortData?.["user_id"];
   const externalAccountId = typeof userId === "string" || typeof userId === "number" ? String(userId) : "";
   if (!shortResponse.ok || !shortToken || !/^[0-9]{1,32}$/.test(externalAccountId)) return { ok: false, reason: shortResponse.status === 400 ? "expired_code" : "callback_error" };
-  const grantedScopes = permissionList(shortData?.["permissions"]);
-  if (INSTAGRAM_SCOPES.some((scope) => !grantedScopes.includes(scope))) return { ok: false, reason: "missing_permission" };
+  const parsedScopes = normalizeInstagramScopes(shortData?.["permissions"]);
+  const grantedScopes = parsedScopes.scopes;
+  if (parsedScopes.malformed || missingInstagramScopes(grantedScopes).length > 0) return { ok: false, reason: "missing_permission" };
 
   const longUrl = new URL("/access_token", GRAPH_ORIGIN);
   longUrl.searchParams.set("grant_type", "ig_exchange_token");
@@ -146,8 +151,14 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   catch { return { ok: false, reason: "callback_error" }; }
   const profileJson = await readJson(profileResponse);
   if (!profileResponse.ok || !profileJson) return { ok: false, reason: "callback_error" };
-  const accountType = accountTypeOf(profileJson["account_type"]);
-  if (accountType === "PERSONAL") return { ok: false, reason: "unsupported_account" };
+  const profileUserId = profileJson["user_id"];
+  if ((typeof profileUserId !== "string" && typeof profileUserId !== "number") || String(profileUserId) !== externalAccountId) return { ok: false, reason: "callback_error" };
+  const rawAccountType = profileJson["account_type"];
+  if (!isSupportedInstagramAccountType(rawAccountType)) return { ok: false, reason: "unsupported_account" };
+  const accountType: InstagramAccountType = rawAccountType;
   const username = typeof profileJson["username"] === "string" && /^[A-Za-z0-9._]{1,30}$/.test(profileJson["username"]) ? profileJson["username"] : null;
-  return { ok: true, profile: { externalAccountId, username, accountType, grantedScopes, accessToken, tokenExpiresAt: new Date(args.now.getTime() + expiresIn * 1000) } };
+  if (!username) return { ok: false, reason: "callback_error" };
+  const tokenExpiresAt = new Date(args.now.getTime() + expiresIn * 1000);
+  if (Number.isNaN(tokenExpiresAt.getTime()) || tokenExpiresAt <= args.now) return { ok: false, reason: "callback_error" };
+  return { ok: true, profile: { externalAccountId, username, accountType, grantedScopes, accessToken, tokenExpiresAt } };
 }

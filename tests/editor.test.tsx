@@ -5,13 +5,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DEFAULT_EDITING_SETTINGS, computePreviewLayout, parseEditingSettings, parseEditorQuery, toRenderSettings } from "../src/lib/domain/editing-settings.ts";
+import { DEFAULT_EDITING_SETTINGS, computePreviewLayout, parseEditingSettings, parseEditorQuery, toRenderSettings, trimDurationProblems } from "../src/lib/domain/editing-settings.ts";
+import { clampEditorOffset, clampEditorZoom, formatEditorZoomPercent, panEditorCamera, pinchEditorZoom, resetEditorCamera, stepEditorZoom, wheelEditorZoom } from "../src/lib/domain/editor-gestures.ts";
 import { buildRenderArgs } from "../src/lib/render/ffmpeg-command.ts";
 import { readPixel, renderVideo } from "../src/lib/render/render-runner.ts";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import type { RequestContext } from "../src/server/context.ts";
 import { AppError } from "../src/server/errors.ts";
-import { saveEditingTemplate } from "../src/server/handlers/editor.ts";
+import { saveCurrentVideoSettings, saveEditingTemplate } from "../src/server/handlers/editor.ts";
 import { editorSaveForm } from "../src/server/form-handlers.ts";
 import { setRuntimeForTests, type Runtime } from "../src/server/runtime.ts";
 import { getEditorPageData } from "../src/server/queries.ts";
@@ -48,6 +49,61 @@ test("settings: every limit is enforced (same rules as the renderer), including 
   assert.ok(good.ok);
 });
 
+test("interactive camera controls share bounded zoom and position math", () => {
+  assert.equal(pinchEditorZoom(1.5, 100, 150), 2.25, "pinch out zooms in");
+  assert.equal(pinchEditorZoom(1.5, 100, 50), 1, "pinch in is clamped at minimum");
+  assert.equal(pinchEditorZoom(2.8, 100, 150), 3, "pinch out is clamped at maximum");
+  assert.ok(wheelEditorZoom(1.5, -100) > 1.5, "wheel up zooms in");
+  assert.ok(wheelEditorZoom(1.5, 100) < 1.5, "wheel down zooms out");
+  assert.equal(stepEditorZoom(1, -1), 1); assert.equal(stepEditorZoom(3, 1), 3);
+  assert.equal(stepEditorZoom(1.5, 1), 1.55);
+  assert.equal(clampEditorZoom(Number.NaN), 1); assert.equal(clampEditorOffset(2), 1); assert.equal(clampEditorOffset(-2), -1);
+  assert.deepEqual(resetEditorCamera(), { zoom: 1, offsetX: 0, offsetY: 0 });
+  assert.equal(formatEditorZoomPercent(1.55), "155%"); assert.equal(formatEditorZoomPercent(99), "300%");
+  assert.deepEqual(panEditorCamera({ zoom: 1.5, offsetX: 0.9, offsetY: -0.9 }, 100, -100, 100, 100), { offsetX: 1, offsetY: -1 });
+  assert.deepEqual(panEditorCamera({ zoom: 1, offsetX: 0.25, offsetY: -0.25 }, 50, 25, 100, 100), { offsetX: 1, offsetY: 0.25 });
+});
+
+test("trim settings are normalized for legacy settings, structurally validated, and bounded by verified source duration", () => {
+  const { trim: _legacyTrim, ...legacySettings } = DEFAULT_EDITING_SETTINGS;
+  const legacy = parseEditingSettings(legacySettings);
+  assert.ok(legacy.ok); if (legacy.ok) assert.deepEqual(legacy.settings.trim, { startSeconds: 0, endSeconds: null });
+  for (const [name, trim] of [
+    ["negative start", { startSeconds: -0.01, endSeconds: 0.5 }],
+    ["equal range", { startSeconds: 0.5, endSeconds: 0.5 }],
+    ["reversed range", { startSeconds: 0.8, endSeconds: 0.5 }],
+    ["non numeric", { startSeconds: "0", endSeconds: 0.5 }],
+    ["non-finite", { startSeconds: 0, endSeconds: Infinity }],
+  ] as const) assert.equal(parseEditingSettings(base({ trim })).ok, false, name);
+  const parsed = parseEditingSettings(base({ trim: { startSeconds: 0.25, endSeconds: 1 } }));
+  assert.ok(parsed.ok); if (parsed.ok) {
+    assert.deepEqual(parsed.settings.trim, { startSeconds: 0.25, endSeconds: 1 });
+    assert.deepEqual(toRenderSettings(parsed.settings, "720p").trim, parsed.settings.trim);
+  }
+  assert.deepEqual(trimDurationProblems({ startSeconds: 0.25, endSeconds: 1 }, 1), []); // exact duration boundary is valid
+  assert.match(trimDurationProblems({ startSeconds: 0.25, endSeconds: 1.001 }, 1)[0]!, /cannot extend past/);
+  assert.match(trimDurationProblems({ startSeconds: 1, endSeconds: null }, 1)[0]!, /greater than/);
+  assert.match(trimDurationProblems({ startSeconds: 0, endSeconds: null }, 0)[0]!, /unavailable/);
+});
+
+test("editor query reads trim controls and reports malformed values", () => {
+  const valid = parseEditorQuery({ trimStart: "0.2", trimEnd: "0.8" });
+  assert.deepEqual(valid.problems, []); assert.deepEqual(valid.settings.trim, { startSeconds: 0.2, endSeconds: 0.8 });
+  assert.ok(parseEditorQuery({ trimStart: "-1", trimEnd: "0.8" }).problems.length > 0);
+  assert.ok(parseEditorQuery({ trimStart: "0.8", trimEnd: "0.8" }).problems.length > 0);
+  assert.ok(parseEditorQuery({ trimStart: "abc", trimEnd: "0.8" }).problems.length > 0);
+});
+
+test("FFmpeg command seeks to trim start and limits output to selected duration; full-video defaults keep existing arguments", () => {
+  const full = buildRenderArgs({ inputPath: "in.mp4", outputPath: "out.mp4", source: { width: 160, height: 120, durationSeconds: 1 }, settings: toRenderSettings(DEFAULT_EDITING_SETTINGS, "720p") });
+  assert.equal(full.args.includes("-ss"), false); assert.equal(full.args[full.args.indexOf("-t") + 1], "1.000");
+  const parsed = parseEditingSettings(base({ trim: { startSeconds: 0.2, endSeconds: 0.8 } })); assert.ok(parsed.ok); if (!parsed.ok) return;
+  const trimmed = buildRenderArgs({ inputPath: "in.mp4", outputPath: "out.mp4", source: { width: 160, height: 120, durationSeconds: 1 }, settings: toRenderSettings(parsed.settings, "720p") });
+  assert.deepEqual(trimmed.args.slice(trimmed.args.indexOf("-ss"), trimmed.args.indexOf("-i") + 2), ["-ss", "0.200", "-i", "in.mp4"]);
+  assert.equal(trimmed.args[trimmed.args.indexOf("-t") + 1], "0.600");
+  assert.throws(() => buildRenderArgs({ inputPath: "i", outputPath: "o", source: { width: 160, height: 120, durationSeconds: 0.7 }, settings: toRenderSettings(parsed.settings, "720p") }), /cannot extend past/);
+});
+
 test("plan resolution cap comes from the plan, not from saved settings; logo maps to renderer settings", () => {
   const withLogo = base({ logo: { mediaId: "l1", widthFraction: 0.2, centerX: 0.5, centerY: 0.5, opacity: 0.8 } });
   const parsed = parseEditingSettings(withLogo); assert.ok(parsed.ok); if (!parsed.ok) return;
@@ -73,6 +129,21 @@ test("preview layout equals the real renderer's layout for many settings (they s
     assert.deepEqual(layout.canvas, plan.canvas); assert.deepEqual(layout.borderBox, plan.mainVideo);
     assert.deepEqual(layout.video, { x: plan.mainVideo.x + layout.borderPx, y: plan.mainVideo.y + layout.borderPx, width: plan.mainVideo.width - 2 * layout.borderPx, height: plan.mainVideo.height - 2 * layout.borderPx });
   }
+});
+
+test("persisted camera settings produce the same preview geometry and FFmpeg placement", async () => {
+  repo.media.set("v1", { ...repo.media.get("v1")!, width: 160, height: 120, durationMs: 1000 });
+  const cameraSettings = base({ aspect: "1:1", zoom: 1.7, offsetX: 0.35, offsetY: -0.2, trim: { startSeconds: 0, endSeconds: 1 } });
+  await saveCurrentVideoSettings(ctxFor("bob"), { mediaId: "v1", settings: cameraSettings });
+  const saved = await repo.listTemplatesForOwner("bob");
+  const videoSettings = saved.find((item) => item.name === "v:v1")?.settings;
+  assert.ok(videoSettings); assert.deepEqual([videoSettings.zoom, videoSettings.offsetX, videoSettings.offsetY], [1.7, 0.35, -0.2]);
+  const preview = computePreviewLayout(videoSettings, { width: 160, height: 120 }, 1, "720p");
+  const render = buildRenderArgs({ inputPath: "source.mp4", outputPath: "render.mp4", source: { width: 160, height: 120, durationSeconds: 1 }, settings: toRenderSettings(videoSettings, "720p") });
+  assert.deepEqual(preview.canvas, render.canvas);
+  assert.deepEqual(preview.borderBox, render.mainVideo);
+  assert.equal(render.mainVideo.x, Math.round((render.canvas.width - render.mainVideo.width) / 2 + videoSettings.offsetX * (render.canvas.width / 2)));
+  assert.equal(render.mainVideo.y, Math.round((render.canvas.height - render.mainVideo.height) / 2 + videoSettings.offsetY * (render.canvas.height / 2)));
 });
 
 test("preview: the border surrounds the VIDEO (not the canvas); logo is placed by its centre and keeps its aspect ratio", () => {
@@ -101,6 +172,15 @@ test("REAL FFMPEG PROOF: pixels in a real render sit where the preview layout pr
   const centre = await readPixel(out, 360, layout.video.y + Math.floor(layout.video.height / 2));
   assert.ok(!(centre[0] > 200 && centre[1] < 60) && !(centre[1] > 200 && centre[0] < 60), `centre ${centre}`); // neither background nor border
   near(await readPixel(out, layout.logo!.x + Math.floor(layout.logo!.width / 2), layout.logo!.y + Math.floor(layout.logo!.height / 2)), [255, 255, 0], 60); // the logo sits where the sketch puts it
+});
+
+test("REAL FFMPEG: selected trim range produces an export of the requested duration", { skip: !ffmpegAvailable ? "ffmpeg not installed" : false }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "clipforge-trim-")); tmp.push(dir);
+  writeFileSync(join(dir, "src.mp4"), fixtures.mp4);
+  const parsed = parseEditingSettings(base({ trim: { startSeconds: 0.2, endSeconds: 0.8 } })); assert.ok(parsed.ok); if (!parsed.ok) return;
+  const result = await renderVideo({ inputPath: join(dir, "src.mp4"), outputPath: join(dir, "out.mp4"), settings: toRenderSettings(parsed.settings, "720p") });
+  assert.equal(result.succeeded, true); assert.equal(result.outputValidated, true);
+  assert.ok(Math.abs(result.outputProbe!.durationSeconds - 0.6) <= 0.1, `duration was ${result.outputProbe!.durationSeconds}`);
 });
 
 // ---------- query parsing ----------
@@ -164,6 +244,16 @@ test("save template: the plan's template limit is enforced (Free 3, Pro 100); si
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 3); assert.equal((await repo.listTemplatesForOwner("bob")).length, 3);
 });
 
+test("active promotional Creator tier supplies the catalog template allowance", async () => {
+  repo.promotionalAccessGrants.set("promo-bob", {
+    id: "promo-bob", promotionId: "promotion-bob", userId: "bob", redemptionId: null, kind: "tier_access", activationPolicy: "immediate", status: "active", planId: "creator",
+    durationDays: 3, queueSequence: 1n, startsAt: new Date(NOW.getTime() - 1), expiresAt: new Date(NOW.getTime() + 3 * 86_400_000), activatedAt: new Date(NOW.getTime() - 1), revokedAt: null,
+    grantedByAdminId: "admin", reason: null, createdAt: NOW, updatedAt: NOW,
+  });
+  for (let i = 1; i <= 4; i++) await save("bob", { name: `Promo${i}`, settings: goodSettings() });
+  assert.equal((await repo.listTemplatesForOwner("bob")).length, 4, "Creator's catalog limit is greater than Free's limit of three");
+});
+
 test("editor save FORM: success and failure redirect with fixed messages; only a valid media id is kept; cross-site refused", async () => {
   const fields = (over: Record<string, string> = {}): [string, string][] => Object.entries({ name: "Look", media: "v1", aspect: "1:1", bg: "solid", bgColor: "#112233", zoom: "1.2", offsetX: "0", offsetY: "0", borderPx: "8", borderColor: "#ffffff", ...over });
   const post = (f: [string, string][], headers: Record<string, string> = {}) => editorSaveForm(new Request("http://localhost:3000/api/forms/editor-save", { method: "POST", headers: { host: "localhost:3000", "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(f).toString() }));
@@ -194,39 +284,48 @@ test("page: without a video it lists yours to choose from; templates show 'N of 
   const withTemplate = html(await EditorPage({})); assert.ok(withTemplate.includes("Your templates (1 of 3)")); assert.ok(withTemplate.includes("Saved look")); assert.ok(withTemplate.includes("1:1, blurred background, zoom 1.2, 8px border"));
 });
 
-test("page: the form has every control, two clearly different buttons, a render action, and a labelled sketch", async () => {
-  const page = html(await EditorPage({ searchParams: { media: "v1" } }));
-  for (const name of ['name="aspect"', 'name="zoom"', 'name="offsetX"', 'name="offsetY"', 'name="bg"', 'name="blur"', 'name="bgColor"', 'name="borderPx"', 'name="borderColor"', 'name="logoMedia"', 'name="logoWidth"', 'name="logoX"', 'name="logoY"', 'name="logoOpacity"', 'name="media"', 'name="name"']) assert.ok(page.includes(name), name);
+test("page: the form has every control and the actual preview uses the authorized media route", async () => {
+  const page = html(await EditorPage({ searchParams: Promise.resolve({ media: "v1" }) }));
+  for (const name of ['name="aspect"', 'name="zoom"', 'name="offsetX"', 'name="offsetY"', 'name="trimStart"', 'name="trimEnd"', 'name="bg"', 'name="blur"', 'name="bgColor"', 'name="borderPx"', 'name="borderColor"', 'name="logoMedia"', 'name="logoWidth"', 'name="logoX"', 'name="logoY"', 'name="logoOpacity"', 'name="media"', 'name="name"']) assert.ok(page.includes(name), name);
   for (const label of ["9:16 (Reels, recommended)", "4:5", "1:1", "16:9", "Original"]) assert.ok(page.includes(label), label);
   assert.ok(/formNoValidate/i.test(page)); assert.ok(/formAction="\/api\/forms\/editor-save"/i.test(page)); assert.ok(/formMethod="post"/i.test(page)); assert.ok(page.includes('method="get"') && page.includes('action="/editor"'));
-  assert.ok(page.includes("Layout sketch")); assert.ok(page.includes("not a rendered video")); assert.ok(page.includes('formAction="/api/forms/render"') && page.includes("Render video"));
+  assert.ok(page.includes('src="/api/media/file?id=v1&amp;variant=preview"'));
+  assert.ok(page.includes('aria-label="Source video preview"') && page.includes("Playback of your source video"));
+  assert.ok(page.includes('aria-label="Zoom out"') && page.includes('aria-label="Zoom in"') && page.includes("Reset zoom"));
+  assert.ok(page.includes('id="editor-range-zoom-value">100%</output>'));
+  const zoomSlider = page.match(/<input[^>]*name="zoom"[^>]*>/)?.[0] ?? "";
+  assert.ok(zoomSlider.includes('min="1"') && zoomSlider.includes('max="3"') && zoomSlider.includes('step="0.05"'));
+  assert.ok(page.includes('data-zoom-action="out"') && page.includes('data-zoom-action="in"') && page.includes('data-zoom-action="reset"'));
+  assert.ok(page.includes("two fingers to zoom") && page.includes("Page scrolling works outside the preview"));
+  assert.ok(page.includes('aria-label="Preview playback controls"') && page.includes("Preview position"));
+  assert.ok(page.includes("touch-action:none"));
+  assert.ok(page.includes("Loading video preview")); assert.ok(page.includes("not pixel-identical"));
+  assert.ok(page.includes('formAction="/api/forms/render"') && page.includes("Render video"));
   assert.ok(page.includes("never change the original")); assert.ok(page.includes("up to 720p"));                                  // Free plan cap, from the catalog
-  assert.ok(page.includes('role="img"') && page.includes('aria-label="Layout sketch of the edited video"'));
-  assert.ok(page.includes("api/media/file?id=v1&amp;variant=thumbnail")); assert.ok(!/storageKey|media\/bob/.test(page));
+  assert.ok(page.includes('aria-label="Edited video preview"'));
+  assert.ok(!/storageKey|media\/bob/.test(page));
   assert.ok(!page.includes("data-logo-handle") && !page.includes("data-border"));
 });
 
-test("page: query settings drive the sketch - border drawn around the video box, solid background colour, logo rectangle", async () => {
-  const page = html(await EditorPage({ searchParams: { media: "v1", aspect: "9:16", bg: "solid", bgColor: "#ff00ff", borderPx: "10", borderColor: "#00ff00", logoMedia: "logo1", logoWidth: "0.2", logoX: "0.5", logoY: "0.1" } }));
-  assert.ok(page.includes('viewBox="0 0 720 1280"')); assert.ok(page.includes('fill="#ff00ff"')); assert.ok(page.includes("data-border")); assert.ok(page.includes("data-logo-handle"));
-  assert.ok(/<rect data-border="true"[^>]*fill="#00ff00"/.test(page));
+test("page: query settings drive the browser composition - border, background, and draggable logo overlay", async () => {
+  const page = html(await EditorPage({ searchParams: Promise.resolve({ media: "v1", aspect: "9:16", bg: "solid", bgColor: "#ff00ff", borderPx: "10", borderColor: "#00ff00", logoMedia: "logo1", logoWidth: "0.2", logoX: "0.5", logoY: "0.1" }) }));
+  assert.ok(page.includes('viewBox="0 0 720 1280"')); assert.ok(page.includes("background:#ff00ff")); assert.ok(page.includes("data-border")); assert.ok(page.includes("data-logo-handle"));
+  assert.ok(page.includes("background:#00ff00"));
   assert.ok(page.includes('value="10"')); assert.ok(page.includes("My logo"));
-  // The 9:16 canvas is 720 wide; a 160x120 video fits 720x540, so the border box is 740x560.
-  assert.ok(/<rect data-border="true" x="-10" y="360" width="740" height="560"/.test(page));
-  assert.ok(/<rect data-logo-handle="true"[^>]*x="288" y="92" width="144" height="72"/.test(page)); // logo rectangle drawn at its computed place (centre 0.5, 0.1)
+  assert.ok(/<rect data-logo-handle="true"[^>]*x="288" y="92" width="144" height="72"/.test(page));
 });
 
 test("page: bad values are listed in an alert and replaced by safe defaults; markup in a colour is never rendered", async () => {
-  const page = html(await EditorPage({ searchParams: { media: "v1", zoom: "abc", bg: "solid", bgColor: '#ff0000"><script>alert(1)</script>' } }));
+  const page = html(await EditorPage({ searchParams: Promise.resolve({ media: "v1", zoom: "abc", bg: "solid", bgColor: '#ff0000"><script>alert(1)</script>' }) }));
   assert.ok(page.includes('role="alert"')); assert.ok(page.includes("Zoom must be a number.")); assert.ok(!page.includes("<script>")); assert.ok(!page.includes("alert(1)"));
-  const foreignLogo = html(await EditorPage({ searchParams: { media: "v1", logoMedia: "evelogo" } }));
+  const foreignLogo = html(await EditorPage({ searchParams: Promise.resolve({ media: "v1", logoMedia: "evelogo" }) }));
   assert.ok(foreignLogo.includes("must be one of your own images")); assert.ok(!foreignLogo.includes("data-logo-handle")); assert.ok(!foreignLogo.includes("Eve logo"));
 });
 
 test("page: a video of unknown size says so; someone else's video looks missing; signed-out users are asked to sign in; flash shows after saving", async () => {
-  assert.ok(html(await EditorPage({ searchParams: { media: "v2" } })).includes("16:9 picture is assumed"));
-  const hidden = html(await EditorPage({ searchParams: { media: "evevid" } })); const missing = html(await EditorPage({ searchParams: { media: "zzz" } })); assert.equal(hidden, missing); assert.ok(hidden.includes("Not found"));
-  assert.ok(html(await EditorPage({ searchParams: { media: "../x" } })).includes("Choose a video"));                          // an unsafe id is ignored, never used
-  assert.ok(html(await EditorPage({ searchParams: { media: "v1", notice: "template_saved" } })).includes("original video was not changed"));
+  assert.ok(html(await EditorPage({ searchParams: Promise.resolve({ media: "v2" }) })).includes("preview assumes 16:9"));
+  const hidden = html(await EditorPage({ searchParams: Promise.resolve({ media: "evevid" }) })); const missing = html(await EditorPage({ searchParams: Promise.resolve({ media: "zzz" }) })); assert.equal(hidden, missing); assert.ok(hidden.includes("Not found"));
+  assert.ok(html(await EditorPage({ searchParams: Promise.resolve({ media: "../x" }) })).includes("Choose a video"));                          // an unsafe id is ignored, never used
+  assert.ok(html(await EditorPage({ searchParams: Promise.resolve({ media: "v1", notice: "template_saved" }) })).includes("original video was not changed"));
   setRuntimeForTests(runtime(null)); assert.ok(html(await EditorPage({})).includes("Sign in required"));
 });

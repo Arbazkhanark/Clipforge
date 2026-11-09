@@ -1,6 +1,15 @@
 import type { InstagramAccountCard } from "../server/queries.ts";
 
-const STATUS_LABELS = { connected: "Connected", token_expired: "Token expired", revoked: "Permissions revoked", disconnected: "Disconnected" } as const;
+const STATUS_LABELS = { connected: "Connected", token_expired: "Token expired", revoked: "Permissions revoked", disconnected: "Disconnected", unknown: "Unknown account status" } as const;
+const ELIGIBILITY_LABELS = {
+  connected_eligible: "Connected and eligible",
+  not_connected: "Not connected",
+  missing_permissions: "Connected, missing required permissions",
+  unsupported_personal: "Unsupported personal account",
+  unsupported_account_type: "Unknown or unsupported account type",
+  expired_connection: "Expired connection — reconnect required",
+  reconnection_required: "Reconnection required",
+} as const;
 
 export function InstagramAccountsView({ configured, accounts }: { configured: boolean; accounts: InstagramAccountCard[] }) {
   return (
@@ -10,7 +19,7 @@ export function InstagramAccountsView({ configured, accounts }: { configured: bo
       <p role="status">Live publishing is not configured. No publishing worker is running, so a Reel will not be sent.</p>
       {!configured && <p role="status">Instagram is not configured. The button below will say so instead of sending you to Meta. Create the Meta app yourself and keep the secret out of git.</p>}
       <form method="post" action="/api/instagram/start">
-        <button type="submit">Connect Instagram</button>
+        <button type="submit" disabled={!configured}>Connect Instagram</button>
       </form>
       <section aria-labelledby="accounts-heading">
         <h2 id="accounts-heading">Connected accounts</h2>
@@ -20,6 +29,7 @@ export function InstagramAccountsView({ configured, accounts }: { configured: bo
               <li key={account.id} className="card">
                 <h3>{account.username ? `@${account.username}` : "Instagram account"}</h3>
                 <p>Status: {STATUS_LABELS[account.status]}</p>
+                <p>Publishing eligibility: {ELIGIBILITY_LABELS[account.eligibilityStatus]}</p>
                 <p>Account type: {account.accountType ?? "Not confirmed"}</p>
                 <p>Permissions: {account.grantedScopes.length > 0 ? account.grantedScopes.join(", ") : "None stored"}</p>
                 <p>Token: {account.hasToken ? `Stored on the server${account.tokenExpiresAt ? `, expires ${account.tokenExpiresAt}` : ""}` : "Not stored"}</p>

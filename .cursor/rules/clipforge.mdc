@@ -1,0 +1,41 @@
+---
+description: ClipForge product boundaries, stack, and safety rules for every session
+alwaysApply: true
+---
+
+# ClipForge
+
+Existing SaaS at this repo. Read `docs/PROJECT_CONTEXT.md`, `docs/FEATURE_STATUS.md`, and `docs/ROADMAP.md` before adding features. Commit `bcb4bb3` is the audited baseline. Do not scaffold a new app or swap the architecture.
+
+## Stack
+
+- Next.js App Router, TypeScript, PostgreSQL, Prisma. Auth is custom scrypt sessions in `src/server/auth/`, not Auth.js or Supabase, until a replacement is approved.
+- Tailwind and shadcn are not installed. Styles live in `app/globals.css`.
+- Storage today is memory or gitignored `.local-media/`. No S3 client.
+- FFmpeg rendering lives in `src/lib/render/`. Keep FFmpeg out of request handlers.
+- Redis, BullMQ, and a real email provider are not wired up. Add them only when a feature needs them.
+- Razorpay is the only payment gateway. Prices and recipient caps are in `src/lib/billing/catalog.ts`. Do not change them without approval.
+
+## Safety
+
+- Official APIs only. Never collect or store Instagram passwords.
+- Do not create AWS resources, deploy, or upgrade a cloud plan without explicit approval. See `docs/COST_GUARDRAILS.md`.
+- Do not commit `.env`, keys, tokens, or `.local-media/`. `.env.example` stays placeholders.
+- Do not rewrite git history, force-push, or push unless the owner asks in that message.
+- Prisma 7.10 rejects Node 23. Use Node 22.12+ (22.23.4 worked). `npm test` is not a Next.js or PostgreSQL test.
+
+## How to change code
+
+Business rules stay pure in `src/lib/domain/`. Handlers go through session, validation, ownership, plan limits, then a version-checked save. Someone else's object is a 404.
+
+```typescript
+// ❌ BAD — trust the client for the user id
+const userId = body.userId;
+
+// ✅ GOOD — session only
+const userId = requireUser(ctx);
+```
+
+Published cycle items are immutable. Edits apply to upcoming items only. Re-check share permissions before render, import, and publish.
+
+Work in small steps: read the existing code, change the smallest surface, update tests, run the relevant command, and report the real exit status.

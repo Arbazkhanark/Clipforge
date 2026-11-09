@@ -157,6 +157,18 @@ test("QUOTA: a file that does not fit the plan's storage is refused (403 plan_li
   assert.equal((await errorOf(upload(ctxFor("eve"), fixtures.png, "c.png", "image/png"))).code, "plan_limit");
 });
 
+test("active Creator promotion supplies its catalog storage quota to uploads", needFfmpeg, async () => {
+  const { repo, ctxFor, storage } = setup({ plan: "free" });
+  repo.promotionalAccessGrants.set("promo-bob", {
+    id: "promo-bob", promotionId: "promotion-bob", userId: "bob", redemptionId: null, kind: "tier_access", activationPolicy: "immediate", status: "active", planId: "creator",
+    durationDays: 3, queueSequence: 1n, startsAt: new Date(NOW.getTime() - 1), expiresAt: new Date(NOW.getTime() + 3 * 86_400_000), activatedAt: new Date(NOW.getTime() - 1), revokedAt: null,
+    grantedByAdminId: "admin", reason: null, createdAt: NOW, updatedAt: NOW,
+  });
+  repo.media.set("big", makeMedia({ id: "big", ownerId: "bob", sizeBytes: getPlan("free").limits.storageBytes - 100 }));
+  assert.equal((await upload(ctxFor("bob"), fixtures.png, "promo.png", "image/png")).kind, "image");
+  assert.equal((storage as MemoryMediaStorage).objects.size, 1);
+});
+
 test("QUOTA (early check): a file that clearly does not fit is refused WITHOUT writing a single byte to storage", needFfmpeg, async () => {
   class CountingStorage extends MemoryMediaStorage { stageCalls = 0; override async stage(key: string, data: Uint8Array) { this.stageCalls++; return super.stage(key, data); } }
   const storage = new CountingStorage();

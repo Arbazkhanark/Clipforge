@@ -14,7 +14,10 @@
     "db:migrate": "node --env-file=.env.local ./node_modules/prisma/build/index.js migrate dev",
     "db:generate": "node --env-file=.env.local ./node_modules/prisma/build/index.js generate",
     "verify:harness": "CLIPFORGE_LOCAL_AUTH=true node --import tsx --import ./tests/helpers/register-css.mjs scripts/verify-harness.ts",
-    "verify:browser": "node scripts/browser-check.mjs"
+    "admin:preview": "node --import tsx scripts/admin-preview-harness.ts",
+    "verify:browser": "node scripts/browser-check.mjs",
+    "worker:publishing": "node --import tsx scripts/run-publishing-worker.ts",
+    "worker:subscription-continuation": "node --import tsx scripts/run-subscription-continuation.ts"
   },
   "dependencies": {
     "next": "16.4.5",

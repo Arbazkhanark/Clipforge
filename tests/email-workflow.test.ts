@@ -1,5 +1,5 @@
 // Email verification and password reset. The mock outbox is the only provider that accepts a message.
-// A filled-in SMTP configuration does not connect to a provider. Neon cases run only when DATABASE_URL is set.
+// A filled-in SMTP configuration does not connect to a provider. Persistence cases run only for the isolated local database.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -12,11 +12,12 @@ import { createPrismaClient } from "../src/server/prisma/create-client.ts";
 import { PrismaAuthRepository } from "../src/server/prisma/prisma-auth-repository.ts";
 import type { PrismaClientLike } from "../src/server/prisma/prisma-client-like.ts";
 import type { EmailSender } from "../src/server/auth/email.ts";
+import { isolatedDatabaseUrl } from "./helpers/isolated-database.ts";
 
 const FAST = { logN: 10, r: 8, p: 1 };
 const PASSWORD = "a real database password";
 const NEXT = "a different database password";
-const databaseUrlAtStart = process.env["DATABASE_URL"];
+const databaseUrlAtStart = isolatedDatabaseUrl();
 const hasDatabase = Boolean(databaseUrlAtStart);
 const tokenFrom = (text: string): string => new URL(text.match(/https?:\/\/\S+/)![0]!).searchParams.get("token")!;
 

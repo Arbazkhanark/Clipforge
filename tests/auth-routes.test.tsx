@@ -4,6 +4,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createLocalRuntime, setRuntimeForTests, buildContext, getRuntime, type Runtime } from "../src/server/runtime.ts";
+import { withoutDatabaseEnv } from "./helpers/isolated-database.ts";
 import { forgotPasswordRoute, loginRoute, logoutRoute, registerRoute, resetPasswordRoute, verifyEmailRoute, useSecureCookies } from "../src/server/auth/auth-routes.ts";
 import { setPageCookieReaderForTests } from "../src/server/auth/page-cookies.ts";
 import { uploadRoute } from "../src/server/upload-route.ts";
@@ -82,10 +83,10 @@ test("FULL FLOW: unverified cannot sign in; the email link only shows a button; 
   await post.register("ann@example.com");
   const early = await post.login("ann@example.com"); assert.equal(where(early), "/login?error=email_not_verified"); assert.equal(early.headers.get("set-cookie"), null);
   const token = lastToken();
-  const verifyPage = html(await VerifyEmailPage({ searchParams: { token } }));                          // opening the link must NOT consume it
+  const verifyPage = html(await VerifyEmailPage({ searchParams: Promise.resolve({ token }) }));                          // opening the link must NOT consume it
   assert.ok(verifyPage.includes('action="/api/auth/verify-email"')); assert.ok(verifyPage.includes(`value="${token}"`)); assert.ok(!verifyPage.includes("disabled"));
   assert.equal(where(await post.login("ann@example.com")), "/login?error=email_not_verified");          // still unverified after "opening the link"
-  const noToken = html(await VerifyEmailPage({ searchParams: { token: "<script>" } })); assert.ok(/<button type="submit" disabled/.test(noToken)); assert.ok(!noToken.includes("<script>"));
+  const noToken = html(await VerifyEmailPage({ searchParams: Promise.resolve({ token: "<script>" }) })); assert.ok(/<button type="submit" disabled/.test(noToken)); assert.ok(!noToken.includes("<script>"));
   assert.equal(where(await post.verify(token)), "/login?notice=verified");
   assert.equal(where(await post.verify(token)), "/login?error=invalid_token");                           // single use
   const login = await post.login("ann@example.com");
@@ -106,6 +107,30 @@ test("LOGIN failures: wrong password and unknown email give the identical redire
   assert.equal(where(await post.login("ann@example.com", GOOD)), "/login?error=rate_limited");              // even the right password is refused while locked
   clock.now = new Date(clock.now.getTime() + 16 * 60_000);
   assert.equal(where(await post.login("ann@example.com", GOOD)), "/dashboard");
+});
+
+test("LOGIN IP limit uses only a trusted proxy hop, hides whether the email exists, and expires", async () => {
+  process.env["CLIPFORGE_TRUSTED_PROXY_HOPS"] = "1";
+  try {
+    await signUp("ada@example.com"); await signUp("bea@example.com"); await signUp("cy@example.com");
+    const attempt = (email: string, password: string, forwarded: string) => loginRoute(() => rt)(form("/api/auth/login", [["email", email], ["password", password]], { "x-forwarded-for": forwarded }));
+    for (let i = 0; i < 5; i++) await attempt("ada@example.com", "wrong password here", "198.51.100.20");
+    const spoofed = await attempt("bea@example.com", GOOD, "203.0.113.50");
+    assert.equal(where(spoofed), "/dashboard");
+    for (let i = 0; i < 5; i++) await attempt("bea@example.com", "wrong password here", "203.0.113.10, 127.0.0.1");
+    const known = await attempt("cy@example.com", GOOD, "203.0.113.10, 127.0.0.1");
+    const unknown = await attempt("ghost@example.com", "wrong password here", "203.0.113.10, 127.0.0.1");
+    assert.equal(where(known), "/login?error=rate_limited");
+    assert.equal(where(unknown), where(known));
+    assert.equal(known.headers.get("set-cookie"), null);
+    assert.equal(unknown.headers.get("set-cookie"), null);
+    assert.equal(where(await attempt("cy@example.com", GOOD, "203.0.113.11, 127.0.0.1")), "/dashboard");
+    clock.now = new Date(clock.now.getTime() + 16 * 60_000);
+    assert.equal(where(await attempt("cy@example.com", GOOD, "203.0.113.10, 127.0.0.1")), "/dashboard");
+    delete process.env["CLIPFORGE_TRUSTED_PROXY_HOPS"];
+    for (let i = 0; i < 5; i++) await attempt("cy@example.com", "wrong password here", `198.51.100.${i}`);
+    assert.equal(where(await attempt("cy@example.com", GOOD, "198.51.100.99")), "/login?error=rate_limited");
+  } finally { delete process.env["CLIPFORGE_TRUSTED_PROXY_HOPS"]; }
 });
 
 test("SESSIONS ON REQUESTS: the cookie identifies the user; anonymous, tampered and stranger cookies do not; each user sees only their own files", async () => {
@@ -131,10 +156,10 @@ test("SESSIONS ON REQUESTS: the cookie identifies the user; anonymous, tampered 
 test("PAGES read the cookie from the request headers: signed-in users see their data, others are asked to sign in", async () => {
   const ann = await signUp("ann@example.com"); const bob = await signUp("bob@example.com"); await uploadAs(ann, "annpic.png");
   setPageCookieReaderForTests(async () => ann);
-  assert.ok(html(await DashboardPage()).includes("Your plan: <strong>Free</strong>")); assert.ok(html(await MediaPage({})).includes("annpic.png"));
+  assert.ok(html(await DashboardPage({})).includes("Your plan: <strong>Free</strong>")); assert.ok(html(await MediaPage({})).includes("annpic.png"));
   setPageCookieReaderForTests(async () => bob);
   assert.ok(!html(await MediaPage({})).includes("annpic.png")); assert.ok(html(await MediaPage({})).includes("Your library is empty"));
-  for (const reader of [async () => null, async () => "clipforge_session=" + "B".repeat(43), async () => "garbage"]) { setPageCookieReaderForTests(reader); assert.ok(html(await DashboardPage()).includes("Sign in required")); }
+  for (const reader of [async () => null, async () => "clipforge_session=" + "B".repeat(43), async () => "garbage"]) { setPageCookieReaderForTests(reader); assert.ok(html(await DashboardPage({})).includes("Sign in required")); }
   setPageCookieReaderForTests(async () => ann);
   const layout = html(await AppLayout({ children: <p>x</p> }));
   assert.ok(layout.includes("data-local-banner")); assert.ok(layout.includes("disappear when the server restarts")); assert.ok(layout.includes('action="/api/auth/logout"')); assert.ok(layout.includes("Connect Google")); assert.ok(!layout.includes("data-demo-banner"));
@@ -162,7 +187,7 @@ test("PASSWORD RESET: generic answers, link only shows a form, a typo does not b
   assert.equal(where(await post.forgot("ghost@example.com")), "/forgot-password?notice=reset_email_sent"); assert.equal(rt.outbox!.messages.length, before);
   assert.equal(where(await post.forgot("ann@example.com")), "/forgot-password?notice=reset_email_sent"); assert.equal(rt.outbox!.messages.length, before + 1);
   const token = lastToken();
-  assert.ok(html(await ResetPasswordPage({ searchParams: { token } })).includes('action="/api/auth/reset-password"'));
+  assert.ok(html(await ResetPasswordPage({ searchParams: Promise.resolve({ token }) })).includes('action="/api/auth/reset-password"'));
   const typo = await post.reset(token, "short"); assert.equal(where(typo), `/reset-password?error=weak_password&token=${token}`);
   assert.equal(where(await post.reset("a".repeat(30), "a brand new password")), "/login?error=invalid_token");
   const done = await post.reset(token, "a brand new password");
@@ -194,7 +219,7 @@ test("CSRF: cross-site posts to every auth route are refused (403) and change no
 test("REDIRECTS and messages are fixed: user input never appears in a Location header or page text", async () => {
   const evil = '"><script>alert(1)</script>@evil.example';
   for (const r of [await post.register(evil), await post.login(evil, evil), await post.forgot(evil)]) { assert.ok(!decodeURIComponent(where(r)).includes("script")); assert.match(where(r), /^\/[a-z-]+\?(notice|error)=[a-z_]+$/); }
-  const page = html(await LoginPage({ searchParams: { error: "<script>x</script>", notice: "javascript:alert(1)" } })); assert.ok(!page.includes("<script>x")); assert.ok(!page.includes('data-flash'));
+  const page = html(await LoginPage({ searchParams: Promise.resolve({ error: "<script>x</script>", notice: "javascript:alert(1)" }) })); assert.ok(!page.includes("<script>x")); assert.ok(!page.includes('data-flash'));
   assert.equal(parseFlash({ error: "invalid_credentials" })?.message, "Email or password is not correct.");
 });
 
@@ -208,12 +233,14 @@ test("LOCAL MODE screens: forms are enabled and labelled; the dev outbox exists 
   setRuntimeForTests({ ...rt, mode: "demo", outbox: undefined }); assert.ok(html(<DevOutboxPage />).includes("Not found"));
 });
 
-test("getRuntime(): local mode turns on ONLY with the explicit flag, and never in production", () => {
+test("getRuntime(): local mode turns on ONLY with the explicit flag, and never in production", async () => {
   setRuntimeForTests(null);
   const env = { ...process.env }; const holder = globalThis as { __clipforgeLocalRuntime?: unknown };
   try {
-    delete process.env["CLIPFORGE_LOCAL_AUTH"]; assert.equal(getRuntime().mode, "unconfigured"); assert.equal(getRuntime().auth, undefined);
-    process.env["CLIPFORGE_LOCAL_AUTH"] = "true"; delete holder.__clipforgeLocalRuntime; assert.equal(getRuntime().mode, "local"); assert.ok(getRuntime().auth);
-    process.env["NODE_ENV"] = "production"; assert.equal(getRuntime().mode, "unconfigured");
+    await withoutDatabaseEnv(() => {
+      delete process.env["CLIPFORGE_LOCAL_AUTH"]; assert.equal(getRuntime().mode, "unconfigured"); assert.equal(getRuntime().auth, undefined);
+      process.env["CLIPFORGE_LOCAL_AUTH"] = "true"; delete holder.__clipforgeLocalRuntime; assert.equal(getRuntime().mode, "local"); assert.ok(getRuntime().auth);
+      process.env["NODE_ENV"] = "production"; assert.equal(getRuntime().mode, "unconfigured");
+    });
   } finally { process.env["NODE_ENV"] = env["NODE_ENV"] as string; if (env["NODE_ENV"] === undefined) delete process.env["NODE_ENV"]; delete process.env["CLIPFORGE_LOCAL_AUTH"]; delete holder.__clipforgeLocalRuntime; }
 });

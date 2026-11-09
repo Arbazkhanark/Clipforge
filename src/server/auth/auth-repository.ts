@@ -1,7 +1,8 @@
 // What authentication needs from storage. Memory implementation: memory-auth-repository.ts. Prisma: prisma/prisma-auth-repository.ts.
-export interface UserRecord { id: string; email: string; emailVerifiedAt: Date | null; passwordHash: string | null; name: string | null; role: "user" | "admin"; createdAt: Date; }
+export type UserRole = "user" | "admin";
+export interface UserRecord { id: string; email: string; emailVerifiedAt: Date | null; passwordHash: string | null; name: string | null; role: UserRole; createdAt: Date; }
 export interface SessionRecord { id: string; userId: string; tokenHash: string; createdAt: Date; lastUsedAt: Date; expiresAt: Date; revokedAt: Date | null; }
-export type AuthTokenKind = "email_verification" | "password_reset";
+export type AuthTokenKind = "email_verification" | "password_reset" | "instagram_oauth_state";
 export interface AuthTokenRecord { id: string; userId: string; kind: AuthTokenKind; tokenHash: string; expiresAt: Date; usedAt: Date | null; createdAt: Date; }
 /** Google subject only. No access token or refresh token. */
 export interface GoogleIdentityRecord { id: string; userId: string; googleSub: string; createdAt: Date; }
@@ -23,6 +24,12 @@ export interface AuthRepository {
   createAuthToken(token: AuthTokenRecord): Promise<void>;
   /** Marks a token used and returns it - ONLY if it exists, matches the kind, is unused and unexpired. Atomic: two requests cannot both succeed. */
   consumeAuthToken(kind: AuthTokenKind, tokenHash: string, now: Date): Promise<AuthTokenRecord | null>;
+  /**
+   * Consumes one unused reset token, stores the new password, and revokes every session for that user.
+   * On PostgreSQL these writes are one transaction: a failure keeps the old password, the token, and the sessions.
+   * A rejected password does not consume the token.
+   */
+  completePasswordReset(input: { tokenHash: string; now: Date; passwordHash: string; passwordProblems: (email: string) => string[] }): Promise<{ status: "reset" } | { status: "invalid" } | { status: "rejected"; problems: string[] }>;
   /** Makes every unused token of this kind for the user unusable (called when a new one is issued). */
   invalidateAuthTokens(userId: string, kind: AuthTokenKind, now: Date): Promise<void>;
 

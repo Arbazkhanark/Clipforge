@@ -1,31 +1,19 @@
 # Roadmap
 
-Audit date: 2026-11-06. Commit: `bcb4bb3`. Do not start Instagram, Razorpay checkout, S3, or a worker until the steps below are green. Each step should stay small enough to review on its own.
+Updated 2026-11-07 to match the current working tree. Do not assume its uncommitted changes are present on another checkout.
 
-## Done in the stability pass (2026-11-06)
+## Current local MVP
 
-Dependencies are exact versions. Node 22 (`>=22.12.0 <23`) is the supported runtime. Prisma schema validates. `npm test`, `npm run typecheck`, and `npm run build` passed. Migrations were not run.
+Local auth and outbox flow work in the Next.js app without a database or email provider. Media, editing/rendering, collections, cycles, schedule setup, render-output selection, preflight, Instagram OAuth handling, and mock publishing foundations are implemented to varying levels. Automated tests and typecheck pass; a clean temporary production build passes. Browser automation is currently unavailable because the configured Playwright module path is missing.
 
-## Safest next task
+## Priority order
 
-**Exercise the existing app under `next dev` with `CLIPFORGE_LOCAL_AUTH=true`.**
+1. **Verify migration history, then review persistence on the isolated PostgreSQL test database.** The render-queue/outbox, publishing-attempt, and render-output-selection migrations are present in the working tree. Earlier project docs described them as unapplied, but actual database history is unknown. A read-only history check is blocked until an administrator provides a verified read-only role and protected credential source. After history is verified, review schema/SQL and retained test-data implications; obtain separate explicit approval before any migration or database test. Never point local testing at Neon.
+2. **Finish storage and durable worker deployment design.** Current render queue and publishing worker are not automatically triggered; local render jobs are process-memory-backed. A real hosted worker and persistent media storage need separate design and approval.
+3. **Only then enable real Instagram publishing.** Requires approved Meta app credentials, permission/app-review readiness, externally fetchable object-scoped media URLs, real PostgreSQL verification, and an operator-reviewed retry/recovery policy. Ambiguous outcomes must stay in manual review.
+4. **Complete remaining sharing workflows.** Add access-request decisions, imports, and owner-deletion workflows only with ownership and permission rechecks.
+5. **Payment integration remains separate.** Build Razorpay checkout/webhook flow only after explicit approval and test credentials. Never grant paid entitlements from mock results.
 
-Register, open `/dev/outbox`, confirm the email, sign in, upload a small file, preview it, and save an editor template. This uses the memory runtime that already exists. It does not need a database password, S3, Razorpay, or Instagram.
+## Not production-ready
 
-## After that, in order
-
-1. **Local PostgreSQL only.** Needs a `DATABASE_URL` from the owner, kept out of git. Then apply the existing Prisma migrations, including `20261106162016_integrity_constraints`. Do not execute `prisma/manual-constraints.sql` separately. Point the contract tests at the real client and add a runtime mode that uses `PrismaRepository`. Still no AWS.
-2. **Sharing workflows that already have rules.** Access-request decisions, import, and owner deletion as server handlers and simple pages. Re-check permissions in those handlers. Keep published cycle history when a video leaves a cycle.
-3. **Wire the editor to the existing FFmpeg runner** as a local process, one video, with the usage rules that charge only a validated output. Add a queue only when a single local run is reliable.
-4. **Razorpay test mode.** Checkout and the signed webhook route, idempotent on the event id. No second payment gateway.
-5. **Instagram official OAuth and publishing** with a Meta test app. Store tokens encrypted. Never store Instagram passwords. Enforce the live publishing limit. Pause, resume, and stop must call the cycle-state functions that already exist.
-
-## Explicitly waiting on the owner
-
-- Approval before any AWS resource, S3 bucket, deploy, or paid plan.
-- A local `DATABASE_URL` that is not committed.
-- The GitHub push. Do not force-push. Nothing has been pushed.
-
-## Already strong enough to build on
-
-Pure rules and their tests: plans, sharing, mix/unmix, captions and covers, cycle state, schedule, preflight, upload, media serving, and the FFmpeg command builder. Extend these. Do not rewrite them.
+No migrations were run during this sprint. Real PostgreSQL repository concurrency, Meta OAuth/publishing, public media delivery, production email, payment calls, automatic workers, and browser automation remain unverified or unavailable. No deployment or cloud resource is configured.

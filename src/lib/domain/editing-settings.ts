@@ -8,6 +8,8 @@ export interface EditingSettings {
   zoom: number;
   offsetX: number;
   offsetY: number;
+  /** Source-time range in seconds. A null end means the full remaining source duration. */
+  trim: { startSeconds: number; endSeconds: number | null };
   /** Drawn around the main video itself, not around the whole canvas. */
   border: { thicknessPx: number; colorHex: string };
   /** An image from the user's own library, placed by its centre (fractions of the canvas). */
@@ -15,7 +17,7 @@ export interface EditingSettings {
 }
 
 export const DEFAULT_EDITING_SETTINGS: EditingSettings = {
-  aspect: "9:16", background: { kind: "blur", strength: 20 }, zoom: 1, offsetX: 0, offsetY: 0, border: { thicknessPx: 0, colorHex: "#ffffff" }, logo: null,
+  aspect: "9:16", background: { kind: "blur", strength: 20 }, zoom: 1, offsetX: 0, offsetY: 0, trim: { startSeconds: 0, endSeconds: null }, border: { thicknessPx: 0, colorHex: "#ffffff" }, logo: null,
 };
 
 /** Per-video saved settings use this name in the template table. They are not user templates and do not use the template cap. */
@@ -23,7 +25,9 @@ export const videoSettingsName = (mediaId: string): string => `v:${mediaId}`;
 export const isReservedTemplateName = (name: string): boolean => name.startsWith("v:");
 
 /** Only used to run the range checks; the real source dimensions do not affect which values are allowed. */
-const NOMINAL_SOURCE = { width: 1920, height: 1080, durationSeconds: 1 };
+// Generic settings parsing validates trim structure. Per-video bounds are checked against verified
+// media metadata by the editor/export handlers and again against ffprobe in the renderer.
+const NOMINAL_SOURCE = { width: 1920, height: 1080, durationSeconds: 180 };
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export type ParsedSettings = { ok: true; settings: EditingSettings } | { ok: false; problems: string[] };
@@ -54,6 +58,14 @@ export function parseEditingSettings(raw: unknown): ParsedSettings {
   const thicknessPx = num(border?.["thicknessPx"], "Border thickness");
   const borderColor = typeof border?.["colorHex"] === "string" ? border["colorHex"] : "#000000";
 
+  const trim = raw["trim"] === undefined ? DEFAULT_EDITING_SETTINGS.trim : isObject(raw["trim"]) ? raw["trim"] : null;
+  if (!trim) problems.push("Trim settings are missing or invalid.");
+  const trimStart = num(trim?.["startSeconds"], "Trim start time");
+  const trimEndRaw = trim?.["endSeconds"];
+  const trimEnd = trimEndRaw === null ? null : num(trimEndRaw, "Trim end time");
+  if (trimStart < 0) problems.push("Trim start time cannot be negative.");
+  if (trimEnd !== null && trimEnd <= trimStart) problems.push("Trim end time must be greater than the start time.");
+
   let logo: EditingSettings["logo"] = null;
   const rawLogo = raw["logo"];
   if (rawLogo !== null && rawLogo !== undefined) {
@@ -61,7 +73,7 @@ export function parseEditingSettings(raw: unknown): ParsedSettings {
     else logo = { mediaId: rawLogo["mediaId"], widthFraction: num(rawLogo["widthFraction"], "Logo width"), centerX: num(rawLogo["centerX"], "Logo horizontal position"), centerY: num(rawLogo["centerY"], "Logo vertical position"), opacity: num(rawLogo["opacity"], "Logo opacity") };
   }
 
-  const settings: EditingSettings = { aspect: aspect as AspectRatio, background, zoom: num(raw["zoom"], "Zoom"), offsetX: num(raw["offsetX"], "Horizontal position"), offsetY: num(raw["offsetY"], "Vertical position"), border: { thicknessPx, colorHex: borderColor }, logo };
+  const settings: EditingSettings = { aspect: aspect as AspectRatio, background, zoom: num(raw["zoom"], "Zoom"), offsetX: num(raw["offsetX"], "Horizontal position"), offsetY: num(raw["offsetY"], "Vertical position"), trim: { startSeconds: trimStart, endSeconds: trimEnd }, border: { thicknessPx, colorHex: borderColor }, logo };
   if (problems.length > 0) return { ok: false, problems };
 
   // Range and colour rules come from the renderer itself, so the editor can never accept what the renderer would refuse.
@@ -71,10 +83,22 @@ export function parseEditingSettings(raw: unknown): ParsedSettings {
 
 /** Editing settings -> renderer settings. The resolution cap comes from the PLAN, never from the saved settings. */
 export function toRenderSettings(s: EditingSettings, maxResolution: MaxResolution): RenderSettings {
+  const trim = s.trim ?? DEFAULT_EDITING_SETTINGS.trim;
   return {
     aspect: s.aspect, maxResolution, background: s.background.kind === "image" ? { kind: "image" } : s.background, zoom: s.zoom, offsetX: s.offsetX, offsetY: s.offsetY, border: s.border,
+    ...(trim.startSeconds !== 0 || trim.endSeconds !== null ? { trim } : {}),
     ...(s.logo ? { logo: { widthFraction: s.logo.widthFraction, centerX: s.logo.centerX, centerY: s.logo.centerY, opacity: s.logo.opacity } } : {}),
   };
+}
+
+/** Check a structurally valid trim range against the source duration from verified metadata or ffprobe. */
+export function trimDurationProblems(trim: EditingSettings["trim"], sourceDurationSeconds: number): string[] {
+  if (!Number.isFinite(sourceDurationSeconds) || sourceDurationSeconds <= 0) return ["The source video duration is unavailable."];
+  const end = trim.endSeconds ?? sourceDurationSeconds;
+  if (trim.startSeconds < 0 || !Number.isFinite(trim.startSeconds)) return ["Trim start time cannot be negative."];
+  if (!Number.isFinite(end) || end <= trim.startSeconds) return ["Trim end time must be greater than the start time."];
+  if (end > sourceDurationSeconds) return ["The trim range cannot extend past the source video's duration."];
+  return [];
 }
 
 export interface PreviewLayout {
@@ -115,6 +139,7 @@ export function editorCandidateFromFields(get: (key: string) => string | undefin
     aspect: get("aspect") ?? d.aspect,
     background: bg === "solid" ? { kind: "solid", colorHex: get("bgColor") ?? "#000000" } : bg === "image" ? { kind: "image", mediaId: get("bgImage") ?? "" } : { kind: "blur", strength: number("blur", 20, "Blur strength") },
     zoom: number("zoom", d.zoom, "Zoom"), offsetX: number("offsetX", 0, "Horizontal position"), offsetY: number("offsetY", 0, "Vertical position"),
+    trim: { startSeconds: number("trimStart", d.trim.startSeconds, "Trim start time"), endSeconds: get("trimEnd") === undefined || get("trimEnd") === "" ? d.trim.endSeconds : number("trimEnd", 0, "Trim end time") },
     border: { thicknessPx: number("borderPx", 0, "Border thickness"), colorHex: get("borderColor") ?? "#ffffff" },
     logo: logoMedia ? { mediaId: logoMedia, widthFraction: number("logoWidth", 0.2, "Logo width"), centerX: number("logoX", 0.85, "Logo horizontal position"), centerY: number("logoY", 0.1, "Logo vertical position"), opacity: number("logoOpacity", 1, "Logo opacity") } : null,
   };

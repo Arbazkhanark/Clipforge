@@ -92,6 +92,14 @@ test("assigning slots: queue order, only editable items, published history untou
   assert.equal(again.items.find((i) => i.id === "a")!.version, get("a").version);
 });
 
+test("rescheduling clears old times from editable items that no longer fit", () => {
+  const oldSlot = new Date("2026-06-01T03:30:00Z");
+  const item = makeItem({ id: "scheduled", status: "scheduled", scheduledFor: oldSlot, version: 4 });
+  const assigned = assignSlotsToItems([item], []);
+  assert.deepEqual(assigned.unscheduledItemIds, ["scheduled"]);
+  assert.deepEqual([assigned.items[0]!.status, assigned.items[0]!.scheduledFor, assigned.items[0]!.version], ["upcoming", null, 5]);
+});
+
 // ---------- Ordering ----------
 const orderable = (id: string, over: Partial<OrderableItem> = {}): OrderableItem =>
   ({ id, manualPosition: 0, selectionIndex: 0, mediaCreatedAt: new Date("2026-01-01"), sizeBytes: 1, ...over });

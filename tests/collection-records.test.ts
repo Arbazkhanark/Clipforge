@@ -5,6 +5,9 @@ import { AppError } from "../src/server/errors.ts";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import type { RequestContext } from "../src/server/context.ts";
 import { makeMedia } from "./helpers.ts";
+import { getCollectionDetail, getCollectionsOverview } from "../src/server/queries.ts";
+import { renderToStaticMarkup } from "react-dom/server";
+import { CollectionDetailView } from "../src/components/CollectionViews.tsx";
 
 function context(repo: MemoryRepository, userId: string): RequestContext {
   let n = 0;
@@ -44,4 +47,51 @@ test("collection writes use the signed-in user and hide someone else's collectio
   assert.equal(await repo.getCollection("col-1"), null);
   assert.deepEqual((await repo.getCollection(second.collectionId))?.mediaIds, ["mine"]);
   assert.equal((await repo.getMedia("mine"))?.status, "active");
+});
+
+test("collection owner sees safe sharing-management data; a recipient does not receive the management DTO", async () => {
+  const repo = new MemoryRepository();
+  const owner = context(repo, "owner");
+  await repo.createCollection({ id: "shared", ownerId: "owner", name: "Shared", visibility: "private", archived: false, mediaIds: [], createdAt: owner.now });
+  await repo.upsertGrant({ collectionId: "shared", granteeId: "recipient", capabilities: ["view", "use_in_cycle"], status: "active", expiresAt: null, grantedById: "owner" });
+
+  const ownerDetail = await getCollectionDetail(owner, "shared");
+  assert.deepEqual(ownerDetail.sharingManagement?.grants, [{ granteeId: "recipient", capabilities: ["view", "use_in_cycle"], status: "active", expiresAt: null, grantedById: "owner" }]);
+  assert.equal(ownerDetail.sharingManagement?.activeRecipients, 1);
+  assert.equal(ownerDetail.sharingManagement?.recipientLimit, 0);
+  assert.equal(ownerDetail.sharingManagement?.expiringGrants, false);
+  const ownerHtml = renderToStaticMarkup(CollectionDetailView({ detail: ownerDetail }));
+  assert.match(ownerHtml, /People with collection access/);
+  assert.match(ownerHtml, /User ID:<\/strong> <code>recipient<\/code>/);
+  assert.match(ownerHtml, /Your current plan does not include collection sharing/);
+  assert.match(ownerHtml, /Revoke access/);
+
+  const recipientDetail = await getCollectionDetail(context(repo, "recipient"), "shared");
+  assert.equal(recipientDetail.sharingManagement, undefined);
+  assert.equal(JSON.stringify(recipientDetail).includes("sharingManagement"), false);
+  assert.equal(JSON.stringify(recipientDetail).includes("granteeId"), false);
+  assert.equal(renderToStaticMarkup(CollectionDetailView({ detail: recipientDetail })).includes("People with collection access"), false);
+});
+
+test("access-request views are owner/requester scoped and do not reveal private collection details", async () => {
+  const repo = new MemoryRepository();
+  const now = new Date("2026-11-06T12:00:00Z");
+  await repo.createCollection({ id: "private-access-target", ownerId: "owner", name: "Confidential collection name", description: "Private notes", visibility: "private", archived: false, mediaIds: [], createdAt: now });
+  await repo.createCollectionAccessRequest({ id: "access-request", collectionId: "private-access-target", requesterId: "recipient", requestedCapabilities: ["view"], now });
+
+  const requesterOverview = await getCollectionsOverview(context(repo, "recipient"));
+  assert.equal(requesterOverview.accessRequests.length, 1);
+  const safeRequestJson = JSON.stringify(requesterOverview.accessRequests);
+  assert.ok(safeRequestJson.includes("private-access-target"));
+  assert.ok(!safeRequestJson.includes("Confidential collection name"));
+  assert.ok(!safeRequestJson.includes("Private notes"));
+  assert.deepEqual(requesterOverview.owned, []);
+  assert.deepEqual(requesterOverview.sharedWithMe, []);
+
+  const ownerDetail = await getCollectionDetail(context(repo, "owner"), "private-access-target");
+  assert.equal(ownerDetail.pendingAccessRequests?.length, 1);
+  assert.equal(ownerDetail.pendingAccessRequests?.[0]?.requesterId, "recipient");
+  await assert.rejects(() => getCollectionDetail(context(repo, "stranger"), "private-access-target"), (error: unknown) => error instanceof AppError && error.status === 404);
+  assert.deepEqual(await repo.listPendingCollectionAccessRequests("private-access-target", "stranger"), []);
+  assert.equal((await repo.listCollectionAccessRequestsForRequester("stranger")).length, 0);
 });

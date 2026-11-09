@@ -27,6 +27,9 @@ export interface MediaAsset {
   /** The real type (from the file signature): e.g. "video/mp4". Used for serving. */
   mimeType?: string;
   hasThumbnail?: boolean;
+  /** Provenance for an independently owned copy of a shared source. */
+  importedFromId?: string | null;
+  checksumSha256?: string | null;
 }
 
 // ---------- Collections and sharing ----------
@@ -98,6 +101,8 @@ export interface CycleItem {
   /** The user whose cycle this is (the person publishing). */
   cycleOwnerId: UserId;
   mediaAssetId: string;
+  /** Explicitly selected successful render output; legacy items stay null until selected. */
+  selectedRenderOutputId: string | null;
   sourceKind: SourceKind;
   /** The collection the video came from (used to re-check sharing permission). */
   sourceCollectionId: string | null;
@@ -119,6 +124,8 @@ export interface CycleItem {
   lockExpiresAt: Date | null;
   /** Why the item needs a human (e.g. "source_removed", "ambiguous_publish_result"). */
   reviewReason: string | null;
+  externalPostId?: string | null;
+  publishedAt?: Date | null;
 }
 
 export interface PublishingCycle {

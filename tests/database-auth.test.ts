@@ -1,10 +1,10 @@
-// Database-mode authentication. The Neon cases run only when DATABASE_URL is set.
+// Database-mode authentication. Persistence cases run only for the isolated local database.
 // A refused database must surface as database_unavailable and must not create an in-memory account.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { AuthService, DEFAULT_AUTH_CONFIG } from "../src/server/auth/auth-service.ts";
-import { UnavailableEmailSender } from "../src/server/auth/email.ts";
+import { MemoryEmailOutbox, UnavailableEmailSender } from "../src/server/auth/email.ts";
 import { InMemoryRateLimiter } from "../src/server/auth/rate-limiter.ts";
 import { hashToken } from "../src/server/auth/tokens.ts";
 import { AppError } from "../src/server/errors.ts";
@@ -13,10 +13,11 @@ import { PrismaAuthRepository } from "../src/server/prisma/prisma-auth-repositor
 import type { PrismaClientLike } from "../src/server/prisma/prisma-client-like.ts";
 import { createDatabaseRuntime, getRuntime, setDatabaseConnectorForTests, setRuntimeForTests } from "../src/server/runtime.ts";
 import { registerRoute } from "../src/server/auth/auth-routes.ts";
+import { isolatedDatabaseUrl } from "./helpers/isolated-database.ts";
 
 const FAST = { logN: 10, r: 8, p: 1 };
 const PASSWORD = "a real database password";
-const databaseUrlAtStart = process.env["DATABASE_URL"];
+const databaseUrlAtStart = isolatedDatabaseUrl();
 const hasDatabase = Boolean(databaseUrlAtStart);
 let sequence: Promise<unknown> = Promise.resolve();
 const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -114,11 +115,54 @@ test("Neon registration, duplicate email, bad password, login, logout, and sessi
     if (!again.ok) return;
     clock.now = new Date(clock.now.getTime() + 31_000);
     assert.equal(await service.getSessionUserId(again.sessionToken), null);
+    assert.ok((await repo.getSessionByTokenHash(hashToken(again.sessionToken)))?.revokedAt);
     const third = await service.login({ email, password: PASSWORD });
     assert.equal(third.ok, true);
     if (!third.ok) return;
     clock.now = new Date(clock.now.getTime() + 61_000);
     assert.equal(await service.getSessionUserId(third.sessionToken), null);
+  } finally {
+    await closer.user.delete({ where: { email } }).catch(() => undefined);
+    await closer.$disconnect();
+  }
+}));
+
+test("password reset on PostgreSQL commits the password and session revocation together", { skip: hasDatabase ? false : "DATABASE_URL is not set for this process" }, async () => serial(async () => {
+  const db = await createPrismaClient(databaseUrlAtStart as string);
+  const closer = db as unknown as { $disconnect(): Promise<void>; user: { delete(args: { where: { email: string } }): Promise<unknown> } };
+  const email = `phase10f-${randomUUID()}@clipforge.test`;
+  const local = email.split("@")[0]!;
+  const repo = new PrismaAuthRepository(db);
+  const outbox = new MemoryEmailOutbox();
+  const clock = { now: new Date("2026-11-07T12:00:00Z") };
+  const service = new AuthService({
+    repo, email: outbox, limiter: new InMemoryRateLimiter(), now: () => clock.now, newId: () => randomUUID(),
+    config: { ...DEFAULT_AUTH_CONFIG("http://localhost:3000"), requireVerifiedEmail: true, scrypt: FAST },
+  });
+  const tokenFrom = () => new URL(outbox.messages.at(-1)!.text.match(/https?:\/\/\S+/)![0]).searchParams.get("token")!;
+  try {
+    assert.equal((await service.register({ email, password: PASSWORD })).ok, true);
+    assert.equal((await service.verifyEmail(tokenFrom())).ok, true);
+    const first = await service.login({ email, password: PASSWORD });
+    const second = await service.login({ email, password: PASSWORD });
+    assert.equal(first.ok && second.ok, true);
+    if (!first.ok || !second.ok) return;
+    await service.requestPasswordReset(email);
+    const reset = tokenFrom();
+    const rejected = await service.resetPassword(reset, local);
+    assert.equal(rejected.ok, false);
+    assert.equal(await service.getSessionUserId(first.sessionToken), first.userId);
+    const raced = await Promise.all([service.resetPassword(reset, "replacement database password"), service.resetPassword(reset, "other replacement password")]);
+    assert.equal(raced.filter((result) => result.ok).length, 1);
+    assert.equal(await service.getSessionUserId(first.sessionToken), null);
+    assert.equal(await service.getSessionUserId(second.sessionToken), null);
+    assert.ok((await repo.getSessionByTokenHash(hashToken(first.sessionToken)))?.revokedAt);
+    assert.equal((await service.login({ email, password: PASSWORD })).ok, false);
+    const changed = await service.login({ email, password: "replacement database password" });
+    if (!changed.ok) {
+      const alternate = await service.login({ email, password: "other replacement password" });
+      assert.equal(alternate.ok, true);
+    }
   } finally {
     await closer.user.delete({ where: { email } }).catch(() => undefined);
     await closer.$disconnect();

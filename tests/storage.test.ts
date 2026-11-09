@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalDiskMediaStorage } from "../src/server/storage/local-disk-storage.ts";
@@ -28,13 +28,48 @@ test("storage contract (both adapters): stage -> inspect -> commit -> exists; co
     await assert.rejects(() => storage.stage("staging/u1", BYTES), `${name}: staging must not overwrite`);
     await storage.commit("staging/u1", "media/bob/m1");
     assert.equal(await storage.exists("media/bob/m1"), true, name);
+    assert.deepEqual(await storage.getPrivateMetadata("media/bob/m1"), { sizeBytes: BYTES.length, storageKind: name });
+    assert.deepEqual(new Uint8Array(await new Response(await storage.openRead("media/bob/m1")).arrayBuffer()), BYTES);
     await storage.stage("staging/u2", BYTES);
     await assert.rejects(() => storage.commit("staging/u2", "media/bob/m1"), `${name}: commit must not overwrite an existing object`);
     assert.equal(await storage.exists("media/bob/m1"), true);
     await storage.discardStaged("staging/u2");
     await storage.discardStaged("staging/never-existed"); // missing is fine
     await assert.rejects(() => storage.runWithStagedFile("staging/u2", async () => 1));
+    await storage.stage("staging/unreferenced", BYTES);
+    await storage.commit("staging/unreferenced", "media/bob/unreferenced");
+    await storage.deleteUnreferencedUpload("media/bob/unreferenced");
+    assert.equal(await storage.exists("media/bob/unreferenced"), false);
+    assert.equal(await storage.getPrivateMetadata("media/bob/unreferenced"), null);
   }
+});
+
+test("imports copy a committed object into exclusive staging without changing the source", async () => {
+  for (const [name, storage] of await adapters()) {
+    await storage.stage("staging/source-upload", BYTES);
+    await storage.commit("staging/source-upload", "media/owner/source");
+    assert.equal(await storage.copyCommittedToStaging("media/owner/source", "staging/import-attempt"), BYTES.length, name);
+    assert.deepEqual(new Uint8Array(await new Response(await storage.openRead("media/owner/source")).arrayBuffer()), BYTES, name);
+    assert.deepEqual(await storage.runWithStagedFile("staging/import-attempt", async (file) => new Uint8Array(readFileSync(file))), BYTES, name);
+    await assert.rejects(() => storage.copyCommittedToStaging("media/owner/source", "staging/import-attempt"), name);
+    await storage.discardStaged("staging/import-attempt");
+  }
+});
+
+test("local-disk import copy checks lease between chunks and removes its own partial staging object", async () => {
+  const storage = await LocalDiskMediaStorage.create(mkdtempSync(join(root, "disk-copy-lease-")));
+  const large = new Uint8Array(2 * 1024 * 1024).fill(7);
+  await storage.stage("staging/source", large);
+  await storage.commit("staging/source", "media/owner/source");
+  let checks = 0;
+  await assert.rejects(() => storage.copyCommittedToStaging("media/owner/source", "staging/import", () => {
+    checks++;
+    if (checks === 2) throw new Error("lease lost");
+  }));
+  assert.ok(checks >= 2);
+  assert.equal(await storage.statSize("staging/import"), null);
+  assert.equal(await storage.statSize("media/owner/source"), large.length);
+  assert.equal(await storage.copyCommittedToStaging("media/owner/source", "staging/import"), large.length);
 });
 
 test("PATH TRAVERSAL: every dangerous key is refused by both adapters and by the key parser", async () => {

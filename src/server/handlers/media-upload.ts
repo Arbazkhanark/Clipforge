@@ -53,7 +53,7 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
   if (!declaredMimeAgrees(declaredMimeType, sniffed)) throw unsupportedMediaType("The file's contents do not match its declared type, so it was rejected.");
 
   // 4. Plan storage quota - early, so oversized uploads are refused before any bytes are stored.
-  const planId = await ctx.repo.getPlanIdForUser(userId);
+  const planId = await ctx.repo.getPlanIdForUser(userId, ctx.now);
   const limitBytes = getPlan(planId).limits.storageBytes;
   const usedBytes = await ctx.repo.getStorageUsedBytes(userId);
   const quotaMessage = `Not enough storage left on your plan: this file is ${data.length} bytes and you have ${Math.max(0, limitBytes - usedBytes)} bytes free.`;

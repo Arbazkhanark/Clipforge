@@ -2,6 +2,8 @@ import type { CycleCard, CycleDetail } from "../server/queries.ts";
 import { CYCLE_STATUS_LABELS } from "./format.ts";
 import { CycleEditor, RepeatModeForm, StartCycleForm } from "./CycleForms.tsx";
 import { PreflightPanel } from "./PreflightPanel.tsx";
+import { CycleScheduleForm } from "./CycleScheduleForm.tsx";
+import { isEditableItem } from "../lib/domain/cycle-state.ts";
 
 const ACCOUNT_STATUS = { connected: "Connected", token_expired: "Token expired", revoked: "Permissions revoked", disconnected: "Disconnected" } as const;
 
@@ -46,6 +48,7 @@ export function CycleDetailView({ detail, timeZone, instagramLoginConfigured }: 
       <RepeatModeForm cycleId={detail.cycle.id} repeatBehavior={publishing.repeatBehavior} ended={ended} />
       <p className="muted">Starting a cycle does not send a Reel. Connect Instagram from the Instagram page when you are ready to store a token.</p>
       {detail.cycle.status === "draft" && <PreflightPanel report={detail.report} />}
+      {detail.cycle.status === "draft" && <CycleScheduleForm cycleId={detail.cycle.id} initialSchedule={detail.cycle.scheduleSettings ?? null} initialStartDate={detail.scheduleStartDate} timeZone={detail.cycle.timezone ?? timeZone} editable items={detail.items.filter(isEditableItem).map((item) => ({ id: item.id, position: item.position, title: detail.mediaTitles[item.mediaAssetId] ?? "Unavailable video" }))} />}
       <CycleEditor detail={detail} timeZone={timeZone} />
       {detail.cycle.status === "draft" && <StartCycleForm cycleId={detail.cycle.id} readyToConfirm={detail.readyToConfirm} />}
     </>

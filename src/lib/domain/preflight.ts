@@ -3,7 +3,8 @@
 // anything about Instagram that is not verified is phrased as "could not confirm".
 import { validateCaption, type CoverSupport } from "./caption-cover-updates.ts";
 import { isEditableItem } from "./cycle-state.ts";
-import { INSTAGRAM_VERIFIED, findPublishQuotaViolations } from "../integrations/instagram-capabilities.ts";
+import { INSTAGRAM_SCHEDULE_ESTIMATE, INSTAGRAM_VERIFIED, findPublishQuotaViolations } from "../integrations/instagram-capabilities.ts";
+import { evaluateInstagramEligibility, missingInstagramScopes } from "../integrations/instagram-eligibility.ts";
 import { REPEATED_DEFINITE_FAILURES_BEFORE_PAUSE, type RepeatBehavior } from "./publish-workflow.ts";
 import type { CycleItem, Decision, PublishingCycle } from "./types.ts";
 
@@ -18,10 +19,13 @@ export interface PreflightCheck {
   itemIds: string[];
 }
 
+export type PublishingMediaAccessStatus = "media_not_available" | "media_not_eligible" | "temporary_access_not_configured" | "temporary_access_expired" | "temporary_media_access_ready";
+export interface PublishingMediaAccessState { status: PublishingMediaAccessStatus; publiclyReachable?: boolean; }
+
 export interface PreflightInput {
   cycle: PublishingCycle;
   items: CycleItem[];
-  socialAccountStatus: "connected" | "token_expired" | "revoked" | "disconnected" | null;
+  socialAccountStatus: unknown;
   scheduledItemsPerMonthLimit: number;
   scheduledItemsUsedThisMonth: number;
   coverSupport: CoverSupport;
@@ -29,20 +33,22 @@ export interface PreflightInput {
   sourceAccessByItemId: Record<string, Decision>;
   /** Optional: times of posts already published recently (for the rolling 24-hour quota check). */
   recentPublishTimes?: Date[];
-  /** Maximum API-published posts per rolling 24h. Defaults to the documented 100; override from the live content_publishing_limit later. */
+  /** Reference value for a non-blocking local schedule estimate; publishing worker performs the live account check. */
   publishLimitPer24h?: number;
   /**
    * Present when the server knows which Instagram account this cycle uses.
    * Omitted by older callers. A missing token does not block a local cycle start.
    */
   instagram?: {
+    platform: unknown;
     now: Date;
-    hasStoredToken: boolean;
-    accountType: "BUSINESS" | "MEDIA_CREATOR" | "PERSONAL" | "UNKNOWN" | null;
-    grantedScopes: string[];
+    hasStoredToken: unknown;
+    accountType: unknown;
+    grantedScopes: unknown;
     tokenExpiresAt: Date | null;
     mediaByItemId: Record<string, { kind?: "video" | "image"; mimeType?: string; durationMs?: number | null; sizeBytes?: number }>;
-    publicMediaUrlAvailable: boolean;
+    temporaryMediaAccessConfigured?: boolean;
+    temporaryMediaAccessByItemId?: Record<string, PublishingMediaAccessState>;
     consecutiveDefiniteFailures: number;
     repeatBehavior: RepeatBehavior;
   };
@@ -63,7 +69,7 @@ export function runPreflight(input: PreflightInput): PreflightReport {
   const upcomingItems = items.filter(isEditableItem);
 
   // 1. Account
-  if (socialAccountStatus === null) add("account", "blocked", "No social account is selected.");
+  if (socialAccountStatus === null || socialAccountStatus === undefined) add("account", "blocked", "No social account is selected.");
   else if (socialAccountStatus !== "connected") add("account", "blocked", "The social account needs to be reconnected before publishing.");
   else add("account", "ready", "Social account is connected.");
 
@@ -102,30 +108,32 @@ export function runPreflight(input: PreflightInput): PreflightReport {
   const duplicateItemIds = [...countByMedia.values()].filter((ids) => ids.length > 1).flat();
   if (duplicateItemIds.length > 0) add("duplicates", "recommendation", "The same video appears more than once. Make sure the repeat is intended.", duplicateItemIds);
 
-  // 9. Instagram's documented rolling 24-hour publishing limit (Meta recommends apps enforce it themselves)
+  // 9. Advisory schedule estimate only. The worker queries live account quota immediately before publish.
   const plannedTimes = upcomingItems.flatMap((i) => (i.scheduledFor ? [i.scheduledFor] : []));
-  const quotaLimit = input.publishLimitPer24h ?? INSTAGRAM_VERIFIED.publishLimitPer24h;
+  const quotaLimit = input.publishLimitPer24h ?? INSTAGRAM_SCHEDULE_ESTIMATE.publishLimitPer24h;
   const violations = findPublishQuotaViolations([...(input.recentPublishTimes ?? []), ...plannedTimes], quotaLimit);
-  if (violations.length > 0) add("platform_quota", "action_required", `This schedule would put ${violations[0]!.count} posts inside one 24-hour period; Instagram's documented limit is ${quotaLimit}. Spread the schedule out.`);
+  if (violations.length > 0) add("platform_quota", "recommendation", `This local estimate places ${violations[0]!.count} posts inside one 24-hour period using a ${quotaLimit}-post reference value. Published limits differ; the worker checks the account's live quota before each publish.`);
 
   // 10. Instagram account, token, permissions, and Reel media. Only when the server supplied account facts.
   const instagram = input.instagram;
   if (instagram) {
     const guide = `Instagram's Content Publishing guide (read ${INSTAGRAM_VERIFIED.readOn})`;
+    const eligibility = evaluateInstagramEligibility({ platform: instagram.platform, status: socialAccountStatus, accountType: instagram.accountType, grantedScopes: instagram.grantedScopes, hasToken: instagram.hasStoredToken, tokenExpiresAt: instagram.tokenExpiresAt, now: instagram.now });
     if (!instagram.hasStoredToken) {
-      add("instagram_token", "recommendation", "No Instagram access token is stored. Starting this cycle updates ClipForge only and does not publish a Reel.");
-    } else {
-      if (instagram.tokenExpiresAt === null || Number.isNaN(instagram.tokenExpiresAt.getTime())) add("instagram_token_expiry", "action_required", "This token has no expiry time, so ClipForge will not treat it as valid for publishing.");
-      else if (instagram.tokenExpiresAt <= instagram.now) add("instagram_token_expiry", "blocked", "The Instagram token has expired. Reconnect the account.");
-      else if (instagram.tokenExpiresAt.getTime() - instagram.now.getTime() <= 7 * 24 * 60 * 60 * 1000) add("instagram_token_expiry", "recommendation", "The Instagram token expires within 7 days. That warning is a ClipForge reminder, not a Meta limit.");
-      else add("instagram_token_expiry", "ready", "The stored Instagram token has not expired.");
-      if (instagram.accountType === "PERSONAL") add("instagram_account_type", "blocked", `${guide} allows publishing only for professional accounts. This account is personal.`);
-      else if (instagram.accountType === "BUSINESS" || instagram.accountType === "MEDIA_CREATOR") add("instagram_account_type", "ready", "This is an Instagram professional account, which the Content Publishing guide allows.");
-      else add("instagram_account_type", "action_required", `${guide} allows publishing only for professional accounts. ClipForge could not confirm this account type.`);
-      const missingScopes = INSTAGRAM_VERIFIED.loginPaths.instagramLogin.permissions.filter((scope) => !instagram.grantedScopes.includes(scope));
-      if (missingScopes.length > 0) add("instagram_permissions", "blocked", `Instagram Login is missing ${missingScopes.join(", ")}. Those are the permissions named in the Content Publishing guide for this login path.`);
-      else add("instagram_permissions", "ready", "The Instagram Login publishing permissions are present.");
-      if (!instagram.publicMediaUrlAvailable) add("instagram_public_url", "blocked", `${guide} requires the video to be on a publicly reachable URL when the container is created. ClipForge does not publish a public media URL, so this Reel cannot be sent.`);
+      add("instagram_token", "blocked", "No Instagram access token is stored. Reconnect the account before publishing.");
+    } else add("instagram_token", "ready", "An encrypted Instagram access token is stored on the server.");
+    if (!(instagram.tokenExpiresAt instanceof Date) || Number.isNaN(instagram.tokenExpiresAt.getTime())) add("instagram_token_expiry", "blocked", "This token has no valid expiry time, so ClipForge will not treat it as eligible.");
+    else if (instagram.tokenExpiresAt <= instagram.now) add("instagram_token_expiry", "blocked", "The Instagram token has expired. Reconnect the account.");
+    else if (instagram.tokenExpiresAt.getTime() - instagram.now.getTime() <= 7 * 24 * 60 * 60 * 1000) add("instagram_token_expiry", "recommendation", "The Instagram token expires within 7 days. That warning is a ClipForge reminder, not a Meta limit.");
+    else add("instagram_token_expiry", "ready", "The stored Instagram token has not expired.");
+    if (eligibility.reason === "unsupported_account_type") add("instagram_account_type", "blocked", `${guide} allows publishing only for supported professional accounts. ClipForge could not confirm a supported type.`);
+    else add("instagram_account_type", "ready", "This is a supported Instagram professional account.");
+    const missingScopes = missingInstagramScopes(instagram.grantedScopes);
+    if (missingScopes.length > 0) add("instagram_permissions", "blocked", `Instagram Login is missing verified publishing permissions: ${missingScopes.join(", ")}.`);
+    else add("instagram_permissions", "ready", "The required Instagram Login publishing permissions are present.");
+    if (eligibility.reason === "not_connected" || eligibility.reason === "unsupported_platform") add("instagram_account_eligibility", "blocked", "This Instagram account is not in a supported connected state.");
+    if (eligibility.eligible) add("instagram_eligibility", "ready", "The connected account meets ClipForge's stored eligibility checks.");
+    if (instagram.hasStoredToken) {
       const wrongMedia = upcomingItems.filter((item) => {
         const media = instagram.mediaByItemId[item.id];
         if (!media) return true;
@@ -151,6 +159,34 @@ export function runPreflight(input: PreflightInput): PreflightReport {
       });
       if (oversized.length > 0) add("instagram_file_size", "blocked", `${oversized.length} video(s) are over the documented 300MB Reel maximum. ClipForge counts that as ${reels.maxFileBytes} bytes because the page does not define MB.`, oversized.map((item) => item.id));
     }
+    if (upcomingItems.length > 0 && instagram.temporaryMediaAccessConfigured !== true) {
+      add("temporary_access_not_configured", "blocked", "Temporary media access is not configured. No media URL will be shared with Instagram.", upcomingItems.map((item) => item.id));
+    }
+    const mediaUnavailable: string[] = [];
+    const mediaIneligible: string[] = [];
+    const accessExpired: string[] = [];
+    const accessNotConfigured: string[] = [];
+    const temporaryReady: string[] = [];
+    const notPubliclyReachable: string[] = [];
+    const publiclyReachable: string[] = [];
+    for (const item of upcomingItems) {
+      const state = instagram.temporaryMediaAccessByItemId?.[item.id] ?? { status: "temporary_access_not_configured" as const, publiclyReachable: false };
+      if (state.status === "media_not_available") mediaUnavailable.push(item.id);
+      else if (state.status === "media_not_eligible") mediaIneligible.push(item.id);
+      else if (state.status === "temporary_access_not_configured") accessNotConfigured.push(item.id);
+      else if (state.status === "temporary_access_expired") accessExpired.push(item.id);
+      else {
+        temporaryReady.push(item.id);
+        (state.publiclyReachable === true ? publiclyReachable : notPubliclyReachable).push(item.id);
+      }
+    }
+    if (mediaUnavailable.length) add("publishing_media_unavailable", "blocked", `${mediaUnavailable.length} selected media file(s) are missing from private storage.`, mediaUnavailable);
+    if (mediaIneligible.length) add("publishing_media_ineligible", "blocked", `${mediaIneligible.length} selected item(s) do not have an authorized rendered publishing output. Original uploads remain private.`, mediaIneligible);
+    if (accessNotConfigured.length && instagram.temporaryMediaAccessConfigured === true) add("temporary_access_not_configured", "blocked", "Temporary media access is not configured for the selected output.", accessNotConfigured);
+    if (accessExpired.length) add("temporary_access_expired", "blocked", `${accessExpired.length} temporary media access URL(s) expired. A fresh authorized URL is required.`, accessExpired);
+    if (temporaryReady.length) add("temporary_media_access_ready", "ready", "Temporary access is ready for the selected rendered output.", temporaryReady);
+    if (notPubliclyReachable.length) add("instagram_public_url", "blocked", "The temporary URL is a mock or otherwise not publicly reachable by Instagram. It cannot be used for publishing.", notPubliclyReachable);
+    if (publiclyReachable.length) add("instagram_public_url", "ready", `${publiclyReachable.length} temporary media URL(s) are reported publicly reachable for the exact selected output.`, publiclyReachable);
     const failureCount = instagram.consecutiveDefiniteFailures;
     add("instagram_failures", failureCount >= REPEATED_DEFINITE_FAILURES_BEFORE_PAUSE ? "action_required" : "ready", `${failureCount} definite publishing failure${failureCount === 1 ? "" : "s"} in a row are stored on PublishingJob records for this account. ClipForge pauses new claims after ${REPEATED_DEFINITE_FAILURES_BEFORE_PAUSE}. That pause is our rule, not an Instagram quota.`);
     if (instagram.repeatBehavior === "automatic") add("repeat_mode", "recommendation", "Repeat mode is automatic. Another round can include only eligible unpublished items. Published, publishing, and processing items stay out. Saving this mode does not send a Reel.");

@@ -22,6 +22,7 @@ export interface SettingsPatch {
   logoPosition?: { centerX: number; centerY: number };
   logoSize?: number;
   logoOpacity?: number;
+  trim?: EditingSettings["trim"];
 }
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -42,7 +43,7 @@ function num(raw: string | undefined, label: string, problems: string[]): number
 }
 
 /** Reads the ticked fields. Unticked fields are absent from the patch, so each video keeps them. */
-export function parseBulkForm(get: (key: string) => string | undefined, getAll: (key: string) => string[]): { ok: true; mediaIds: string[]; patch: SettingsPatch; lines: string[] } | { ok: false; problems: string[] } {
+export function parseBulkForm(get: (key: string) => string | undefined, getAll: (key: string) => string[]): { ok: true; mediaIds: string[]; patch: SettingsPatch; lines: string[]; styleTemplateId?: string; copyTemplateTrim: boolean } | { ok: false; problems: string[] } {
   const problems: string[] = [];
   const mediaIds: string[] = [];
   for (const id of getAll("media")) {
@@ -51,7 +52,12 @@ export function parseBulkForm(get: (key: string) => string | undefined, getAll: 
   }
   if (mediaIds.length === 0) problems.push("Choose at least one video.");
   const use = new Set(getAll("use").filter((field): field is BulkField => (BULK_FIELDS as readonly string[]).includes(field)));
-  if (use.size === 0) problems.push("Choose at least one setting to apply.");
+  const styleTemplateId = get("styleTemplateId")?.trim() || undefined;
+  const copyTemplateTrim = get("copyTemplateTrim") === "yes";
+  if (styleTemplateId && !ID.test(styleTemplateId)) problems.push("Choose one of your saved styles.");
+  if (styleTemplateId && use.size > 0) problems.push("Choose a saved style or individual settings, not both.");
+  if (!styleTemplateId && use.size === 0) problems.push("Choose a saved style or at least one setting to apply.");
+  if (copyTemplateTrim && !styleTemplateId) problems.push("Choose a saved style before copying its trim range.");
   const patch: SettingsPatch = {};
   const lines: string[] = [];
   if (use.has("aspect")) {
@@ -108,7 +114,7 @@ export function parseBulkForm(get: (key: string) => string | undefined, getAll: 
   }
   if (use.has("logoSize")) { const logoSize = num(get("logoWidth"), "Logo size", problems); if (logoSize !== undefined) { patch.logoSize = logoSize; lines.push(`Logo size: ${logoSize}`); } }
   if (use.has("logoOpacity")) { const logoOpacity = num(get("logoOpacity"), "Logo opacity", problems); if (logoOpacity !== undefined) { patch.logoOpacity = logoOpacity; lines.push(`Logo opacity: ${logoOpacity}`); } }
-  return problems.length > 0 ? { ok: false, problems } : { ok: true, mediaIds, patch, lines };
+  return problems.length > 0 ? { ok: false, problems } : { ok: true, mediaIds, patch, lines, ...(styleTemplateId ? { styleTemplateId } : {}), copyTemplateTrim };
 }
 
 /**
@@ -122,6 +128,7 @@ export function applySettingsPatch(current: EditingSettings, patch: SettingsPatc
   if (patch.zoom !== undefined) next.zoom = patch.zoom;
   if (patch.offsetX !== undefined) next.offsetX = patch.offsetX;
   if (patch.offsetY !== undefined) next.offsetY = patch.offsetY;
+  if (patch.trim) next.trim = { ...patch.trim };
 
   let background = next.background;
   if (patch.backgroundKind === "solid") background = { kind: "solid", colorHex: patch.solidColor ?? (background.kind === "solid" ? background.colorHex : "#000000") };

@@ -65,6 +65,26 @@ export function runAuthRepositoryContract(name: string, factory: () => Promise<A
     assert.equal(results.filter((r) => r !== null).length, 1);
   });
 
+  test(`[${name}] password reset: one transaction stores the password and revokes sessions, and a rejected password leaves the token`, async () => {
+    const repo = await factory(); await repo.createUser(user({ email: "clipforgeuser@example.com" }));
+    await repo.createSession(session()); await repo.createSession(session({ id: "s2", tokenHash: "th2" }));
+    await repo.createAuthToken(token({ kind: "password_reset", tokenHash: "reset-1" }));
+    const rejected = await repo.completePasswordReset({ tokenHash: "reset-1", now: at(1), passwordHash: "new", passwordProblems: () => ["Password must not be your email address."] });
+    assert.deepEqual(rejected, { status: "rejected", problems: ["Password must not be your email address."] });
+    assert.equal((await repo.getSessionByTokenHash("th1"))!.revokedAt, null);
+    assert.equal((await repo.getUserById("u1"))!.passwordHash, "hash");
+    const reset = await repo.completePasswordReset({ tokenHash: "reset-1", now: at(2), passwordHash: "new", passwordProblems: () => [] });
+    assert.deepEqual(reset, { status: "reset" });
+    assert.equal((await repo.getUserById("u1"))!.passwordHash, "new");
+    assert.notEqual((await repo.getSessionByTokenHash("th1"))!.revokedAt, null);
+    assert.notEqual((await repo.getSessionByTokenHash("th2"))!.revokedAt, null);
+    assert.deepEqual(await repo.completePasswordReset({ tokenHash: "reset-1", now: at(3), passwordHash: "newer", passwordProblems: () => [] }), { status: "invalid" });
+    await repo.createAuthToken(token({ id: "t-race", kind: "password_reset", tokenHash: "race" }));
+    const raced = await Promise.all([1, 2, 3].map(() => repo.completePasswordReset({ tokenHash: "race", now: at(4), passwordHash: "winner", passwordProblems: () => [] })));
+    assert.equal(raced.filter((result) => result.status === "reset").length, 1);
+    assert.equal((await repo.getUserById("u1"))!.passwordHash, "winner");
+  });
+
   test(`[${name}] auth tokens: invalidate makes unused tokens of that kind unusable, other kinds and users untouched`, async () => {
     const repo = await factory(); await repo.createUser(user()); await repo.createUser(user({ id: "u2", email: "b@example.com" }));
     await repo.createAuthToken(token()); await repo.createAuthToken(token({ id: "t2", tokenHash: "h2", kind: "password_reset" })); await repo.createAuthToken(token({ id: "t3", tokenHash: "h3", userId: "u2" }));

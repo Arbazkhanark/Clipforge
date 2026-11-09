@@ -167,6 +167,19 @@ enum PublishOutcome {
   ambiguous
 }
 
+enum PublishingJobStage {
+  queued
+  claimed
+  container_creation_pending
+  container_processing
+  ready_to_publish
+  publishing
+  published
+  failed
+  needs_manual_review
+  cancelled
+}
+
 enum SocialPlatform {
   instagram
   youtube_shorts
@@ -207,6 +220,7 @@ enum UsageKind {
 enum AuthTokenKind {
   email_verification
   password_reset
+  instagram_oauth_state
 }
 
 enum WebhookEventStatus {
@@ -214,6 +228,86 @@ enum WebhookEventStatus {
   processed
   failed
   ignored
+}
+
+enum RazorpaySubscriptionIntentStatus {
+  creating
+  created
+  active
+  failed
+  manual_review
+  cancelled
+  expired
+}
+
+enum ManualPaymentIntentStatus {
+  creating
+  created
+  paid
+  failed
+  expired
+  manual_review
+}
+
+enum PromotionType {
+  bonus_days
+  tier_access
+  discount_coupon
+  free_access_coupon
+}
+
+enum PromotionStatus {
+  draft
+  active
+  paused
+  expired
+  revoked
+}
+
+enum PromotionDiscountType {
+  percentage
+  fixed_amount
+}
+
+enum PromotionRedemptionStatus {
+  reserved
+  redeemed
+  released
+  manual_review
+}
+
+enum PromotionalAccessStatus {
+  queued
+  active
+  expired
+  revoked
+}
+
+enum PromotionalAccessKind {
+  bonus_days
+  tier_access
+  free_access_coupon
+}
+
+enum PromotionActivationPolicy {
+  immediate
+  after_current_access
+}
+
+enum PromotionLifecycleEventType {
+  promotion_created
+  promotion_updated
+  promotion_paused
+  promotion_revoked
+  grant_created
+  grant_queued
+  grant_activated
+  grant_expired
+  grant_revoked
+  coupon_reserved
+  coupon_redeemed
+  coupon_released
+  manual_review_required
 }
 
 // ============================ Users & billing ============================
@@ -231,6 +325,16 @@ model User {
   authTokens      AuthToken[]
   googleIdentity  GoogleIdentity?
   subscription   Subscription?
+  razorpaySubscriptionIntents RazorpaySubscriptionIntent[]
+  manualPaymentIntents ManualPaymentIntent[]
+  manualPlanAccesses ManualPlanAccess[]
+  promotionsCreated Promotion[] @relation("PromotionCreator")
+  promotionsTargeted Promotion[] @relation("PromotionTarget")
+  promotionRedemptions PromotionRedemption[]
+  promotionalAccessGrants PromotionalAccessGrant[]
+  promotionalGrantsCreated PromotionalAccessGrant[] @relation("PromotionGrantor")
+  promotionEventsAsSubject PromotionLifecycleEvent[] @relation("PromotionEventSubject")
+  promotionEventsAsActor PromotionLifecycleEvent[] @relation("PromotionEventActor")
   socialAccounts SocialAccount[]
   mediaAssets    MediaAsset[]
   collections    VideoCollection[]
@@ -241,6 +345,7 @@ model User {
   cycles         PublishingCycle[]
   notifications  Notification[]
   usageRecords   UsageRecord[]
+  publishingJobs PublishingJob[]
 }
 
 /// Login sessions. Only a SHA-256 hash of the cookie token is stored, so a database leak cannot be replayed as cookies.
@@ -296,8 +401,251 @@ model Subscription {
   /// Unix seconds when a free trial ends (the start_at sent to Razorpay), or null.
   trialEndsAt            BigInt?
   currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  /// Set before calling Razorpay cancellation; blocks continuation even if that call is ambiguous.
+  cancellationRequestedAt DateTime?
+  continuations          RazorpaySubscriptionContinuation[]
+  checkoutIntent         RazorpaySubscriptionIntent? @relation(fields: [razorpaySubscriptionId, userId, planId, interval], references: [providerSubscriptionId, userId, planId, interval], onDelete: Restrict)
   createdAt              DateTime           @default(now())
   updatedAt              DateTime           @updatedAt
+
+  @@unique([razorpaySubscriptionId, userId, planId, interval])
+  @@unique([id, razorpaySubscriptionId])
+}
+
+enum SubscriptionContinuationStatus {
+  reserved
+  applied
+  manual_review
+  skipped
+}
+
+/// Durable, at-most-once attempt to extend the same provider subscription before its finite count ends.
+model RazorpaySubscriptionContinuation {
+  id                    String @id @default(cuid())
+  subscriptionId        String
+  providerSubscriptionId String
+  cycleEnd              DateTime
+  observedTotalCount    Int
+  observedPaidCount     Int
+  observedRemainingCount Int
+  targetRemainingCount  Int
+  status                SubscriptionContinuationStatus @default(reserved)
+  errorCategory         String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  finishedAt            DateTime?
+  subscription          Subscription @relation(fields: [subscriptionId, providerSubscriptionId], references: [id, razorpaySubscriptionId], onDelete: Restrict)
+
+  @@unique([subscriptionId, cycleEnd])
+  @@index([status, createdAt])
+}
+
+/// Durable binding between an authenticated checkout request and one provider subscription.
+/// `creating` intents are never automatically retried because a lost response may hide a created provider subscription.
+model RazorpaySubscriptionIntent {
+  id                      String                           @id @default(cuid())
+  userId                  String
+  user                    User                             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  idempotencyKey          String
+  autoRenewConsentAt      DateTime?
+  autoRenewConsentVersion String?
+  providerSubscriptionId  String?                          @unique
+  checkoutUrl             String?
+  providerPlanId          String
+  planId                  String
+  interval                BillingInterval
+  amountPaise             Int
+  currency                String                           @default("INR")
+  status                  RazorpaySubscriptionIntentStatus @default(creating)
+  errorCategory           String?
+  createdAt               DateTime                         @default(now())
+  updatedAt               DateTime                         @updatedAt
+  subscription            Subscription?
+  payments                PaymentRecord[]
+
+  @@unique([id, userId])
+  @@unique([providerSubscriptionId, userId, planId, interval])
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, status, createdAt])
+  @@index([status, createdAt])
+}
+
+/// Durable owner-bound one-time access purchase. A lost provider response stays manual_review.
+model ManualPaymentIntent {
+  id                String                   @id @default(cuid())
+  userId            String
+  user              User                     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  idempotencyKey    String
+  providerPaymentLinkId String?               @unique
+  checkoutUrl       String?
+  planId            String
+  interval          BillingInterval
+  amountPaise       Int
+  currency          String                   @default("INR")
+  status            ManualPaymentIntentStatus @default(creating)
+  accessStartsAt    DateTime?
+  accessEndsAt      DateTime?
+  errorCategory     String?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  payments          PaymentRecord[]
+  accessGrant       ManualPlanAccess?
+  promotionRedemptions PromotionRedemption[]
+
+  @@unique([id, userId])
+  @@unique([userId, idempotencyKey])
+  @@index([userId, status, createdAt])
+}
+
+/// Historical, verified paid period. Each captured payment can grant access only once.
+model ManualPlanAccess {
+  id                 String             @id @default(cuid())
+  userId             String
+  intentId           String             @unique
+  providerPaymentId  String             @unique
+  planId             String
+  startsAt           DateTime
+  expiresAt          DateTime
+  createdAt          DateTime           @default(now())
+  user               User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  intent             ManualPaymentIntent @relation(fields: [intentId, userId], references: [id, userId], onDelete: Restrict)
+
+  @@unique([intentId, userId])
+  @@index([userId, expiresAt])
+}
+
+/// A versioned offer or one-user admin grant. Terms should be immutable after first use.
+model Promotion {
+  id               String                 @id @default(cuid())
+  type             PromotionType
+  status           PromotionStatus        @default(draft)
+  /// Coupon code stored as trimmed uppercase. Null for code-free admin grants.
+  code             String?                @unique
+  discountType     PromotionDiscountType?
+  /// Whole percentage points (1..50) or fixed paise.
+  discountValue    Int?
+  /// String constrained to creator/pro/agency for access promotions.
+  accessPlanId     String?
+  durationDays     Int?
+  eligiblePlanIds  String[]               @default([])
+  targetUserId     String?
+  targetUser       User?                  @relation("PromotionTarget", fields: [targetUserId], references: [id], onDelete: Restrict)
+  startsAt         DateTime               @db.Timestamptz(3)
+  expiresAt        DateTime?              @db.Timestamptz(3)
+  usageLimit       Int?
+  createdByAdminId String
+  createdByAdmin   User                   @relation("PromotionCreator", fields: [createdByAdminId], references: [id], onDelete: Restrict)
+  reason           String?
+  createdAt        DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime               @updatedAt @db.Timestamptz(3)
+  redemptions      PromotionRedemption[]
+  accessGrants     PromotionalAccessGrant[]
+  lifecycleEvents  PromotionLifecycleEvent[]
+
+  @@index([type, status, startsAt, expiresAt])
+  @@index([targetUserId, status])
+}
+
+/// A reserved or completed coupon use. Price fields are an immutable checkout snapshot.
+model PromotionRedemption {
+  id                        String                    @id @default(cuid())
+  promotionId               String
+  promotion                 Promotion                 @relation(fields: [promotionId], references: [id], onDelete: Restrict)
+  userId                    String
+  user                      User                      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  status                    PromotionRedemptionStatus @default(reserved)
+  idempotencyKey            String
+  /// Populated only for discount-coupon redemptions; null for free-access coupons.
+  planId                    String?
+  interval                  BillingInterval?
+  listPricePaise            Int?
+  discountPaise             Int?
+  payablePaise              Int?
+  currency                  String?
+  /// Both optional columns are set together and SQL-check-matched to userId.
+  manualPaymentIntentId     String?
+  manualPaymentIntentUserId String?
+  manualPaymentIntent      ManualPaymentIntent?      @relation(fields: [manualPaymentIntentId, manualPaymentIntentUserId], references: [id, userId], onDelete: Restrict)
+  reservedAt                DateTime                  @db.Timestamptz(3)
+  redeemedAt                DateTime?                 @db.Timestamptz(3)
+  releasedAt                DateTime?                 @db.Timestamptz(3)
+  createdAt                 DateTime                  @default(now()) @db.Timestamptz(3)
+  updatedAt                 DateTime                  @updatedAt @db.Timestamptz(3)
+  accessGrant               PromotionalAccessGrant?
+  lifecycleEvents           PromotionLifecycleEvent[]
+
+  @@unique([userId, idempotencyKey])
+  @@unique([id, userId])
+  @@unique([id, userId, promotionId])
+  @@unique([manualPaymentIntentId, manualPaymentIntentUserId])
+  @@index([promotionId, status, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// A promotional entitlement. Queued grants have no finalized start or expiry dates.
+model PromotionalAccessGrant {
+  id                    String                    @id @default(cuid())
+  promotionId           String
+  promotion             Promotion                 @relation(fields: [promotionId], references: [id], onDelete: Restrict)
+  userId                String
+  user                  User                      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  redemptionId          String?                   @unique
+  redemptionUserId      String?
+  redemptionPromotionId String?
+  redemption            PromotionRedemption?      @relation(fields: [redemptionId, redemptionUserId, redemptionPromotionId], references: [id, userId, promotionId], onDelete: Restrict)
+  kind                  PromotionalAccessKind
+  activationPolicy      PromotionActivationPolicy
+  status                PromotionalAccessStatus  @default(queued)
+  planId                String
+  durationDays          Int
+  /// Global monotonically increasing queue order; gaps after rollback are harmless.
+  queueSequence         BigInt                    @default(autoincrement()) @unique
+  startsAt              DateTime?                 @db.Timestamptz(3)
+  expiresAt             DateTime?                 @db.Timestamptz(3)
+  activatedAt           DateTime?                 @db.Timestamptz(3)
+  revokedAt             DateTime?                 @db.Timestamptz(3)
+  grantedByAdminId      String?
+  grantedByAdmin        User?                     @relation("PromotionGrantor", fields: [grantedByAdminId], references: [id], onDelete: Restrict)
+  reason                String?
+  createdAt             DateTime                  @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime                  @updatedAt @db.Timestamptz(3)
+  lifecycleEvents       PromotionLifecycleEvent[]
+
+  @@unique([id, userId, promotionId])
+  @@index([userId, status, queueSequence])
+  @@unique([redemptionId, redemptionUserId, redemptionPromotionId])
+  @@index([status, startsAt, expiresAt])
+}
+
+/// Append-only, idempotent promotion lifecycle/audit evidence.
+model PromotionLifecycleEvent {
+  id                    String                       @id @default(cuid())
+  eventKey              String                       @unique
+  eventType             PromotionLifecycleEventType
+  promotionId           String
+  promotion             Promotion                    @relation(fields: [promotionId], references: [id], onDelete: Restrict)
+  subjectUserId         String?
+  subjectUser           User?                        @relation("PromotionEventSubject", fields: [subjectUserId], references: [id], onDelete: Restrict)
+  actorUserId           String?
+  actorUser             User?                        @relation("PromotionEventActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  redemptionId          String?
+  redemptionUserId      String?
+  redemptionPromotionId String?
+  redemption            PromotionRedemption?         @relation(fields: [redemptionId, redemptionUserId, redemptionPromotionId], references: [id, userId, promotionId], onDelete: Restrict)
+  accessGrantId         String?
+  accessGrantUserId     String?
+  accessGrantPromotionId String?
+  accessGrant           PromotionalAccessGrant?      @relation(fields: [accessGrantId, accessGrantUserId, accessGrantPromotionId], references: [id, userId, promotionId], onDelete: Restrict)
+  occurredAt            DateTime                     @db.Timestamptz(3)
+  outcome               String?
+  metadata              Json?
+  createdAt             DateTime                     @default(now()) @db.Timestamptz(3)
+
+  @@index([promotionId, occurredAt])
+  @@index([subjectUserId, occurredAt])
+  @@index([actorUserId, occurredAt])
 }
 
 model WebhookEvent {
@@ -321,9 +669,16 @@ model PaymentRecord {
   amountPaise       Int // integer paise, never floats
   currency          String   @default("INR")
   status            String
+  subscriptionIntentId String?
+  subscriptionIntent RazorpaySubscriptionIntent? @relation(fields: [subscriptionIntentId, userId], references: [id, userId], onDelete: Restrict)
+  /// CHECK PaymentRecord_single_billing_intent: at most one intent FK is non-null. Prisma cannot represent CHECK constraints.
+  manualPaymentIntentId String?
+  manualPaymentIntent ManualPaymentIntent? @relation(fields: [manualPaymentIntentId, userId], references: [id, userId], onDelete: Restrict)
+  providerSubscriptionId String?
   createdAt         DateTime @default(now())
 
   @@index([userId, createdAt])
+  @@index([subscriptionIntentId])
 }
 
 // ============================ Social accounts ============================
@@ -347,6 +702,7 @@ model SocialAccount {
   createdAt            DateTime            @default(now())
 
   cycles PublishingCycle[]
+  publishingJobs PublishingJob[]
 
   @@unique([userId, platform, externalAccountId])
 }
@@ -418,7 +774,10 @@ model MediaDerivative {
   settingsHash String
   createdAt    DateTime       @default(now())
 
+  selectedByCycleItems CycleItem[] @relation("CycleItemSelectedRenderOutput")
+
   @@unique([mediaAssetId, ownerId, kind, settingsHash])
+  @@unique([id, ownerId, mediaAssetId])
 }
 
 // ============================ Collections & sharing ============================
@@ -521,12 +880,21 @@ model MediaImportJob {
    * Where the new copy is being written. Used to delete orphans if the job fails.
    */
   newObjectKey       String?
+  /// Current worker's unpredictable staging object key; each reclaim receives a fresh key.
+  stagingObjectKey   String?
+  lockedBy           String?
+  lockToken          String?
+  leaseExpiresAt     DateTime?
+  attempts           Int          @default(0)
+  /// Attempt keys are retained so a restarted worker can clean abandoned partial copies.
+  attemptStorageKeys String[]     @default([])
   resultMediaAssetId String?      @unique
   failureReason      String?
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 
   @@index([sourceMediaId, status])
+  @@index([status, leaseExpiresAt])
 }
 
 // ============================ Templates ============================
@@ -566,6 +934,7 @@ model PublishingCycle {
   updatedAt            DateTime       @updatedAt
 
   items CycleItem[]
+  publishingJobs PublishingJob[]
 
   @@index([ownerId, status])
 }
@@ -583,6 +952,10 @@ model CycleItem {
    */
   mediaAssetId       String
   mediaAsset         MediaAsset      @relation("CycleItemMedia", fields: [mediaAssetId], references: [id], onDelete: Restrict)
+  selectedRenderOutputId String?
+  selectedRenderOwnerId String?
+  selectedRenderSourceMediaId String?
+  selectedRenderOutput MediaDerivative? @relation("CycleItemSelectedRenderOutput", fields: [selectedRenderOutputId, selectedRenderOwnerId, selectedRenderSourceMediaId], references: [id, ownerId, mediaAssetId], onDelete: SetNull, map: "CycleItem_selectedRenderOutput_fkey")
   sourceKind         SourceKind
   sourceCollectionId String?
   status             CycleItemStatus @default(upcoming)
@@ -623,6 +996,7 @@ model CycleItem {
   @@index([status, scheduledFor])
   @@index([cycleId, status, position])
   @@index([mediaAssetId, status])
+  @@index([selectedRenderOutputId])
 }
 
 model CaptionRevision {
@@ -670,25 +1044,72 @@ model ProcessingJob {
   errorMessage    String?
   createdAt       DateTime   @default(now())
   finishedAt      DateTime?
+  /// SHA-256 of the render settings. Null until a render job uses this row.
+  settingsHash       String?
+  /// Edit settings and related media ids. No filesystem path or storage key.
+  payload            Json?
+  /// Id reserved for the new render file before FFmpeg starts. The original file is never this id.
+  pendingOutputId    String?
+  /// Set only after a MediaDerivative row exists for this render.
+  outputDerivativeId String?
+  /// Random claim token. A worker may finish a job only when this still matches.
+  lockToken          String?
+  /// Pid of the FFmpeg child spawned by the worker that holds lockToken. Not used to kill another process.
+  ffmpegPid          Int?
+  ffmpegStartedAt    DateTime?
 
   @@index([status, createdAt])
+}
+
+/// Local development copies of confirmation messages. The body is ciphertext, never a raw link.
+model LocalEmailMessage {
+  id             String   @id
+  toAddress      String
+  subject        String
+  bodyCiphertext String
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  @@index([toAddress, createdAt])
+  @@index([expiresAt])
 }
 
 /**
  * One row per attempt to publish. Ambiguous results are kept for human review, never auto-retried.
  */
 model PublishingJob {
-  id             String         @id @default(cuid())
-  cycleItemId    String
-  cycleItem      CycleItem      @relation(fields: [cycleItemId], references: [id], onDelete: Cascade)
-  attemptNumber  Int
-  idempotencyKey String         @unique
-  outcome        PublishOutcome @default(in_progress)
-  errorMessage   String?
-  startedAt      DateTime       @default(now())
-  finishedAt     DateTime?
+  id               String             @id @default(cuid())
+  ownerId          String
+  owner            User               @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  cycleId          String
+  cycle            PublishingCycle    @relation(fields: [cycleId], references: [id], onDelete: Restrict)
+  cycleItemId      String
+  cycleItem        CycleItem          @relation(fields: [cycleItemId], references: [id], onDelete: Cascade)
+  socialAccountId  String
+  socialAccount    SocialAccount      @relation(fields: [socialAccountId], references: [id], onDelete: Restrict)
+  attemptNumber    Int
+  idempotencyKey   String             @unique
+  stage            PublishingJobStage @default(queued)
+  outcome          PublishOutcome     @default(in_progress)
+  workerId         String?
+  lockToken        String?
+  leaseExpiresAt   DateTime?
+  containerId      String?
+  /// Set only after a confirmed publish transition; database CHECK is in the hand-written migration.
+  instagramMediaId String?
+  /// Fixed, allowlisted category and generic summary only. Never raw provider response text.
+  errorCategory    String?
+  errorDetails     String?
+  errorMessage     String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  startedAt        DateTime           @default(now())
+  finishedAt       DateTime?
 
   @@unique([cycleItemId, attemptNumber])
+  @@index([stage, leaseExpiresAt])
+  @@index([socialAccountId, stage, createdAt])
+  // SQL-only partial unique index in the hand-written migration: one active attempt per account.
 }
 
 // ============================ Notifications, usage, audit ============================

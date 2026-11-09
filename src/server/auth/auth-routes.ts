@@ -2,12 +2,15 @@
 // All are POST-only form posts that redirect with short whitelisted codes, never echoing user text.
 // Protections: same-origin check (also covers login CSRF), size caps, no-store, HttpOnly + SameSite=Lax cookies (+ Secure on https),
 // and identical answers for unknown/wrong accounts (see AuthService). Real email delivery does not exist.
+import { performance } from "node:perf_hooks";
 import { AppError } from "../errors.ts";
 import { buildFlashLocation, type FlashErrorCode } from "../flash.ts";
 import { readUrlEncoded, redirectResponse, type FormFields } from "../form-routes.ts";
 import { checkSameOrigin } from "../http.ts";
 import { getRuntime, type Runtime } from "../runtime.ts";
+import { clientIpForRateLimit } from "./client-ip.ts";
 import { buildClearedSessionCookie, buildSessionCookie, readSessionToken } from "./tokens.ts";
+import { safeCustomerReturnPath } from "./return-path.ts";
 
 type RuntimeProvider = () => Runtime;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,100}$/;
@@ -23,6 +26,7 @@ function respond(location: string, extraHeaders: Record<string, string> = {}): R
   return response;
 }
 const withToken = (location: string, token: string | null): string => (token && TOKEN_PATTERN.test(token) ? `${location}&token=${token}` : location);
+const withCustomerReturnPath = (location: string, returnTo: string): string => returnTo === "/dashboard" ? location : `${location}&returnTo=${encodeURIComponent(returnTo)}`;
 
 async function authRoute(request: Request, runtime: RuntimeProvider, work: (auth: NonNullable<Runtime["auth"]>, fields: FormFields, rt: Runtime) => Promise<Response>, failurePath: string): Promise<Response> {
   if (checkSameOrigin(request)) return new Response("Cross-site requests are not allowed.", { status: 403, headers: { "Cache-Control": "no-store" } });
@@ -38,18 +42,72 @@ async function authRoute(request: Request, runtime: RuntimeProvider, work: (auth
 
 export const registerRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
   authRoute(request, runtime, async (auth, f, rt) => {
+    const returnTo = safeCustomerReturnPath(f.get("returnTo"));
     const result = await auth.register({ email: f.get("email"), password: f.get("password"), name: f.get("name") });
-    if (!result.ok) { const code: FlashErrorCode = result.problems.some((p) => /email/i.test(p) && /valid/i.test(p)) ? "invalid_email" : "weak_password"; return respond(buildFlashLocation("/register", "error", code)); }
+    if (!result.ok) { const code: FlashErrorCode = result.problems.some((p) => /email/i.test(p) && /valid/i.test(p)) ? "invalid_email" : "weak_password"; return respond(withCustomerReturnPath(buildFlashLocation("/register", "error", code), returnTo)); }
     const notice = rt.emailDelivery === "unavailable" ? "registered_no_email" : "registered";
-    return respond(buildFlashLocation("/login", "notice", notice));   // the same answer whether or not the email already existed
+    return respond(withCustomerReturnPath(buildFlashLocation("/login", "notice", notice), returnTo));   // the same answer whether or not the email already existed
   }, "/register");
 
 export const loginRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
   authRoute(request, runtime, async (auth, f, rt) => {
-    const result = await auth.login({ email: f.get("email"), password: f.get("password") });
-    if (!result.ok) return respond(buildFlashLocation("/login", "error", result.code));
-    return respond("/dashboard", { "Set-Cookie": buildSessionCookie(result.sessionToken, result.expiresAt, rt.now(), useSecureCookies(request)) });
+    const returnTo = safeCustomerReturnPath(f.get("returnTo"));
+    const result = await auth.login({ email: f.get("email"), password: f.get("password"), ip: clientIpForRateLimit(request) });
+    if (!result.ok) return respond(withCustomerReturnPath(buildFlashLocation("/login", "error", result.code), returnTo));
+    return respond(returnTo, { "Set-Cookie": buildSessionCookie(result.sessionToken, result.expiresAt, rt.now(), useSecureCookies(request)) });
   }, "/login");
+
+/** Private admin login. The normal login route remains unchanged; a session cookie is issued only after a fresh role lookup. */
+export const adminLoginRoute = (runtime: RuntimeProvider = getRuntime) => async (request: Request): Promise<Response> => {
+  const startedAt = performance.now();
+  const failure = async (): Promise<Response> => {
+    // Equalize expected invalid-credential and non-admin rejection work under normal service latency.
+    // This is a minimum floor, not a constant-time guarantee for unusually slow infrastructure.
+    const remainingMs = 250 - (performance.now() - startedAt);
+    if (remainingMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+    return respond(buildFlashLocation("/admin/login", "error", "admin_login_failed"));
+  };
+  if (request.method.toUpperCase() !== "POST") return new Response(null, { status: 405, headers: { "Cache-Control": "no-store", Allow: "POST" } });
+  const origin = request.headers.get("origin");
+  let exactOrigin = false;
+  if (origin) {
+    try { exactOrigin = new URL(origin).origin === new URL(request.url).origin; } catch { exactOrigin = false; }
+  }
+  if (!exactOrigin || checkSameOrigin(request)) {
+    return new Response("Cross-site requests are not allowed.", { status: 403, headers: { "Cache-Control": "no-store" } });
+  }
+
+  const rt = runtime();
+  if (!rt.auth) return failure();
+  let temporarySessionToken: string | null = null;
+  try {
+    const fields = await readUrlEncoded(request);
+    const emails = fields.getAll("email");
+    const passwords = fields.getAll("password");
+    if (emails.length !== 1 || passwords.length !== 1 || !emails[0]?.trim() || emails[0].length > 320 || !passwords[0] || passwords[0].length > 1024) return failure();
+
+    const result = await rt.auth.login({ email: emails[0], password: passwords[0], ip: clientIpForRateLimit(request) });
+    if (!result.ok) return failure();
+    temporarySessionToken = result.sessionToken;
+
+    const principal = await rt.auth.getSessionPrincipal(temporarySessionToken);
+    if (!principal || principal.userId !== result.userId || principal.role !== "admin") {
+      await rt.auth.logout(temporarySessionToken);
+      temporarySessionToken = null;
+      return failure();
+    }
+
+    const cookie = buildSessionCookie(temporarySessionToken, result.expiresAt, rt.now(), useSecureCookies(request));
+    temporarySessionToken = null;
+    return respond("/admin", { "Set-Cookie": cookie });
+  } catch {
+    // If role lookup or another step fails after authentication created a session, revoke it without logging its token.
+    if (temporarySessionToken) {
+      try { await rt.auth.logout(temporarySessionToken); } catch { /* Never issue the cookie; infrastructure can be retried safely. */ }
+    }
+    return failure();
+  }
+};
 
 export const logoutRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
   authRoute(request, runtime, async (auth) => {

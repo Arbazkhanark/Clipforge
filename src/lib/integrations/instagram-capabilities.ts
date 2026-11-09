@@ -9,7 +9,8 @@
 //   Oauth Authorize (page updated Jul 17, 2025):
 //     https://developers.facebook.com/docs/instagram-platform/reference/oauth-authorize
 //
-// These constants do not call Instagram. Login can be configured; no publishing worker runs.
+// These constants do not call Instagram. The publishing worker makes provider requests only when
+// explicitly enabled and configured; unit tests use mocks and do not verify Meta behavior.
 
 export const INSTAGRAM_VERIFIED = {
   readOn: "2026-11-06",
@@ -17,10 +18,8 @@ export const INSTAGRAM_VERIFIED = {
   accountTypes: "Instagram professional accounts",
   /** Flow: POST /{ig-id}/media (container) -> GET /{container-id}?fields=status_code -> POST /{ig-id}/media_publish. */
   flow: ["create_container", "poll_status", "media_publish"] as const,
-  /** Content Publishing, updated Oct 20, 2026: "100 API-published posts within a 24-hour moving period", enforced at media_publish. */
-  publishLimitPer24h: 100,
-  /** The same page also says "50 published posts within a 24-hour period" in the carousel section: the docs disagree. */
-  publishLimitDocConflict: "A carousel section of the same guide, still present on Oct 20, 2026, mentions 50 per 24h. Ask GET /{ig-id}/content_publishing_limit at runtime.",
+  /** Published docs disagree; the worker queries the account quota endpoint before every publish. */
+  publishLimitDocConflict: "Published documentation differs (including 25, 50 and 100 per 24h). Ask GET /{ig-id}/content_publishing_limit at runtime.",
   /**
    * IG User Media, updated Sep 28, 2026. The page says 300MB and does not define 1000 or 1024.
    * ClipForge uses 300 × 1024 × 1024 so a file is not blocked on a tighter reading of "MB".
@@ -57,10 +56,20 @@ export const INSTAGRAM_VERIFIED = {
   pagePublishingAuthorizationMayBeRequired: true,
 } as const;
 
+/**
+ * Non-authoritative local schedule hint only. Meta-published figures conflict (25/50/100).
+ * This must never authorize or block a live provider publish; PublishingWorker checks the account endpoint.
+ */
+export const INSTAGRAM_SCHEDULE_ESTIMATE = { publishLimitPer24h: 100 } as const;
+
+/** The only scopes this Instagram Login publishing flow requests and treats as verified. */
+export const INSTAGRAM_REQUIRED_SCOPES = INSTAGRAM_VERIFIED.loginPaths.instagramLogin.permissions;
+
 /** Things we have NOT confirmed from an official source. Do not rely on any of these. */
 export const INSTAGRAM_UNVERIFIED: readonly string[] = [
   "Maximum caption length and hashtag count (our 2,200 / 30 are from memory).",
-  "Whether cover_url or thumb_offset wins when both are sent. JPEG and an 8MB cover maximum are documented.",
+  "ClipForge has no persisted thumb_offset setting; only saved JPEG cover images are currently transmitted.",
+  "Live cover delivery and the account's publishing-limit endpoint response/permissions have not been verified against Meta.",
   "The publishing guide says professional accounts. It does not list the account_type values BUSINESS and MEDIA_CREATOR.",
   "App Review / Advanced Access requirements before non-test users can connect.",
   "Which Graph API version to use (examples in the docs show more than one version).",
@@ -80,7 +89,7 @@ export interface QuotaViolation { windowEnd: Date; count: number; limit: number;
  * Finds moments where MORE than `limit` posts would fall inside one rolling 24-hour window.
  * Pass planned times and (optionally) times of posts already published recently.
  */
-export function findPublishQuotaViolations(publishTimes: Date[], limit: number = INSTAGRAM_VERIFIED.publishLimitPer24h): QuotaViolation[] {
+export function findPublishQuotaViolations(publishTimes: Date[], limit: number = INSTAGRAM_SCHEDULE_ESTIMATE.publishLimitPer24h): QuotaViolation[] {
   const DAY_MS = 24 * 60 * 60 * 1000;
   const sorted = publishTimes.map((d) => d.getTime()).sort((a, b) => a - b);
   const violations: QuotaViolation[] = [];

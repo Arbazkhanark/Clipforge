@@ -1,4 +1,4 @@
-// Database-mode collections, media metadata, and cycles. Neon cases run only when DATABASE_URL is set.
+// Database-mode collections, media metadata, and cycles. Persistence cases run only for the isolated local database.
 // A refused database is reported and is not replaced with the in-memory repository.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,8 +13,9 @@ import { getCollectionDetail, getCycleDetail, getMediaDetail } from "../src/serv
 import type { RequestContext } from "../src/server/context.ts";
 import { FakePrismaClient } from "./helpers/fake-prisma.ts";
 import { makeItem, makeMedia } from "./helpers.ts";
+import { isolatedDatabaseUrl } from "./helpers/isolated-database.ts";
 
-const databaseUrlAtStart = process.env["DATABASE_URL"];
+const databaseUrlAtStart = isolatedDatabaseUrl();
 const hasDatabase = Boolean(databaseUrlAtStart);
 
 test("a database content failure is reported and does not fall back to memory", async () => {

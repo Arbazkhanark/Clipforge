@@ -15,7 +15,7 @@ export function PreflightPanel({ report }: { report: PreflightReport }) {
           </li>
         ))}
       </ul>
-      <p className="muted">We check Instagram's documented limit of 100 API-published posts per 24 hours (Content Publishing guide, updated Oct 20, 2026, read Nov 6, 2026). The same guide's carousel section still says 50. The live content_publishing_limit is not called. When a file has a duration or size, it is also checked against the documented Reel limits of 3 seconds to 15 minutes and 300MB.</p>
+      <p className="muted">This screen can only estimate publishing volume; published quota figures differ. The worker checks Instagram's account-specific content_publishing_limit immediately before each publish and blocks if the quota is full or unavailable. Reel media checks use the documented duration and size limits where source metadata is available.</p>
     </section>
   );
 }

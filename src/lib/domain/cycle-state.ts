@@ -155,6 +155,7 @@ export function recoverStaleLocks(items: CycleItem[], now: Date): CycleItem[] {
 }
 
 /** Stable key sent with each publish attempt so a retry cannot create a second post. */
-export function buildPublishIdempotencyKey(item: CycleItem): string {
-  return `publish:${item.cycleId}:${item.id}`;
+export function buildPublishIdempotencyKey(item: Pick<CycleItem, "cycleId" | "id">, attemptNumber = 1): string {
+  if (!Number.isSafeInteger(attemptNumber) || attemptNumber < 1) throw new Error("Publishing attempt number must be a positive integer.");
+  return `publish:${item.cycleId}:${item.id}:${attemptNumber}`;
 }

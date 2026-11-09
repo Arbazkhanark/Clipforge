@@ -56,7 +56,9 @@ export async function renderVideo(args: {
   if (code !== 0) return { succeeded: false, outputValidated: false, problems: [`ffmpeg exited with code ${code}: ${stderr.slice(-300)}`], processingSeconds, outputProbe: null };
 
   const outputProbe = await probeVideo(args.outputPath);
-  const check = validateRenderOutput(outputProbe, { width: plan.canvas.width, height: plan.canvas.height, durationSeconds: source.durationSeconds });
+  const trimStart = args.settings.trim?.startSeconds ?? 0;
+  const trimEnd = args.settings.trim?.endSeconds ?? source.durationSeconds;
+  const check = validateRenderOutput(outputProbe, { width: plan.canvas.width, height: plan.canvas.height, durationSeconds: trimEnd - trimStart });
   if (check.valid) args.onProgress?.(100);
   return { succeeded: true, outputValidated: check.valid, problems: check.problems, processingSeconds, outputProbe };
 }

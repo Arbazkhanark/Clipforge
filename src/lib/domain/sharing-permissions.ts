@@ -2,6 +2,7 @@
 // The server loads rows, calls these functions, and enforces the answer.
 // RULE: permission must be re-checked at every sensitive moment (add, process, publish, import).
 import { createHash, randomBytes } from "node:crypto";
+import { CAPABILITIES } from "./types.ts";
 import type {
   Capability, CollectionPermissionGrant, Decision, MediaAsset, UserId, VideoCollection, CycleItem,
 } from "./types.ts";
@@ -139,6 +140,26 @@ export interface ShareLinkRecord {
   tokenHash: string;
   revoked: boolean;
   expiresAt: Date | null;
+}
+
+export function validateShareLinkSettings(args: {
+  capabilities: Capability[]; expiresAt: Date | null; now: Date;
+  collectionSharing: "none" | "basic" | "advanced"; expiringGrants: boolean;
+}): Decision {
+  const { capabilities, expiresAt, now, collectionSharing, expiringGrants } = args;
+  if (collectionSharing === "none") return deny("Collection sharing is not included in this plan.");
+  const selected = [...new Set(capabilities)];
+  if (!selected.includes("view")) return deny("A share link must include view permission.");
+  // Cycle items need a durable permission source for later preflight and publishing checks.
+  // CollectionShareLink is not linked to cycle items, so bearer links cannot safely grant this.
+  if (selected.includes("use_in_cycle")) return deny("Publishing-cycle use requires an owner-approved direct grant.");
+  if (selected.includes("manage") || selected.some((capability) => !(CAPABILITIES as readonly string[]).includes(capability))) {
+    return deny("Share links cannot grant management permission or unknown capabilities.");
+  }
+  if (expiresAt !== null && (!expiringGrants || expiresAt <= now)) {
+    return deny(!expiringGrants ? "Expiring share links are not included in this plan." : "The expiry date must be in the future.");
+  }
+  return allow("Share link permissions are valid.");
 }
 
 /** Create a random, unguessable token. Show it to the owner ONCE; store only its hash. */

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runPreflight, type PreflightInput } from "../src/lib/domain/preflight.ts";
+import { runPreflight, type PreflightInput, type PublishingMediaAccessState } from "../src/lib/domain/preflight.ts";
 import { NOW, makeItem, makeCycle, makeMedia, makeCollection, makeGrant } from "./helpers.ts";
 import { canKeepUsingSourceForCycleItem } from "../src/lib/domain/sharing-permissions.ts";
 
@@ -17,10 +17,54 @@ test("a healthy cycle is ready to start", () => {
 });
 
 test("account problems block", () => {
-  for (const status of [null, "token_expired", "revoked", "disconnected"] as const) {
+  for (const status of [null, "token_expired", "revoked", "disconnected", "unexpected"] as const) {
     const report = runPreflight(baseInput({ socialAccountStatus: status }));
     assert.equal(levelOf(report, "account"), "blocked"); assert.equal(report.canStart, false);
   }
+});
+
+test("Instagram preflight fails closed for unsupported account types and malformed or missing scopes", () => {
+  const base = {
+    platform: "instagram", now: NOW, hasStoredToken: true, accountType: "BUSINESS", grantedScopes: ["instagram_business_basic", "instagram_business_content_publish"],
+    tokenExpiresAt: new Date("2026-08-01T00:00:00Z"), mediaByItemId: { a: { kind: "video" as const, mimeType: "video/mp4" } },
+    consecutiveDefiniteFailures: 0, repeatBehavior: "never" as const,
+  };
+  for (const accountType of ["PERSONAL", "UNKNOWN", null, undefined, "BUSINESS_CREATOR", "business"] as const) {
+    const report = runPreflight(baseInput({ instagram: { ...base, accountType } }));
+    assert.equal(levelOf(report, "instagram_account_type"), "blocked", `account type ${String(accountType)} must be blocked`);
+    assert.equal(report.canStart, false);
+  }
+  for (const grantedScopes of [[], ["instagram_business_basic"], ["instagram_business_basic", "instagram_business_content_publish", "bad!scope"], ["instagram_business_basic", 7]] as unknown as string[][]) {
+    const report = runPreflight(baseInput({ instagram: { ...base, grantedScopes } }));
+    assert.equal(levelOf(report, "instagram_permissions"), "blocked");
+    assert.equal(report.canStart, false);
+  }
+  const supported = runPreflight(baseInput({ instagram: { ...base, accountType: "MEDIA_CREATOR" } }));
+  assert.equal(levelOf(supported, "instagram_account_type"), "ready");
+  assert.equal(levelOf(supported, "instagram_permissions"), "ready");
+});
+
+test("publishing media preflight distinguishes missing, ineligible, unconfigured, expired, and mock-ready access", () => {
+  const items = [makeItem({ id: "a", captionText: "Hello" }), makeItem({ id: "b", captionText: "Hi", mediaAssetId: "m2" })];
+  const account = {
+    platform: "instagram", now: NOW, hasStoredToken: true, accountType: "BUSINESS", grantedScopes: ["instagram_business_basic", "instagram_business_content_publish"],
+    tokenExpiresAt: new Date("2026-08-01T00:00:00Z"), mediaByItemId: { a: { kind: "video" as const, mimeType: "video/mp4" }, b: { kind: "video" as const, mimeType: "video/mp4" } },
+    temporaryMediaAccessConfigured: true, consecutiveDefiniteFailures: 0, repeatBehavior: "never" as const,
+  };
+  const input = (state: PublishingMediaAccessState) => baseInput({ items, sourceAccessByItemId: okAccess(items), instagram: { ...account, temporaryMediaAccessByItemId: { a: state, b: state } } });
+  const states: [PublishingMediaAccessState, string][] = [
+    [{ status: "media_not_available" }, "publishing_media_unavailable"],
+    [{ status: "media_not_eligible" }, "publishing_media_ineligible"],
+    [{ status: "temporary_access_not_configured" }, "temporary_access_not_configured"],
+    [{ status: "temporary_access_expired" }, "temporary_access_expired"],
+  ];
+  for (const [state, id] of states) assert.equal(levelOf(runPreflight(input(state)), id), "blocked");
+  const mock = runPreflight(input({ status: "temporary_media_access_ready", publiclyReachable: false }));
+  assert.equal(levelOf(mock, "temporary_media_access_ready"), "ready");
+  assert.equal(levelOf(mock, "instagram_public_url"), "blocked");
+  assert.equal(mock.canStart, false);
+  const reachable = runPreflight(baseInput({ items, sourceAccessByItemId: okAccess(items), instagram: { ...account, temporaryMediaAccessByItemId: { a: { status: "temporary_media_access_ready", publiclyReachable: true }, b: { status: "temporary_media_access_ready", publiclyReachable: true } } } }));
+  assert.equal(levelOf(reachable, "instagram_public_url"), "ready");
 });
 
 test("empty cycle blocks; unconfirmed final review needs action", () => {
@@ -72,13 +116,13 @@ test("overall level is the worst check", () => {
   assert.equal(report.overall, "blocked");
 });
 
-test("Instagram's documented rolling 24h quota is enforced before start; recent posts count too", () => {
+test("rolling quota estimate is advisory and live account quota remains a worker gate", () => {
   const at = (m: number) => new Date(Date.UTC(2026, 5, 1) + m * 60_000);
   const items = Array.from({ length: 6 }, (_, i) => makeItem({ id: `i${i}`, mediaAssetId: `m${i}`, captionText: "x", status: "scheduled", scheduledFor: at(i * 10) }));
   const input = baseInput({ items, sourceAccessByItemId: okAccess(items) });
   assert.equal(levelOf(runPreflight(input), "platform_quota"), undefined);
-  assert.equal(levelOf(runPreflight({ ...input, publishLimitPer24h: 5 }), "platform_quota"), "action_required");
+  assert.equal(levelOf(runPreflight({ ...input, publishLimitPer24h: 5 }), "platform_quota"), "recommendation");
   const recent = Array.from({ length: 95 }, (_, i) => at(-600 + i));
   const report = runPreflight({ ...input, recentPublishTimes: recent });
-  assert.equal(levelOf(report, "platform_quota"), "action_required"); assert.equal(report.canStart, false);
+  assert.equal(levelOf(report, "platform_quota"), "recommendation"); assert.equal(report.canStart, true);
 });

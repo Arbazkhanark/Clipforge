@@ -184,9 +184,21 @@ export class AuthService {
     if (!token) return null;
     const { repo, config } = this.deps; const now = this.deps.now();
     const session = await repo.getSessionByTokenHash(hashToken(token));
-    if (!session || session.revokedAt || session.expiresAt <= now || now.getTime() - session.lastUsedAt.getTime() > config.sessionIdleMs) return null;
+    if (!session) return null;
+    if (session.revokedAt || session.expiresAt <= now || now.getTime() - session.lastUsedAt.getTime() > config.sessionIdleMs) {
+      if (!session.revokedAt) await repo.revokeSession(session.id, now);
+      return null;
+    }
     if (now.getTime() - session.lastUsedAt.getTime() > config.touchEveryMs) await repo.touchSession(session.id, now);
     return session.userId;
+  }
+
+  /** Resolves the current persisted role only after validating this session on this request. */
+  async getSessionPrincipal(token: string | null): Promise<{ userId: string; role: UserRecord["role"] } | null> {
+    const userId = await this.getSessionUserId(token);
+    if (!userId) return null;
+    const user = await this.deps.repo.getUserById(userId);
+    return user ? { userId: user.id, role: user.role } : null;
   }
 
   async logout(token: string | null): Promise<void> {
@@ -214,15 +226,13 @@ export class AuthService {
     // The policy needs the email, which we only know after consuming; use a neutral check first, then re-check below.
     const early = checkPasswordPolicy(password, "");
     if (early.length > 0) return { ok: false, problems: early };
-    const record = await repo.consumeAuthToken("password_reset", hashToken(token), this.deps.now());
-    if (!record) return { ok: false, problems: ["This reset link is not valid or has expired."] };
-    const user = await repo.getUserById(record.userId);
-    if (!user) return { ok: false, problems: ["This reset link is not valid or has expired."] };
-    const finalCheck = checkPasswordPolicy(password, user.email);
-    if (finalCheck.length > 0) return { ok: false, problems: finalCheck };
-    await repo.setPasswordHash(user.id, await hashPassword(password, config.scrypt));
-    await repo.markEmailVerified(user.id, this.deps.now()); // they proved they control the mailbox
-    await repo.revokeAllSessionsForUser(user.id, this.deps.now()); // anyone logged in with the old password is signed out
+    const now = this.deps.now();
+    const outcome = await repo.completePasswordReset({
+      tokenHash: hashToken(token), now, passwordHash: await hashPassword(password, config.scrypt),
+      passwordProblems: (email) => checkPasswordPolicy(password, email),
+    });
+    if (outcome.status === "rejected") return { ok: false, problems: outcome.problems };
+    if (outcome.status === "invalid") return { ok: false, problems: ["This reset link is not valid or has expired."] };
     return { ok: true };
   }
 }

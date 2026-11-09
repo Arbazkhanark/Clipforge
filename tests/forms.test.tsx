@@ -5,14 +5,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
-import { DEMO_CYCLE_ID, DEMO_USER_ID, seedDemoData } from "../src/server/demo-data.ts";
+import { DEMO_CYCLE_ID, DEMO_OTHER_USER_ID, DEMO_USER_ID, seedDemoData } from "../src/server/demo-data.ts";
 import { setRuntimeForTests, type Runtime } from "../src/server/runtime.ts";
 import type { MediaServices } from "../src/server/context.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
 import { LocalDiskMediaStorage } from "../src/server/storage/local-disk-storage.ts";
 import { detectProbe } from "../src/server/storage/media-inspection.ts";
 import { buildFlashLocation, parseFlash, FLASH_NOTICES, FLASH_ERRORS } from "../src/server/flash.ts";
-import { captionsForm, coversForm, createCycleForm, mixForm, startCycleForm, unmixForm } from "../src/server/form-handlers.ts";
+import { captionsForm, coversForm, createCycleForm, cycleStatusForm, collectionGrantForm, collectionRevokeGrantForm, collectionAccessRequestForm, collectionAccessRequestDecisionForm, mixForm, startCycleForm, unmixForm } from "../src/server/form-handlers.ts";
 import { uploadRoute } from "../src/server/upload-route.ts";
 import MediaPage from "../app/(app)/media/page.tsx";
 import CyclesPage from "../app/(app)/cycles/page.tsx";
@@ -116,13 +116,74 @@ test("unmix + mix forms: remove keeps history; mixing uses shared videos in plac
   assert.equal(location(broken), "/collections/demo-shared-col-1?error=validation_failed");
 });
 
-test("start form: needs the confirmation; first start wins, a repeat is a conflict; nothing is published", async () => {
+test("start form: requires confirmation and publishing prerequisites; no cycle starts without them", async () => {
   assert.equal(location(await startCycleForm(formPost("/api/forms/cycle-start", [["cycleId", DEMO_CYCLE_ID]]))), `/cycles/${DEMO_CYCLE_ID}?error=preflight_failed`);
   assert.equal(repo.cycles.get(DEMO_CYCLE_ID)!.status, "draft");
-  assert.equal(location(await startCycleForm(formPost("/api/forms/cycle-start", [["cycleId", DEMO_CYCLE_ID], ["confirmFinalReview", "yes"]]))), `/cycles/${DEMO_CYCLE_ID}?notice=cycle_started`);
-  assert.equal(repo.cycles.get(DEMO_CYCLE_ID)!.status, "running");
-  assert.equal(location(await startCycleForm(formPost("/api/forms/cycle-start", [["cycleId", DEMO_CYCLE_ID], ["confirmFinalReview", "yes"]]))), `/cycles/${DEMO_CYCLE_ID}?error=conflict`);
+  assert.equal(location(await startCycleForm(formPost("/api/forms/cycle-start", [["cycleId", DEMO_CYCLE_ID], ["confirmFinalReview", "yes"]]))), `/cycles/${DEMO_CYCLE_ID}?error=preflight_failed`);
+  assert.equal(repo.cycles.get(DEMO_CYCLE_ID)!.status, "draft");
   assert.ok([...repo.items.values()].every((i) => i.status !== "published"));
+});
+
+test("campaign status form uses the owner-checked pause/resume route and fixed flash messages", async () => {
+  repo.cycles.set(DEMO_CYCLE_ID, { ...repo.cycles.get(DEMO_CYCLE_ID)!, status: "running" });
+  assert.equal(location(await cycleStatusForm(formPost("/api/forms/cycle-status", [["cycleId", DEMO_CYCLE_ID], ["action", "pause"]]))), "/dashboard?notice=cycle_paused");
+  assert.equal(repo.cycles.get(DEMO_CYCLE_ID)!.status, "paused");
+  assert.equal(location(await cycleStatusForm(formPost("/api/forms/cycle-status", [["cycleId", DEMO_CYCLE_ID], ["action", "resume"]]))), "/dashboard?notice=cycle_resumed");
+  assert.equal(repo.cycles.get(DEMO_CYCLE_ID)!.status, "running");
+});
+
+test("owner sharing forms reuse the existing grant policies, CSRF protection, revocation and audit writes", async () => {
+  const created = await collectionGrantForm(formPost("/api/forms/sharing-grant", [
+    ["collectionId", "demo-col-1"], ["granteeId", DEMO_OTHER_USER_ID], ["capabilities", "view"], ["capabilities", "use_in_cycle"],
+  ]));
+  assert.equal(created.status, 303);
+  assert.equal(location(created), "/collections/demo-col-1?notice=sharing_grant_created");
+  assert.equal(repo.grants.some((grant) => grant.collectionId === "demo-col-1" && grant.granteeId === DEMO_OTHER_USER_ID && grant.capabilities.includes("use_in_cycle")), true);
+  assert.equal(repo.audit.filter((entry) => entry.action === "sharing.grant_created").length, 1);
+
+  const crossSite = await collectionGrantForm(formPost("/api/forms/sharing-grant", [
+    ["collectionId", "demo-col-1"], ["granteeId", "someone"], ["capabilities", "view"],
+  ], { origin: "https://evil.example" }));
+  assert.equal(crossSite.status, 403);
+  assert.equal(repo.grants.filter((grant) => grant.collectionId === "demo-col-1").length, 1);
+
+  const revoked = await collectionRevokeGrantForm(formPost("/api/forms/sharing-revoke", [["collectionId", "demo-col-1"], ["granteeId", DEMO_OTHER_USER_ID]]));
+  assert.equal(revoked.status, 303);
+  assert.equal(location(revoked), "/collections/demo-col-1?notice=sharing_grant_revoked");
+  assert.equal(repo.grants.find((grant) => grant.collectionId === "demo-col-1" && grant.granteeId === DEMO_OTHER_USER_ID)?.status, "revoked");
+  assert.equal(repo.audit.filter((entry) => entry.action === "sharing.grant_revoked").length, 1);
+});
+
+test("access-request forms are session-scoped, CSRF protected, and expose decisions only to the collection owner", async () => {
+  setRuntimeForTests(runtime(DEMO_OTHER_USER_ID));
+  const crossSite = await collectionAccessRequestForm(formPost("/api/forms/access-request", [
+    ["collectionId", "demo-col-1"], ["requestedCapabilities", "view"],
+  ], { origin: "https://evil.example" }));
+  assert.equal(crossSite.status, 403);
+  assert.equal(repo.collectionAccessRequests.size, 0);
+
+  const requested = await collectionAccessRequestForm(formPost("/api/forms/access-request", [
+    ["collectionId", "demo-col-1"], ["requestedCapabilities", "view"], ["requesterId", DEMO_USER_ID], ["ownerId", DEMO_USER_ID],
+  ]));
+  assert.equal(location(requested), "/collections?notice=access_request_created");
+  const row = [...repo.collectionAccessRequests.values()][0]!;
+  assert.equal(row.requesterId, DEMO_OTHER_USER_ID);
+  assert.deepEqual(row.requestedCapabilities, ["view"]);
+
+  const unauthorized = await collectionAccessRequestDecisionForm(formPost("/api/forms/access-request-decision", [
+    ["collectionId", row.collectionId], ["requestId", row.id], ["decision", "approved"],
+  ]));
+  assert.equal(location(unauthorized), `/collections/${row.collectionId}?error=not_found`);
+  assert.equal(repo.collectionAccessRequests.get(row.id)?.status, "pending");
+
+  setRuntimeForTests(runtime(DEMO_USER_ID));
+  const approved = await collectionAccessRequestDecisionForm(formPost("/api/forms/access-request-decision", [
+    ["collectionId", row.collectionId], ["requestId", row.id], ["decision", "approved"], ["requestedCapabilities", "manage"],
+  ]));
+  assert.equal(location(approved), `/collections/${row.collectionId}?notice=access_request_approved`);
+  assert.equal(repo.collectionAccessRequests.get(row.id)?.status, "approved");
+  assert.deepEqual(repo.grants.find((grant) => grant.collectionId === row.collectionId && grant.granteeId === DEMO_OTHER_USER_ID)?.capabilities, ["view"]);
+  assert.equal(repo.audit.filter((entry) => entry.action.startsWith("sharing.access_request_")).length, 2);
 });
 
 test("form route protections: cross-site refused, wrong content type, not signed in, someone else's cycle, oversized body", async () => {
@@ -227,19 +288,19 @@ test("media page: says where files go (memory vs local disk vs none), shows flas
   assert.ok(none.includes("Uploads are not available")); assert.ok(!none.includes('action="/api/forms/media-upload"'));
   repo.media.set("demo-media-1", { ...repo.media.get("demo-media-1")!, validation: "incomplete" });
   assert.ok(html(await MediaPage({})).includes("Not fully checked"));
-  const flash = html(await MediaPage({ searchParams: { notice: "upload_ok" } })); assert.ok(flash.includes('data-flash="notice"')); assert.ok(flash.includes("Upload complete"));
-  const evil = html(await MediaPage({ searchParams: { error: "<script>alert(1)</script>" } })); assert.ok(!evil.includes("<script>")); assert.ok(!evil.includes("data-flash"));
+  const flash = html(await MediaPage({ searchParams: Promise.resolve({ notice: "upload_ok" }) })); assert.ok(flash.includes('data-flash="notice"')); assert.ok(flash.includes("Upload complete"));
+  const evil = html(await MediaPage({ searchParams: Promise.resolve({ error: "<script>alert(1)</script>" }) })); assert.ok(!evil.includes("<script>")); assert.ok(!evil.includes("data-flash"));
 });
 
 test("cycles page: create form lists only your connected accounts (no external ids); explains when there are none", async () => {
-  const withAccount = html(await CyclesPage());
+  const withAccount = html(await CyclesPage({}));
   assert.ok(withAccount.includes('action="/api/forms/cycle-create"')); assert.ok(withAccount.includes("Connected account 1")); assert.ok(!withAccount.includes(">demo-account<")); // the internal id is only the option value, never visible text
   repo.socialAccounts.set("demo-account", { id: "demo-account", userId: DEMO_USER_ID, status: "token_expired" });
-  assert.ok(html(await CyclesPage()).includes("Live publishing is not configured"));
+  assert.ok(html(await CyclesPage({})).includes("Live publishing is not configured"));
 });
 
 test("cycle page: one form wraps the table and all actions; versions only for editable items; covers are images only; start needs readiness", async () => {
-  const page = html(await CyclePage({ params: { cycleId: DEMO_CYCLE_ID } }));
+  const page = html(await CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }) }));
   const formHtml = page.slice(page.indexOf('<form id="cycle-items-form"'), page.indexOf("</form>", page.indexOf('<form id="cycle-items-form"')));
   for (const part of ['name="cycleId"', "<table", 'name="itemIds"', "<textarea", 'name="scope"', "Apply caption", "Save cover", "Remove ticked videos"]) assert.ok(formHtml.includes(part), part);
   assert.ok(/formAction="\/api\/forms\/covers"/i.test(formHtml)); assert.ok(/formAction="\/api\/forms\/cycle-unmix"/i.test(formHtml)); assert.ok(/formAction="\/api\/forms\/captions"/i.test(formHtml));
@@ -253,23 +314,23 @@ test("cycle page: one form wraps the table and all actions; versions only for ed
   assert.ok(page.includes("eligible, unpublished"));
   // Blocked cycle: start button disabled.
   repo.grants.find((g) => g.collectionId === "demo-shared-col-1")!.status = "revoked";
-  assert.ok(/<button type="submit" disabled="">Start cycle/.test(html(await CyclePage({ params: { cycleId: DEMO_CYCLE_ID } }))));
+  assert.ok(/<button type="submit" disabled="">Start cycle/.test(html(await CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }) }))));
   // Ended cycles: no editing form at all.
   repo.cycles.set(DEMO_CYCLE_ID, { ...repo.cycles.get(DEMO_CYCLE_ID)!, status: "stopped" });
-  const ended = html(await CyclePage({ params: { cycleId: DEMO_CYCLE_ID } })); assert.ok(!ended.includes("cycle-items-form")); assert.ok(!ended.includes("cycle-start"));
+  const ended = html(await CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }) })); assert.ok(!ended.includes("cycle-items-form")); assert.ok(!ended.includes("cycle-start"));
 });
 
 test("collection page: the add-to-cycle form appears only where use is permitted, lists your open cycles, and posts 'collection|video'", async () => {
-  const allowed = html(await CollectionPage({ params: { collectionId: "demo-shared-col-1" } }));
+  const allowed = html(await CollectionPage({ params: Promise.resolve({ collectionId: "demo-shared-col-1" }) }));
   assert.ok(allowed.includes('action="/api/forms/cycle-mix"')); assert.ok(allowed.includes('value="demo-shared-col-1|demo-shared-1"')); assert.ok(allowed.includes("does not copy them to your storage"));
   assert.ok(allowed.includes("Sample cycle (nothing is published)"));
-  assert.ok(!html(await CollectionPage({ params: { collectionId: "demo-shared-col-2" } })).includes("cycle-mix"));      // view-only share
-  assert.ok(html(await CollectionPage({ params: { collectionId: "demo-col-1" } })).includes("cycle-mix"));              // owner
-  repo.cycles.clear(); assert.ok(html(await CollectionPage({ params: { collectionId: "demo-col-1" } })).includes("Create a publishing cycle"));
+  assert.ok(!html(await CollectionPage({ params: Promise.resolve({ collectionId: "demo-shared-col-2" }) })).includes("cycle-mix"));      // view-only share
+  assert.ok(html(await CollectionPage({ params: Promise.resolve({ collectionId: "demo-col-1" }) })).includes("cycle-mix"));              // owner
+  repo.cycles.clear(); assert.ok(html(await CollectionPage({ params: Promise.resolve({ collectionId: "demo-col-1" }) })).includes("Create a publishing cycle"));
 });
 
 test("END TO END (no browser): read the rendered caption form's hidden fields, 'fill it in', post it to its action, see the change", async () => {
-  const page = html(await CyclePage({ params: { cycleId: DEMO_CYCLE_ID } }));
+  const page = html(await CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }) }));
   const formHtml = page.slice(page.indexOf('<form id="cycle-items-form"'));
   const action = /<form id="cycle-items-form"[^>]*\saction="([^"]+)"/.exec(formHtml)![1]!; // attribute order is not significant
   const hidden = [...formHtml.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"/g)].map((m): [string, string] => [m[1]!, m[2]!]);
@@ -277,6 +338,6 @@ test("END TO END (no browser): read the rendered caption form's hidden fields, '
   const response = await captionsForm(formPost(action, [...hidden, ["scope", "selected"], ["itemIds", "demo-item-3"], ["caption", "Typed into the real form"]]));
   assert.equal(location(response), `/cycles/${DEMO_CYCLE_ID}?notice=captions_applied&updated=1&skipped=0&conflicts=0&confirm=0`);
   assert.equal(repo.items.get("demo-item-3")!.captionText, "Typed into the real form");
-  const after = html(await CyclePage({ params: { cycleId: DEMO_CYCLE_ID }, searchParams: { notice: "captions_applied", updated: "1" } }));
+  const after = html(await CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }), searchParams: Promise.resolve({ notice: "captions_applied", updated: "1" }) }));
   assert.ok(after.includes("Typed into the real form")); assert.ok(after.includes("Caption update finished. (1 updated)"));
 });

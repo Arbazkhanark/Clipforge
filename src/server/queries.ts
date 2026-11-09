@@ -5,19 +5,21 @@
 import { getPlan, type PlanId } from "../lib/billing/catalog.ts";
 import { describeUsageReset, monthStartUtc } from "../lib/domain/usage-accounting.ts";
 import { compareMedia, mediaMatchesSearch } from "../lib/domain/media-list.ts";
-import { getCollectionCapabilities } from "../lib/domain/sharing-permissions.ts";
-import type { Capability, CollectionVisibility, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
-import { INSTAGRAM_VERIFIED } from "../lib/integrations/instagram-capabilities.ts";
+import { getCollectionCapabilities, hashShareToken, validateShareLink } from "../lib/domain/sharing-permissions.ts";
+import { countActiveRecipients } from "../lib/domain/sharing-management.ts";
+import type { Capability, CollectionPermissionGrant, CollectionVisibility, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
+import { evaluateInstagramEligibility, missingInstagramScopes, normalizeInstagramScopes } from "../lib/integrations/instagram-eligibility.ts";
 import type { PreflightReport } from "../lib/domain/preflight.ts";
 import { consecutiveDefiniteFailures, itemsEligibleForRepeat, shouldPauseForAccount, type RepeatBehavior } from "../lib/domain/publish-workflow.ts";
 import { requireUser, type RequestContext } from "./context.ts";
 import { readCollectionListQuery, readCollectionVideoQuery, readMediaListQuery, type CollectionSort, type MediaListQuery } from "./library-query.ts";
 import { notFound } from "./errors.ts";
 import { describeStorage, type StorageDescription } from "./storage/media-storage.ts";
-import { computePreviewLayout, isReservedTemplateName, parseEditingSettings, parseEditorQuery, videoSettingsName, type EditingSettings, type PreviewLayout } from "../lib/domain/editing-settings.ts";
+import { computePreviewLayout, DEFAULT_EDITING_SETTINGS, isReservedTemplateName, parseEditingSettings, parseEditorQuery, trimDurationProblems, videoSettingsName, type EditingSettings, type PreviewLayout } from "../lib/domain/editing-settings.ts";
 import type { MaxResolution } from "../lib/render/ffmpeg-command.ts";
 import { buildPreflightReport } from "./preflight-service.ts";
-import type { CycleRecord } from "./repository.ts";
+import { localDateKey, localDateOf } from "../lib/domain/schedule.ts";
+import type { CycleRecord, Repository, RenderOutputRecord } from "./repository.ts";
 
 export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; /** "incomplete" = accepted by file signature only. */ validation: "verified" | "incomplete" | "unknown"; hasThumbnail: boolean; width: number | null; height: number | null; }
 const toMediaCard = (m: MediaAsset): MediaCard => ({ id: m.id, title: m.title ?? "Untitled", kind: m.kind ?? "video", sizeBytes: m.sizeBytes, durationMs: m.durationMs ?? null, status: m.status, validation: m.validation ?? "unknown", hasThumbnail: m.hasThumbnail === true, width: m.width ?? null, height: m.height ?? null });
@@ -27,17 +29,29 @@ export interface DashboardData {
   planId: PlanId; planName: string; timeZone: string; resetNotice: string;
   usage: { storage: UsageLine; processingMinutes: UsageLine; exports: UsageLine; scheduledItems: UsageLine };
   counts: { media: number; collections: number; cycles: number; runningCycles: number };
+  campaigns: CampaignSummary[]; statusFilter: CycleStatus | "all";
 }
 
-export async function getDashboardData(ctx: RequestContext, timeZone = "Asia/Kolkata"): Promise<DashboardData> {
+export interface CampaignSummary { id: string; name: string; status: CycleStatus; accountName: string | null; timeZone: string; totalItems: number; scheduledItems: number; nextScheduledAt: Date | null; createdAt: Date | null; }
+
+export async function getDashboardData(ctx: RequestContext, timeZone = "Asia/Kolkata", requestedStatus?: unknown): Promise<DashboardData> {
   const userId = requireUser(ctx);
-  const planId = await ctx.repo.getPlanIdForUser(userId);
+  const planId = await ctx.repo.getPlanIdForUser(userId, ctx.now);
   const plan = getPlan(planId);
   const monthStart = monthStartUtc(ctx.now);
-  const [mediaPage, collections, cycles, storageUsed, monthly, scheduledUsed] = await Promise.all([
+  const [mediaPage, collections, cycles, accounts, storageUsed, monthly, scheduledUsed] = await Promise.all([
     ctx.repo.listMediaForOwner(userId, { limit: 1, offset: 0 }), ctx.repo.listCollectionsForOwner(userId), ctx.repo.listCyclesForOwner(userId),
+    ctx.repo.listSocialAccountsForOwner(userId),
     ctx.repo.getStorageUsedBytes(userId), ctx.repo.getMonthlyUsage(userId, monthStart), ctx.repo.getScheduledItemsUsedThisMonth(userId, monthStart),
   ]);
+  const statusFilter: CycleStatus | "all" = typeof requestedStatus === "string" && ["draft", "running", "paused", "stopped", "completed"].includes(requestedStatus) ? requestedStatus as CycleStatus : "all";
+  const accountNames = new Map(accounts.map((account) => [account.id, account.username?.trim() || "Instagram account"]));
+  const campaigns = await Promise.all(cycles.map(async (cycle): Promise<CampaignSummary> => {
+    const items = await ctx.repo.getCycleItems(cycle.id);
+    const planned = items.filter((item) => (item.status === "upcoming" || item.status === "scheduled") && item.scheduledFor !== null).map((item) => item.scheduledFor as Date).sort((a, b) => a.getTime() - b.getTime());
+    const account = accounts.find((candidate) => candidate.id === cycle.socialAccountId && candidate.userId === userId);
+    return { id: cycle.id, name: cycle.name, status: cycle.status, accountName: account?.status === "connected" ? accountNames.get(account.id) ?? null : null, timeZone: cycle.scheduleSettings?.timeZone ?? cycle.timezone ?? timeZone, totalItems: items.length, scheduledItems: items.filter((item) => item.scheduledFor !== null).length, nextScheduledAt: planned.find((date) => date.getTime() >= ctx.now.getTime()) ?? null, createdAt: cycle.createdAt ?? null };
+  }));
   return {
     planId, planName: plan.name, timeZone, resetNotice: describeUsageReset(ctx.now, timeZone),
     usage: {
@@ -47,6 +61,7 @@ export async function getDashboardData(ctx: RequestContext, timeZone = "Asia/Kol
       scheduledItems: { used: scheduledUsed, limit: plan.limits.scheduledItemsPerMonth },
     },
     counts: { media: mediaPage.total, collections: collections.length, cycles: cycles.length, runningCycles: cycles.filter((c) => c.status === "running").length },
+    campaigns: campaigns.filter((campaign) => statusFilter === "all" || campaign.status === statusFilter), statusFilter,
   };
 }
 
@@ -84,20 +99,22 @@ function sortCollections(list: VideoCollection[], sort: CollectionSort): VideoCo
   return [...list].sort(sort === "name" ? byName : sort === "oldest" ? byTime : (a, b) => timeOnly(b, a) || idOnly(a, b));
 }
 
-export async function getCollectionsOverview(ctx: RequestContext, requested?: unknown): Promise<{ owned: CollectionCard[]; sharedWithMe: CollectionCard[]; search: string; sort: CollectionSort; filtered: boolean }> {
+export async function getCollectionsOverview(ctx: RequestContext, requested?: unknown): Promise<{ owned: CollectionCard[]; sharedWithMe: CollectionCard[]; accessRequests: { id: string; collectionId: string; requestedCapabilities: Capability[]; status: "pending" | "approved" | "rejected"; createdAt: Date; decidedAt: Date | null }[]; search: string; sort: CollectionSort; filtered: boolean }> {
   const userId = requireUser(ctx);
   const query = readCollectionListQuery(requested);
   const needle = query.search.toLocaleLowerCase();
   const matches = (collection: VideoCollection) => needle.length === 0 || (collection.name ?? "").toLocaleLowerCase().includes(needle);
   const [owned, shared] = await Promise.all([ctx.repo.listCollectionsForOwner(userId), ctx.repo.listCollectionsSharedWith(userId, ctx.now)]);
+  const accessRequests = await ctx.repo.listCollectionAccessRequestsForRequester(userId);
   return {
     owned: await Promise.all(sortCollections(owned.filter(matches), query.sort).map((c) => toCollectionCard(ctx, userId, c))),
     sharedWithMe: await Promise.all(sortCollections(shared.filter(matches), query.sort).map((c) => toCollectionCard(ctx, userId, c))),
+    accessRequests: accessRequests.map((request) => ({ id: request.id, collectionId: request.collectionId, requestedCapabilities: request.requestedCapabilities, status: request.status, createdAt: request.createdAt, decidedAt: request.decidedAt })),
     search: query.search, sort: query.sort, filtered: query.filtered,
   };
 }
 
-export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; permissions: { canUseInCycle: boolean; canImport: boolean; canDownload: boolean; isOwner: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
+export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; permissions: { canUseInCycle: boolean; canImport: boolean; canRequestImport?: boolean; canDownload: boolean; isOwner: boolean }; importJobs?: { id: string; sourceMediaId: string; resultMediaAssetId: string; status: import("./repository.ts").MediaImportStatus; failureReason: string | null; createdAt: Date; updatedAt: Date }[]; pendingAccessRequests?: { id: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[]; shareLinks?: import("./repository.ts").CollectionShareLinkSummary[]; sharingManagement?: { grants: { granteeId: string; capabilities: Capability[]; status: "active" | "revoked"; expiresAt: Date | null; grantedById: string | null }[]; activeRecipients: number; recipientLimit: number; expiringGrants: boolean; delegatedManagement: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
 
 const COLLECTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -111,10 +128,29 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
   const grants = await ctx.repo.getGrants(collection.id);
   const capabilities = getCollectionCapabilities(userId, collection, grants, ctx.now);
   if (!capabilities.has("view")) throw notFound("Collection");
+  let sharingManagement: CollectionDetail["sharingManagement"];
+  let pendingAccessRequests: CollectionDetail["pendingAccessRequests"];
+  let shareLinks: CollectionDetail["shareLinks"];
+  if (collection.ownerId === userId) {
+    const ownerPlan = getPlan(await ctx.repo.getPlanIdForUser(collection.ownerId, ctx.now));
+    sharingManagement = {
+      grants: grants.map((grant) => ({ granteeId: grant.granteeId, capabilities: grant.capabilities, status: grant.status, expiresAt: grant.expiresAt, grantedById: grant.grantedById ?? null })),
+      activeRecipients: countActiveRecipients(collection.id, collection.ownerId, grants, ctx.now),
+      recipientLimit: ownerPlan.sharing.maxRecipientsPerCollection,
+      expiringGrants: ownerPlan.sharing.expiringGrants,
+      delegatedManagement: ownerPlan.sharing.delegatedManagement,
+    };
+    pendingAccessRequests = (await ctx.repo.listPendingCollectionAccessRequests(collection.id, userId)).map((request) => ({ id: request.id, requesterId: request.requesterId, requestedCapabilities: request.requestedCapabilities, createdAt: request.createdAt }));
+    shareLinks = await ctx.repo.listCollectionShareLinksForOwner(collection.id, userId);
+  }
   const members = (await ctx.repo.getMediaByIds(collection.mediaIds)).filter((m) => m.status !== "deleted");
   const media = members.filter((m) => videoQuery.search.length === 0 || mediaMatchesSearch(m, videoQuery.search)).sort((a, b) => compareMedia(videoQuery.sort, a, b));
   const ownCycles = capabilities.has("use_in_cycle") ? await ctx.repo.listCyclesForOwner(userId) : [];
   const library = collection.ownerId === userId ? await ctx.repo.listMediaForOwner(userId, { limit: 200, offset: 0, sort: "name" }) : { items: [], total: 0 };
+  const directImport = collection.ownerId !== userId && grants.some((grant) => grant.granteeId === userId && grant.status === "active" && grant.capabilities.includes("import_copy") && (grant.expiresAt === null || grant.expiresAt > ctx.now));
+  const importJobs = directImport
+    ? (await ctx.repo.listMediaImportJobsForOwner(userId)).filter((job) => job.sourceCollectionId === collection.id).map((job) => ({ id: job.id, sourceMediaId: job.sourceMediaId, resultMediaAssetId: job.resultMediaAssetId, status: job.status, failureReason: job.failureReason, createdAt: job.createdAt, updatedAt: job.updatedAt }))
+    : [];
   return {
     cycleChoices: ownCycles.filter((c) => c.status === "draft" || c.status === "running" || c.status === "paused").map((c) => ({ id: c.id, name: c.name })),
     libraryChoices: library.items.map(toMediaCard),
@@ -122,6 +158,37 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
     collection: await toCollectionCard(ctx, userId, collection), videos: media.map(toMediaCard), memberIds: members.map((m) => m.id),
     videoSearch: videoQuery.search, videoSort: videoQuery.sort, videoFiltered: videoQuery.filtered,
     permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canDownload: capabilities.has("download"), isOwner: collection.ownerId === userId },
+    ...(sharingManagement ? { sharingManagement } : {}),
+    ...(pendingAccessRequests ? { pendingAccessRequests } : {}),
+    ...(shareLinks ? { shareLinks } : {}),
+    ...(collection.ownerId !== userId ? { importJobs, permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canRequestImport: directImport, canDownload: capabilities.has("download"), isOwner: false } } : {}),
+  };
+}
+
+const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+/** A signed-in recipient view. Every request re-hashes and checks the link and current collection state. */
+export async function getSharedCollectionDetail(ctx: RequestContext, rawToken: string, requested?: unknown): Promise<CollectionDetail> {
+  const userId = requireUser(ctx);
+  if (!SHARE_TOKEN_PATTERN.test(rawToken)) throw notFound("Collection");
+  const link = await ctx.repo.getCollectionShareLinkByTokenHash(hashShareToken(rawToken));
+  if (!link || !validateShareLink({ tokenHash: link.tokenHash, revoked: link.revokedAt !== null, expiresAt: link.expiresAt }, rawToken, ctx.now).allowed) throw notFound("Collection");
+  const collection = await ctx.repo.getCollection(link.collectionId);
+  if (!collection || collection.ownerId !== link.createdById || collection.visibility !== "link" || collection.archived) throw notFound("Collection");
+  const videoQuery = readCollectionVideoQuery(typeof requested === "object" && requested !== null ? requested : {});
+  const effectiveLink: CollectionPermissionGrant = { collectionId: collection.id, granteeId: userId, capabilities: link.capabilities, status: "active", expiresAt: link.expiresAt, grantedById: link.createdById };
+  const grants = [...await ctx.repo.getGrants(collection.id), effectiveLink];
+  const capabilities = getCollectionCapabilities(userId, collection, grants, ctx.now);
+  if (!capabilities.has("view")) throw notFound("Collection");
+  const members = (await ctx.repo.getMediaByIds(collection.mediaIds)).filter((media) => media.status !== "deleted");
+  const videos = members.filter((media) => videoQuery.search.length === 0 || mediaMatchesSearch(media, videoQuery.search)).sort((a, b) => compareMedia(videoQuery.sort, a, b));
+  const ownCycles = capabilities.has("use_in_cycle") ? await ctx.repo.listCyclesForOwner(userId) : [];
+  const collectionCard = await toCollectionCard(ctx, userId, collection);
+  collectionCard.capabilities = [...capabilities];
+  return {
+    collection: collectionCard, videos: videos.map(toMediaCard), memberIds: members.map((media) => media.id),
+    permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canRequestImport: false, canDownload: capabilities.has("download"), isOwner: false },
+    cycleChoices: ownCycles.filter((cycle) => cycle.status === "draft" || cycle.status === "running" || cycle.status === "paused").map((cycle) => ({ id: cycle.id, name: cycle.name })),
+    libraryChoices: [], videoSearch: videoQuery.search, videoSort: videoQuery.sort, videoFiltered: videoQuery.filtered,
   };
 }
 
@@ -152,7 +219,7 @@ export interface CyclePublishingStatus {
   eligibleUnpublishedCount: number;
 }
 
-export interface CycleDetail { cycle: Pick<CycleRecord, "id" | "name" | "status">; items: CycleItem[]; mediaTitles: Record<string, string>; report: PreflightReport; /** Images the user owns that can be used as covers. */ coverChoices: MediaCard[]; /** True when only the final confirmation is missing (every other check passes). */ readyToConfirm: boolean; publishing: CyclePublishingStatus; }
+export interface CycleDetail { cycle: Pick<CycleRecord, "id" | "name" | "status" | "scheduleSettings" | "timezone">; scheduleStartDate: string; items: CycleItem[]; mediaTitles: Record<string, string>; renderOutputsByItemId: Record<string, RenderOutputRecord[]>; selectedRenderOutputAvailableByItemId: Record<string, boolean>; report: PreflightReport; /** Images the user owns that can be used as covers. */ coverChoices: MediaCard[]; /** True when only the final confirmation is missing (every other check passes). */ readyToConfirm: boolean; publishing: CyclePublishingStatus; }
 
 export async function getCycleDetail(ctx: RequestContext, cycleId: string): Promise<CycleDetail> {
   const userId = requireUser(ctx);
@@ -162,6 +229,29 @@ export async function getCycleDetail(ctx: RequestContext, cycleId: string): Prom
   const media = await ctx.repo.getMediaByIds([...new Set(items.map((i) => i.mediaAssetId))]);
   const mediaTitles: Record<string, string> = {};
   for (const m of media) mediaTitles[m.id] = m.title ?? "Untitled";
+  const renderOutputsByItemId: CycleDetail["renderOutputsByItemId"] = {};
+  const selectedRenderOutputAvailableByItemId: Record<string, boolean> = {};
+  const renderOutputsBySource = new Map<string, Awaited<ReturnType<Repository["listRenderOutputsForOwnerAndSource"]>>>();
+  for (const item of items) {
+    if (!renderOutputsBySource.has(item.mediaAssetId)) {
+      const candidates = await ctx.repo.listRenderOutputsForOwnerAndSource(userId, item.mediaAssetId);
+      const available = [];
+      for (const candidate of candidates) {
+        const output = await ctx.repo.getRenderOutput(candidate.id);
+        const metadata = output && ctx.media && !ctx.media.unavailable ? await ctx.media.storage.getPrivateMetadata(output.storageKey).catch(() => null) : null;
+        if (output?.ownerId === userId && output.sourceMediaId === item.mediaAssetId && metadata?.sizeBytes === candidate.sizeBytes) available.push(candidate);
+      }
+      renderOutputsBySource.set(item.mediaAssetId, available);
+    }
+    renderOutputsByItemId[item.id] = renderOutputsBySource.get(item.mediaAssetId) ?? [];
+    if (item.selectedRenderOutputId) {
+      const output = await ctx.repo.getRenderOutput(item.selectedRenderOutputId);
+      const metadata = output && output.ownerId === userId && output.sourceMediaId === item.mediaAssetId && ctx.media && !ctx.media.unavailable
+        ? await ctx.media.storage.getPrivateMetadata(output.storageKey).catch(() => null)
+        : null;
+      selectedRenderOutputAvailableByItemId[item.id] = !!output && output.ownerId === userId && output.sourceMediaId === item.mediaAssetId && !!metadata && metadata.sizeBytes === output.sizeBytes;
+    } else selectedRenderOutputAvailableByItemId[item.id] = false;
+  }
   // Shown as information only: the cycle is NOT started by viewing it.
   const report = await buildPreflightReport(ctx, userId, cycle, items, cycle.finalReviewConfirmed);
   const coverChoices = (await ctx.repo.listMediaForOwner(userId, { limit: 50, offset: 0, kind: "image" })).items.map(toMediaCard);
@@ -170,20 +260,19 @@ export async function getCycleDetail(ctx: RequestContext, cycleId: string): Prom
   const jobs = await ctx.repo.listPublishingJobsForAccount(userId, cycle.socialAccountId);
   const definiteFailureStreak = consecutiveDefiniteFailures(jobs);
   const pause = ownedAccount ? shouldPauseForAccount({ status: ownedAccount.status, consecutiveDefiniteFailures: definiteFailureStreak }) : { pause: false, reason: null };
-  const requiredScopes = INSTAGRAM_VERIFIED.loginPaths.instagramLogin.permissions;
-  const grantedScopes = ownedAccount?.grantedScopes ?? [];
   const expiresAt = ownedAccount?.tokenExpiresAt ?? null;
   const publishing: CyclePublishingStatus = {
     repeatBehavior: cycle.repeatBehavior ?? "never",
     accountStatus: ownedAccount?.status ?? null,
     tokenExpiresAt: expiresAt ? expiresAt.toISOString().slice(0, 10) : null,
     tokenExpired: expiresAt !== null && expiresAt <= ctx.now,
-    missingPermissions: ownedAccount ? requiredScopes.filter((scope) => !grantedScopes.includes(scope)) : [],
+    missingPermissions: ownedAccount ? missingInstagramScopes(ownedAccount.grantedScopes) : [],
     definiteFailureStreak,
     pauseReason: pause.pause ? pause.reason : null,
     eligibleUnpublishedCount: itemsEligibleForRepeat(items).length,
   };
-  return { cycle: { id: cycle.id, name: cycle.name, status: cycle.status }, items, mediaTitles, report, coverChoices, readyToConfirm, publishing };
+  const timeZone = cycle.timezone ?? cycle.scheduleSettings?.timeZone ?? "Asia/Kolkata";
+  return { cycle: { id: cycle.id, name: cycle.name, status: cycle.status, scheduleSettings: cycle.scheduleSettings ?? null, timezone: timeZone }, scheduleStartDate: cycle.scheduleSettings?.startDate ?? localDateKey(localDateOf(timeZone, ctx.now)), items, mediaTitles, renderOutputsByItemId, selectedRenderOutputAvailableByItemId, report, coverChoices, readyToConfirm, publishing };
 }
 
 function accountBelongsTo(account: Awaited<ReturnType<RequestContext["repo"]["getSocialAccount"]>>, userId: string) {
@@ -203,26 +292,43 @@ export function getUploadInfo(ctx: RequestContext): UploadInfo {
 export interface InstagramAccountCard {
   id: string;
   username: string | null;
-  status: "connected" | "token_expired" | "revoked" | "disconnected";
+  status: "connected" | "token_expired" | "revoked" | "disconnected" | "unknown";
   accountType: string | null;
   grantedScopes: string[];
   tokenExpiresAt: string | null;
   hasToken: boolean;
+  eligibilityStatus: "connected_eligible" | "not_connected" | "missing_permissions" | "unsupported_personal" | "unsupported_account_type" | "expired_connection" | "reconnection_required";
 }
 
 /** Accounts for the Instagram page. Tokens and external ids are not included. */
 export async function getInstagramAccounts(ctx: RequestContext): Promise<InstagramAccountCard[]> {
   const userId = requireUser(ctx);
   const accounts = await ctx.repo.listSocialAccountsForOwner(userId);
-  return accounts.map((account) => ({
-    id: account.id,
-    username: account.username ?? null,
-    status: account.status,
-    accountType: account.accountType ?? null,
-    grantedScopes: account.grantedScopes ?? [],
-    tokenExpiresAt: account.tokenExpiresAt ? account.tokenExpiresAt.toISOString().slice(0, 10) : null,
-    hasToken: account.hasToken === true,
-  }));
+  return accounts.map((account) => {
+    const grantedScopes = normalizeInstagramScopes(account.grantedScopes).scopes;
+    const eligibility = evaluateInstagramEligibility({ platform: account.platform, status: account.status, accountType: account.accountType, grantedScopes, hasToken: account.hasToken, tokenExpiresAt: account.tokenExpiresAt, now: ctx.now });
+    const status: InstagramAccountCard["status"] = ["connected", "token_expired", "revoked", "disconnected"].includes(account.status) ? account.status : "unknown";
+    let eligibilityStatus: InstagramAccountCard["eligibilityStatus"];
+    if (status === "token_expired") eligibilityStatus = "expired_connection";
+    else if (status === "disconnected") eligibilityStatus = "not_connected";
+    else if (status !== "connected") eligibilityStatus = "reconnection_required";
+    else if (account.accountType === "PERSONAL") eligibilityStatus = "unsupported_personal";
+    else if (eligibility.reason === "unsupported_account_type" || eligibility.reason === "unsupported_platform") eligibilityStatus = "unsupported_account_type";
+    else if (eligibility.reason === "missing_permissions") eligibilityStatus = "missing_permissions";
+    else if (eligibility.reason === "expired_token") eligibilityStatus = "expired_connection";
+    else if (eligibility.eligible) eligibilityStatus = "connected_eligible";
+    else eligibilityStatus = "reconnection_required";
+    return {
+      id: account.id,
+      username: account.username ?? null,
+      status,
+      accountType: account.accountType ?? null,
+      grantedScopes,
+      tokenExpiresAt: account.tokenExpiresAt ? account.tokenExpiresAt.toISOString().slice(0, 10) : null,
+      hasToken: account.hasToken === true,
+      eligibilityStatus,
+    };
+  });
 }
 
 /** The user's own connected accounts for the "new cycle" form. External ids are never shown. */
@@ -232,14 +338,14 @@ export async function getCycleCreationOptions(ctx: RequestContext): Promise<{ ac
   return { accounts: accounts.filter((a) => a.status === "connected").map((a, index) => ({ id: a.id, label: `Connected account ${index + 1}` })) };
 }
 
-export interface MediaDetail { media: MediaCard; mimeType: string | null; addedAt: Date | null; }
+export interface MediaDetail { media: MediaCard; mimeType: string | null; addedAt: Date | null; status?: MediaAsset["status"]; deleteAfter?: Date | null; importedCopy?: boolean; }
 
 /** Details of ONE of your own files. Someone else's file looks exactly like a missing one. */
 export async function getMediaDetail(ctx: RequestContext, mediaId: string): Promise<MediaDetail> {
   const userId = requireUser(ctx);
   const media = await ctx.repo.getMedia(mediaId);
   if (!media || media.ownerId !== userId || media.status === "deleted") throw notFound("File");
-  return { media: toMediaCard(media), mimeType: media.mimeType ?? null, addedAt: media.createdAt ?? null };
+  return { media: toMediaCard(media), mimeType: media.mimeType ?? null, addedAt: media.createdAt ?? null, status: media.status, deleteAfter: media.deleteAfter, importedCopy: Boolean(media.importedFromId) };
 }
 
 export interface TemplateCard { id: string; name: string; summary: string; }
@@ -283,12 +389,13 @@ async function verifiedExports(ctx: RequestContext, userId: string): Promise<Edi
   return ready;
 }
 
-function jobFor(ctx: RequestContext, userId: string, jobId: string | undefined, mediaId: string | undefined): EditorPageData["job"] {
-  if (!jobId || !ctx.renders) return null;
-  const job = ctx.renders.jobs.get(jobId);
-  if (!job || job.ownerId !== userId) return null;
-  const refreshPath = mediaId && (job.status === "queued" || job.status === "processing") ? `/editor?media=${encodeURIComponent(mediaId)}&job=${encodeURIComponent(job.id)}` : null;
-  return { id: job.id, status: job.status, message: job.message, outputId: job.outputId, refreshPath };
+async function jobFor(ctx: RequestContext, userId: string, jobId: string | undefined, mediaId: string | undefined): Promise<EditorPageData["job"]> {
+  if (!jobId) return null;
+  const job = await ctx.repo.getRenderJobForOwner(jobId, userId);
+  if (!job) return null;
+  const status = job.status === "queued" ? "queued" : job.status === "running" ? "processing" : job.status === "succeeded" ? "completed" : "failed";
+  const refreshPath = mediaId && (status === "queued" || status === "processing") ? `/editor?media=${encodeURIComponent(mediaId)}&job=${encodeURIComponent(job.id)}` : null;
+  return { id: job.id, status, message: job.errorMessage, outputId: job.outputDerivativeId, refreshPath };
 }
 
 const describeSettings = (s: EditingSettings): string => {
@@ -303,11 +410,11 @@ const describeSettings = (s: EditingSettings): string => {
  */
 export async function getEditorPageData(ctx: RequestContext, input: { mediaId: string | undefined; search: Record<string, string | string[] | undefined> | undefined }): Promise<EditorPageData> {
   const userId = requireUser(ctx);
-  const planId = await ctx.repo.getPlanIdForUser(userId);
+  const planId = await ctx.repo.getPlanIdForUser(userId, ctx.now);
   const plan = getPlan(planId);
   const [storedTemplates, videos, images] = await Promise.all([ctx.repo.listTemplatesForOwner(userId), ctx.repo.listMediaForOwner(userId, { limit: 12, offset: 0, kind: "video" }), ctx.repo.listMediaForOwner(userId, { limit: 50, offset: 0, kind: "image" })]);
   const templates = storedTemplates.filter((template) => !isReservedTemplateName(template.name));
-  const common = { videoChoices: videos.items.map(toMediaCard), logoChoices: images.items.map(toMediaCard), templates: templates.map((t) => ({ id: t.id, name: t.name, summary: describeSettings(t.settings) })), templateLimit: plan.limits.templates, maxResolution: plan.features.maxResolution, exports: await verifiedExports(ctx, userId), job: jobFor(ctx, userId, typeof input.search?.["job"] === "string" ? input.search["job"] : undefined, input.mediaId) };
+  const common = { videoChoices: videos.items.map(toMediaCard), logoChoices: images.items.map(toMediaCard), templates: templates.map((t) => ({ id: t.id, name: t.name, summary: describeSettings(t.settings) })), templateLimit: plan.limits.templates, maxResolution: plan.features.maxResolution, exports: await verifiedExports(ctx, userId), job: await jobFor(ctx, userId, typeof input.search?.["job"] === "string" ? input.search["job"] : undefined, input.mediaId) };
   if (!input.mediaId) return { ...common, source: null, settings: parseEditorQuery(undefined).settings, settingsSource: "saved" as const, problems: [], layout: null, assumedSourceSize: false, logoAspect: 1 };
 
   const media = await ctx.repo.getMedia(input.mediaId);
@@ -317,12 +424,16 @@ export async function getEditorPageData(ctx: RequestContext, input: { mediaId: s
   const savedParsed = savedRow ? parseEditingSettings(savedRow.settings) : { ok: true as const, settings: parseEditorQuery(undefined).settings };
   const savedSettings = savedParsed.ok ? savedParsed.settings : parseEditorQuery(undefined).settings;
   const templateId = typeof input.search?.["template"] === "string" ? input.search["template"] : undefined;
-  const previewKeys = ["aspect", "zoom", "offsetX", "offsetY", "bg", "bgColor", "bgImage", "blur", "borderPx", "borderColor", "logoMedia", "logoWidth", "logoX", "logoY", "logoOpacity"];
+  const previewKeys = ["aspect", "zoom", "offsetX", "offsetY", "trimStart", "trimEnd", "bg", "bgColor", "bgImage", "blur", "borderPx", "borderColor", "logoMedia", "logoWidth", "logoX", "logoY", "logoOpacity"];
   const previewing = previewKeys.some((key) => typeof input.search?.[key] === "string");
   const fromTemplate = templateId && !previewing ? templates.find((t) => t.id === templateId)?.settings : undefined;
   const parsed = fromTemplate ? { settings: fromTemplate, problems: [] as string[] } : previewing ? parseEditorQuery(input.search) : { settings: savedSettings, problems: savedParsed.ok ? [] : ["Saved settings could not be read, so the defaults are shown."] };
   const settingsSource = fromTemplate ? "template" as const : previewing ? "preview" as const : "saved" as const;
   let { settings } = parsed; const problems = [...parsed.problems];
+  if (typeof media.durationMs === "number" && media.durationMs > 0) {
+    const trimProblems = trimDurationProblems(settings.trim, media.durationMs / 1000);
+    if (trimProblems.length > 0) { problems.push(...trimProblems); settings = { ...settings, trim: DEFAULT_EDITING_SETTINGS.trim }; }
+  }
   let logoAspect = 1;
   if (settings.logo) {
     const logo = images.items.find((m) => m.id === settings.logo!.mediaId);

@@ -11,17 +11,32 @@ import type { CycleRecord } from "./repository.ts";
 
 export async function buildPreflightReport(ctx: RequestContext, userId: string, cycle: CycleRecord, items: CycleItem[], confirmFinalReview: boolean): Promise<PreflightReport> {
   const account = await ctx.repo.getSocialAccount(cycle.socialAccountId);
-  const planId = await ctx.repo.getPlanIdForUser(userId);
+  const planId = await ctx.repo.getPlanIdForUser(userId, ctx.now);
 
   // Re-check every item's source RIGHT NOW (permission may have been revoked since it was added).
   const sourceAccessByItemId: Record<string, Decision> = {};
   const mediaByItemId: Record<string, { kind?: "video" | "image"; mimeType?: string; durationMs?: number | null; sizeBytes?: number }> = {};
+  const temporaryMediaAccessByItemId: Record<string, import("../lib/domain/preflight.ts").PublishingMediaAccessState> = {};
   for (const item of items) {
     const media = await ctx.repo.getMedia(item.mediaAssetId);
     const collection = item.sourceCollectionId ? await ctx.repo.getCollection(item.sourceCollectionId) : null;
     const grants = collection ? await ctx.repo.getGrants(collection.id) : [];
     sourceAccessByItemId[item.id] = canKeepUsingSourceForCycleItem(item, media, collection, grants, ctx.now);
-    if (media) mediaByItemId[item.id] = { ...(media.kind ? { kind: media.kind } : {}), ...(media.mimeType ? { mimeType: media.mimeType } : {}), ...(media.durationMs != null ? { durationMs: media.durationMs } : {}), sizeBytes: media.sizeBytes };
+    const selectedOutput = item.selectedRenderOutputId ? await ctx.repo.getRenderOutput(item.selectedRenderOutputId) : null;
+    const storedMetadata = selectedOutput && ctx.media && !ctx.media.unavailable
+      ? await ctx.media.storage.getPrivateMetadata(selectedOutput.storageKey).catch(() => null)
+      : null;
+    const outputMatchesItem = selectedOutput?.ownerId === userId && selectedOutput.sourceMediaId === item.mediaAssetId;
+    temporaryMediaAccessByItemId[item.id] = !item.selectedRenderOutputId
+      ? { status: "media_not_eligible" }
+      : !selectedOutput
+        ? { status: "media_not_available" }
+        : !outputMatchesItem
+          ? { status: "media_not_eligible" }
+          : !storedMetadata || storedMetadata.sizeBytes !== selectedOutput.sizeBytes
+            ? { status: "media_not_available" }
+            : { status: "temporary_access_not_configured" };
+    if (media && selectedOutput && outputMatchesItem) mediaByItemId[item.id] = { kind: "video", mimeType: "video/mp4", ...(media.durationMs != null ? { durationMs: media.durationMs } : {}), sizeBytes: selectedOutput.sizeBytes };
   }
   const ownedAccount = account && account.userId === userId ? account : null;
   const failureJobs = ownedAccount ? await ctx.repo.listPublishingJobsForAccount(userId, cycle.socialAccountId) : [];
@@ -33,13 +48,15 @@ export async function buildPreflightReport(ctx: RequestContext, userId: string, 
     coverSupport: ctx.config.coverSupport, sourceAccessByItemId,
     recentPublishTimes: await ctx.repo.getRecentPublishTimes(userId, new Date(ctx.now.getTime() - 24 * 3_600_000)),
     ...(ownedAccount ? { instagram: {
+      platform: ownedAccount.platform,
       now: ctx.now,
       hasStoredToken: ownedAccount.hasToken === true,
       accountType: ownedAccount.accountType ?? null,
       grantedScopes: ownedAccount.grantedScopes ?? [],
       tokenExpiresAt: ownedAccount.tokenExpiresAt ?? null,
       mediaByItemId,
-      publicMediaUrlAvailable: false,
+      temporaryMediaAccessConfigured: ctx.publishingMediaAccess !== undefined,
+      temporaryMediaAccessByItemId,
       consecutiveDefiniteFailures: consecutiveDefiniteFailures(failureJobs),
       repeatBehavior: cycle.repeatBehavior ?? "never",
     } } : {}),

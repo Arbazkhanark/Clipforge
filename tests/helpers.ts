@@ -14,10 +14,10 @@ export const makeGrant = (over: Partial<CollectionPermissionGrant> = {}): Collec
   ({ collectionId: "col1", granteeId: "bob", capabilities: ["view", "use_in_cycle"], status: "active", expiresAt: null, ...over });
 
 export const makeItem = (over: Partial<CycleItem> = {}): CycleItem => ({
-  id: "item1", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "media1", sourceKind: "shared_reference",
+  id: "item1", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "media1", selectedRenderOutputId: null, sourceKind: "shared_reference",
   sourceCollectionId: "col1", status: "upcoming", position: 1, version: 1, scheduledFor: null,
   captionText: "", captionSource: "none", coverMediaId: null, coverIsCustom: false, coverState: "none",
-  lockedBy: null, lockExpiresAt: null, reviewReason: null, ...over,
+  lockedBy: null, lockExpiresAt: null, reviewReason: null, externalPostId: null, publishedAt: null, ...over,
 });
 
 export const makeCycle = (over: Partial<PublishingCycle> = {}): PublishingCycle =>

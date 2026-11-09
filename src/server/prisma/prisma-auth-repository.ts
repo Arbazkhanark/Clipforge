@@ -28,6 +28,21 @@ export class PrismaAuthRepository implements AuthRepository {
   async revokeAllSessionsForUser(userId: string, at: Date): Promise<void> { await this.db.session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: at } }); }
 
   async createAuthToken(t: AuthTokenRecord): Promise<void> { await this.db.authToken.create({ data: { id: t.id, userId: t.userId, kind: t.kind, tokenHash: t.tokenHash, expiresAt: t.expiresAt, usedAt: t.usedAt, createdAt: t.createdAt } }); }
+  async completePasswordReset(input: { tokenHash: string; now: Date; passwordHash: string; passwordProblems: (email: string) => string[] }): Promise<{ status: "reset" } | { status: "invalid" } | { status: "rejected"; problems: string[] }> {
+    return this.db.$transaction(async (tx) => {
+      const token = await tx.authToken.findUnique({ where: { tokenHash: input.tokenHash } });
+      if (!token || token["kind"] !== "password_reset" || token["usedAt"] != null || !(token["expiresAt"] > input.now)) return { status: "invalid" };
+      const user = await tx.user.findUnique({ where: { id: token["userId"] } });
+      if (!user) return { status: "invalid" };
+      const problems = input.passwordProblems(user["email"]);
+      if (problems.length > 0) return { status: "rejected", problems };
+      const consumed = await tx.authToken.updateMany({ where: { tokenHash: input.tokenHash, kind: "password_reset", usedAt: null, expiresAt: { gt: input.now } }, data: { usedAt: input.now } });
+      if (consumed.count !== 1) return { status: "invalid" };
+      await tx.user.update({ where: { id: user["id"] }, data: { passwordHash: input.passwordHash, ...(user["emailVerified"] == null ? { emailVerified: input.now } : {}) } });
+      await tx.session.updateMany({ where: { userId: user["id"], revokedAt: null }, data: { revokedAt: input.now } });
+      return { status: "reset" };
+    });
+  }
   async consumeAuthToken(kind: AuthTokenKind, tokenHash: string, now: Date): Promise<AuthTokenRecord | null> {
     // ONE conditional UPDATE decides: only a request that really flips usedAt from NULL gets the token.
     const outcome = await this.db.authToken.updateMany({ where: { tokenHash, kind, usedAt: null, expiresAt: { gt: now } }, data: { usedAt: now } });

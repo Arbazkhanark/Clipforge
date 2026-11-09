@@ -7,15 +7,21 @@ import type { RenderJob } from "../server/render/export-service.ts";
 
 const ASPECT_LABELS: Record<(typeof ASPECT_RATIOS)[number], string> = { "9:16": "9:16", "4:5": "4:5", "1:1": "1:1", "16:9": "16:9", original: "Original" };
 
-export function BulkForm({ videos, images, batchSize }: { videos: MediaCard[]; images: MediaCard[]; batchSize: number }) {
+export function BulkForm({ videos, images, templates, batchSize }: { videos: MediaCard[]; images: MediaCard[]; templates: { id: string; name: string; summary: string }[]; batchSize: number }) {
   return (
     <>
       <h1>Bulk edit</h1>
-      <p className="notice">Only the settings you tick are changed. Every other setting stays as it is on each video. Nothing is saved until you confirm.</p>
+      <p className="notice">Apply an owned saved style or choose individual settings. Each video's source file stays unchanged. Nothing is saved until you review and confirm.</p>
       <p>Your plan can edit {batchSize} videos at a time. Renders use your plan&apos;s maximum resolution. {videos.length > batchSize ? `${videos.length} videos are selected, which is more than the plan allows. Remove some before reviewing.` : `${videos.length} video${videos.length === 1 ? "" : "s"} selected.`}</p>
       <ul>{videos.map((video) => <li key={video.id}>{video.title}</li>)}</ul>
       <form method="post" action="/api/forms/bulk-review">
         {videos.map((video) => <input key={video.id} type="hidden" name="media" value={video.id} />)}
+        <fieldset>
+          <legend>Reusable style</legend>
+          {templates.length === 0 ? <p>No saved styles yet. Save one from the <a href="/editor">video editor</a> first.</p> : <p><label>Apply a saved style to every selected video<br /><select name="styleTemplateId" defaultValue=""><option value="">Choose a style…</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} — {template.summary}</option>)}</select></label></p>}
+          <p><label><input type="checkbox" name="copyTemplateTrim" value="yes" /> Also copy the style's trim range (otherwise each video's trim is preserved)</label></p>
+          <p className="muted">A saved style applies its border, background, zoom, position, logo and other visual settings. It replaces individual settings below.</p>
+        </fieldset>
         <fieldset>
           <legend>Settings to apply</legend>
           <p><label><input type="checkbox" name="use" value="aspect" /> Aspect ratio</label><br /><select name="aspect">{ASPECT_RATIOS.map((aspect) => <option key={aspect} value={aspect}>{ASPECT_LABELS[aspect]}</option>)}</select></p>
@@ -46,23 +52,27 @@ export function BulkForm({ videos, images, batchSize }: { videos: MediaCard[]; i
 }
 
 export function BulkConfirmation({ draft }: { draft: BulkDraft }) {
-  const sample = samplePreviewSettings(draft.patch);
+  const sample = draft.videos[0]?.after ?? samplePreviewSettings(draft.patch);
   const layout = computePreviewLayout(sample, { width: 1920, height: 1080 });
   return (
     <>
       <h1>Confirm bulk edit</h1>
       <p className="notice">This will change {draft.videos.length} video{draft.videos.length === 1 ? "" : "s"}. Unticked settings stay as they are. Original uploads are not changed.</p>
+      {draft.styleName && <p>Saved style: <strong>{draft.styleName}</strong>. {draft.copyTemplateTrim ? "The template trim range will be copied." : "Each video's trim range will be preserved."}</p>}
       <h2>Settings that will change</h2>
       <ul>{draft.lines.map((line) => <li key={line}>{line}</li>)}</ul>
       <figure>
         <svg viewBox={`0 0 ${layout.canvas.width} ${layout.canvas.height}`} role="img" aria-label="Layout sketch of the ticked settings" style={{ width: "100%", maxWidth: "16rem", border: "1px solid var(--border)" }}>
           <rect width={layout.canvas.width} height={layout.canvas.height} fill={sample.background.kind === "solid" ? sample.background.colorHex : "#777777"} />
+          {layout.borderPx > 0 && <rect data-preview-border x={layout.borderBox.x} y={layout.borderBox.y} width={layout.borderBox.width} height={layout.borderBox.height} fill={sample.border.colorHex} />}
           <rect x={layout.video.x} y={layout.video.y} width={layout.video.width} height={layout.video.height} fill="#444444" />
+          {layout.logo && <rect data-preview-logo x={layout.logo.x} y={layout.logo.y} width={layout.logo.width} height={layout.logo.height} fill="#ffeb3b" fillOpacity={sample.logo?.opacity ?? 1} stroke="#111111" />}
         </svg>
-        <figcaption className="muted">Layout sketch of the ticked settings on a sample picture, not a rendered video. Other videos keep their own unticked settings.</figcaption>
+        <figcaption className="muted">Layout sketch of the selected style on a sample picture; the logo is shown as a marker, not its source image. This is not a rendered video. Other videos keep their trim unless copying was selected.</figcaption>
       </figure>
       <h2>Videos that will change</h2>
-      <ul>{draft.videos.map((video) => <li key={video.mediaId}><strong>{video.title}</strong>{video.notes.length > 0 && <span className="muted"> {video.notes.join(" ")}</span>}</li>)}</ul>
+      {draft.applyError && <p role="alert">{draft.applyError}</p>}
+      <ul>{draft.videos.map((video) => <li key={video.mediaId}><strong>{video.title}</strong>{video.applyStatus !== "pending" && <> — {video.applyStatus === "applied" ? "Settings applied" : "Not changed"}</>}{video.notes.length > 0 && <span className="muted"> {video.notes.join(" ")}</span>}</li>)}</ul>
       <h2>Not eligible</h2>
       {draft.skipped.length === 0 ? <p>Every selected item can be edited.</p> : <ul>{draft.skipped.map((skip, index) => <li key={`${skip.reason}-${index}`}>{skip.reason}</li>)}</ul>}
       {draft.applied ? (

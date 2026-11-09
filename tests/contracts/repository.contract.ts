@@ -2,7 +2,7 @@
 // over real PostgreSQL later) must pass the very same tests.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Repository, CycleRecord, SocialAccountRecord } from "../../src/server/repository.ts";
+import type { Repository, CycleRecord, PersistedCycleSchedule, SocialAccountRecord } from "../../src/server/repository.ts";
 import type { PlanId } from "../../src/lib/billing/catalog.ts";
 import { DEFAULT_EDITING_SETTINGS } from "../../src/lib/domain/editing-settings.ts";
 import type { CollectionPermissionGrant, CycleItem, MediaAsset, VideoCollection } from "../../src/lib/domain/types.ts";
@@ -22,11 +22,12 @@ export interface RepoHarness {
 }
 
 const T0 = new Date("2026-06-01T12:00:00Z"); const day = 86_400_000;
+const sampleSchedule: PersistedCycleSchedule = { timeZone: "Asia/Kolkata", intervalMinutes: 1440, postsPerInterval: 1, daysOfWeek: [1, 2, 3, 4, 5], windowStart: "09:00", windowEnd: "09:00", dailyMax: 1, endDate: null, startDate: "2026-06-02" };
 const media = (id: string, ownerId: string, over: Partial<MediaAsset> = {}): MediaAsset => ({ id, ownerId, status: "active", sizeBytes: 100, deleteAfter: null, title: id, kind: "video", durationMs: 1000, createdAt: new Date(T0.getTime() - day), width: 160, height: 120, validation: "verified", mimeType: "video/mp4", ...over });
 const collection = (id: string, ownerId: string, mediaIds: string[], over: Partial<VideoCollection> = {}): VideoCollection => ({ id, ownerId, visibility: "private", archived: false, mediaIds, name: id, ...over });
 const grant = (collectionId: string, granteeId: string, over: Partial<CollectionPermissionGrant> = {}): CollectionPermissionGrant => ({ collectionId, granteeId, capabilities: ["view"], status: "active", expiresAt: null, grantedById: "owner", ...over });
 const cycle = (id: string, ownerId: string, over: Partial<CycleRecord> = {}): CycleRecord => ({ id, ownerId, status: "draft", finalReviewConfirmed: false, name: id, socialAccountId: "acct", ...over });
-const item = (id: string, cycleId: string, over: Partial<CycleItem> = {}): CycleItem => ({ id, cycleId, cycleOwnerId: "bob", mediaAssetId: `m-${id}`, sourceKind: "owned", sourceCollectionId: null, status: "upcoming", position: 1, version: 1, scheduledFor: null, captionText: "", captionSource: "none", coverMediaId: null, coverIsCustom: false, coverState: "none", lockedBy: null, lockExpiresAt: null, reviewReason: null, ...over });
+const item = (id: string, cycleId: string, over: Partial<CycleItem> = {}): CycleItem => ({ id, cycleId, cycleOwnerId: "bob", mediaAssetId: `m-${id}`, selectedRenderOutputId: null, sourceKind: "owned", sourceCollectionId: null, status: "upcoming", position: 1, version: 1, scheduledFor: null, captionText: "", captionSource: "none", coverMediaId: null, coverIsCustom: false, coverState: "none", lockedBy: null, lockExpiresAt: null, reviewReason: null, ...over });
 const ids = (xs: { id: string }[]) => xs.map((x) => x.id).sort();
 
 export function runRepositoryContract(name: string, factory: () => Promise<RepoHarness> | RepoHarness): void {
@@ -119,7 +120,10 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
   });
 
   t("cycle items: ordered by position; version-checked save changes only when the version matches; races have one winner; identity never changes", async (h) => {
-    await h.repo.addCycleItems([item("b", "cy1", { position: 2 }), item("a", "cy1", { position: 1, scheduledFor: new Date(T0.getTime() + day) }), item("z", "cy2")]);
+    await h.seedCycle(cycle("cy1", "bob"));
+    await h.seedCycle(cycle("cy2", "bob"));
+    await h.repo.addCycleItems([item("b", "cy1", { position: 2 }), item("a", "cy1", { position: 1, scheduledFor: new Date(T0.getTime() + day) })]);
+    await h.repo.addCycleItems([item("z", "cy2")]);
     await h.repo.addCycleItems([]);
     const items = await h.repo.getCycleItems("cy1"); assert.deepEqual(items.map((i) => i.id), ["a", "b"]); assert.equal(items[0]!.scheduledFor!.getTime(), T0.getTime() + day);
     const a = items[0]!;
@@ -133,6 +137,100 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     const race = await Promise.all(["ONE", "TWO"].map((c) => h.repo.saveCycleItemsIfVersionMatches([{ item: { ...current, captionText: c, version: 3 }, expectedVersion: 2 }])));
     assert.equal(race.flat().filter((r) => r.saved).length, 1); assert.equal((await h.repo.getCycleItems("cy1"))[0]!.version, 3);
     assert.equal((await h.repo.getCycleItems("cy2")).length, 1);                                   // other cycle untouched
+  });
+
+  t("stop cycle: owned status change and item cancellation are atomic and version checked", async (h) => {
+    await h.repo.createCycle(cycle("stop-cycle", "bob"));
+    const queued = item("stop-item", "stop-cycle", { cycleOwnerId: "bob", status: "scheduled", scheduledFor: new Date(T0.getTime() + day) });
+    await h.repo.addCycleItems([queued]);
+    const cancelled = { ...queued, status: "cancelled" as const, scheduledFor: null, version: 2 };
+    assert.equal(await h.repo.stopCycle("stop-cycle", "eve", "draft", false, [{ item: cancelled, expectedVersion: 1 }]), false);
+    assert.equal((await h.repo.getCycle("stop-cycle"))!.status, "draft");
+    assert.equal(await h.repo.stopCycle("stop-cycle", "bob", "draft", false, [{ item: cancelled, expectedVersion: 99 }]), false);
+    assert.deepEqual([(await h.repo.getCycle("stop-cycle"))!.status, (await h.repo.getCycleItems("stop-cycle"))[0]!.status], ["draft", "scheduled"]);
+    assert.equal(await h.repo.stopCycle("stop-cycle", "bob", "draft", false, [{ item: cancelled, expectedVersion: 1 }]), true);
+    assert.deepEqual([(await h.repo.getCycle("stop-cycle"))!.status, (await h.repo.getCycleItems("stop-cycle"))[0]!.status], ["stopped", "cancelled"]);
+  });
+
+  t("cycle schedule: settings and assigned item times save atomically for the owner while draft; stale item/status/owner changes reject", async (h) => {
+    await h.repo.createCycle(cycle("schedule-cycle", "bob"));
+    const queued = item("schedule-item", "schedule-cycle", { cycleOwnerId: "bob" });
+    await h.repo.addCycleItems([queued]);
+    const scheduled = { ...queued, status: "scheduled" as const, scheduledFor: new Date("2026-06-02T03:30:00Z"), version: 2 };
+    assert.equal(await h.repo.saveCycleSchedule("schedule-cycle", "bob", sampleSchedule, [{ item: scheduled, expectedVersion: 1 }]), true);
+    assert.deepEqual((await h.repo.getCycle("schedule-cycle"))!.scheduleSettings, sampleSchedule);
+    assert.equal((await h.repo.getCycle("schedule-cycle"))!.timezone, "Asia/Kolkata");
+    assert.deepEqual([(await h.repo.getCycleItems("schedule-cycle"))[0]!.status, (await h.repo.getCycleItems("schedule-cycle"))[0]!.scheduledFor!.toISOString()], ["scheduled", "2026-06-02T03:30:00.000Z"]);
+    const changed = { ...scheduled, status: "upcoming" as const, scheduledFor: null, version: 3 };
+    const modifiedSettings = { ...sampleSchedule, timeZone: "UTC" };
+    assert.equal(await h.repo.saveCycleSchedule("schedule-cycle", "bob", modifiedSettings, [{ item: changed, expectedVersion: 1 }]), false);
+    assert.equal((await h.repo.getCycle("schedule-cycle"))!.scheduleSettings!.timeZone, "Asia/Kolkata"); // item conflict rolled back settings too
+    assert.equal(await h.repo.saveCycleSchedule("schedule-cycle", "eve", modifiedSettings, []), false);
+    assert.equal(await h.repo.transitionCycleStatus("schedule-cycle", "draft", "running", true), true);
+    assert.equal(await h.repo.saveCycleSchedule("schedule-cycle", "bob", modifiedSettings, []), false);
+  });
+
+  t("cycle item render output: explicitly selects only owned successful derivative matching source, version-checked, clearing allowed", async (h) => {
+    await h.repo.createCycle(cycle("output-cycle", "bob"));
+    await h.seedMedia(media("m-src1", "bob"), { storageKey: "media/bob/src1", thumbnailKey: null });
+    await h.seedMedia(media("m-src2", "bob"), { storageKey: "media/bob/src2", thumbnailKey: null });
+    const item1 = item("ci-1", "output-cycle", { cycleOwnerId: "bob", mediaAssetId: "m-src1", version: 1 });
+    await h.repo.addCycleItems([item1]);
+    await h.repo.saveRenderOutput({ id: "deriv-1", ownerId: "bob", sourceMediaId: "m-src1", storageKey: "render/bob/deriv-1", sizeBytes: 500, settingsHash: "h1", createdAt: T0 }, 1_000_000);
+    await h.repo.saveRenderOutput({ id: "deriv-wrong-owner", ownerId: "eve", sourceMediaId: "m-src1", storageKey: "render/eve/d", sizeBytes: 500, settingsHash: "h2", createdAt: T0 }, 1_000_000);
+    await h.repo.saveRenderOutput({ id: "deriv-wrong-source", ownerId: "bob", sourceMediaId: "m-src2", storageKey: "render/bob/d2", sizeBytes: 500, settingsHash: "h3", createdAt: T0 }, 1_000_000);
+
+    // Initial state: unselected
+    assert.equal((await h.repo.getCycleItems("output-cycle"))[0]!.selectedRenderOutputId, null);
+
+    // Wrong owner rejected
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "bob", renderOutputId: "deriv-wrong-owner", expectedVersion: 1 }), false);
+    // Wrong caller owner rejected
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "eve", renderOutputId: "deriv-1", expectedVersion: 1 }), false);
+    // Wrong source media rejected
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "bob", renderOutputId: "deriv-wrong-source", expectedVersion: 1 }), false);
+    // Stale version rejected
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "bob", renderOutputId: "deriv-1", expectedVersion: 99 }), false);
+    // Non-existent derivative rejected
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "bob", renderOutputId: "does-not-exist", expectedVersion: 1 }), false);
+
+    // Valid selection succeeds and increments version
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "bob", renderOutputId: "deriv-1", expectedVersion: 1 }), true);
+    const updated = (await h.repo.getCycleItems("output-cycle"))[0]!;
+    assert.equal(updated.selectedRenderOutputId, "deriv-1");
+    assert.equal(updated.version, 2);
+
+    // Clearing selection with null succeeds and increments version
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "bob", renderOutputId: null, expectedVersion: 2 }), true);
+    const cleared = (await h.repo.getCycleItems("output-cycle"))[0]!;
+    assert.equal(cleared.selectedRenderOutputId, null);
+    assert.equal(cleared.version, 3);
+
+    // Re-select for status check
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "bob", renderOutputId: "deriv-1", expectedVersion: 3 }), true);
+
+    // Non-draft cycle rejects selection
+    assert.equal(await h.repo.transitionCycleStatus("output-cycle", "draft", "running", true), true);
+    assert.equal(await h.repo.selectCycleItemRenderOutput({ cycleId: "output-cycle", itemId: "ci-1", ownerId: "bob", renderOutputId: null, expectedVersion: 4 }), false);
+  });
+
+  t("render outputs: listRenderOutputsForOwnerAndSource filters by owner and source, sorted by createdAt desc, id asc", async (h) => {
+    const t1 = new Date(T0.getTime() + 1000);
+    const t2 = new Date(T0.getTime() + 2000);
+    await h.repo.saveRenderOutput({ id: "ro-old", ownerId: "bob", sourceMediaId: "m-s1", storageKey: "k1", sizeBytes: 100, settingsHash: "s1", createdAt: t1 }, 1_000_000);
+    await h.repo.saveRenderOutput({ id: "ro-new", ownerId: "bob", sourceMediaId: "m-s1", storageKey: "k2", sizeBytes: 200, settingsHash: "s2", createdAt: t2 }, 1_000_000);
+    await h.repo.saveRenderOutput({ id: "ro-other-src", ownerId: "bob", sourceMediaId: "m-s2", storageKey: "k3", sizeBytes: 300, settingsHash: "s3", createdAt: t2 }, 1_000_000);
+    await h.repo.saveRenderOutput({ id: "ro-other-owner", ownerId: "eve", sourceMediaId: "m-s1", storageKey: "k4", sizeBytes: 400, settingsHash: "s4", createdAt: t2 }, 1_000_000);
+
+    const bobOutputs = await h.repo.listRenderOutputsForOwnerAndSource("bob", "m-s1");
+    assert.deepEqual(bobOutputs.map((o) => o.id), ["ro-new", "ro-old"]);
+    assert.equal(bobOutputs[0]!.sizeBytes, 200);
+
+    const eveOutputs = await h.repo.listRenderOutputsForOwnerAndSource("eve", "m-s1");
+    assert.deepEqual(eveOutputs.map((o) => o.id), ["ro-other-owner"]);
+
+    const emptyOutputs = await h.repo.listRenderOutputsForOwnerAndSource("bob", "non-existent");
+    assert.deepEqual(emptyOutputs, []);
   });
 
   t("usage: monthly sums, scheduled-items count and recent publish times (own published items only)", async (h) => {
@@ -152,7 +250,8 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
 
   t("social accounts: lookup and per-owner list", async (h) => {
     await h.seedSocialAccount({ id: "a1", userId: "bob", status: "connected" }); await h.seedSocialAccount({ id: "a2", userId: "bob", status: "token_expired" }); await h.seedSocialAccount({ id: "a3", userId: "eve", status: "connected" });
-    assert.deepEqual(await h.repo.getSocialAccount("a2"), { id: "a2", userId: "bob", status: "token_expired" }); assert.equal(await h.repo.getSocialAccount("nope"), null);
+    const expiredAccount = await h.repo.getSocialAccount("a2");
+    assert.deepEqual(expiredAccount && { id: expiredAccount.id, userId: expiredAccount.userId, status: expiredAccount.status }, { id: "a2", userId: "bob", status: "token_expired" }); assert.equal(await h.repo.getSocialAccount("nope"), null);
     assert.deepEqual(ids(await h.repo.listSocialAccountsForOwner("bob")), ["a1", "a2"]);
   });
 

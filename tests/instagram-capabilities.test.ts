@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  INSTAGRAM_VERIFIED, INSTAGRAM_UNVERIFIED, instagramCoverSupport, findPublishQuotaViolations, isContainerCreationAllowedNow, nextActionForContainerStatus,
+  INSTAGRAM_VERIFIED, INSTAGRAM_SCHEDULE_ESTIMATE, INSTAGRAM_UNVERIFIED, instagramCoverSupport, findPublishQuotaViolations, isContainerCreationAllowedNow, nextActionForContainerStatus,
 } from "../src/lib/integrations/instagram-capabilities.ts";
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 5, 1, 0, 0) + minutes * 60_000);
 
-test("documented constants are recorded with their conflicts and unknowns, not hidden", () => {
-  assert.equal(INSTAGRAM_VERIFIED.publishLimitPer24h, 100);
+test("documented constants distinguish reference estimates from live account quota", () => {
+  assert.equal(INSTAGRAM_SCHEDULE_ESTIMATE.publishLimitPer24h, 100);
   assert.match(INSTAGRAM_VERIFIED.publishLimitDocConflict, /50/);
   assert.equal(INSTAGRAM_VERIFIED.containerLifetimeHours, 24);
   assert.equal(INSTAGRAM_VERIFIED.photoFormat, "JPEG");
@@ -17,6 +17,7 @@ test("documented constants are recorded with their conflicts and unknowns, not h
   assert.ok(INSTAGRAM_UNVERIFIED.length >= 5);
   assert.ok(INSTAGRAM_UNVERIFIED.some((t) => /caption/i.test(t)));
   assert.ok(INSTAGRAM_UNVERIFIED.some((t) => /300MB/.test(t)));
+  assert.ok(INSTAGRAM_UNVERIFIED.some((t) => /thumb_offset/.test(t)));
   assert.ok(!INSTAGRAM_UNVERIFIED.some((t) => /maximum duration/.test(t)));
 });
 
@@ -25,7 +26,7 @@ test("cover support: Reels have cover parameters in the official reference; phot
   assert.equal(instagramCoverSupport("photo"), "unsupported");
 });
 
-test("rolling 24h quota: exactly the limit is fine, one more is flagged, old posts age out", () => {
+test("rolling 24h local schedule estimate is advisory; worker performs live account check", () => {
   const exactly = Array.from({ length: 100 }, (_, i) => at(i));
   assert.deepEqual(findPublishQuotaViolations(exactly), []);
   const over = findPublishQuotaViolations([...exactly, at(100)]);

@@ -2,15 +2,16 @@
 // They check that OUR code connects together (imports, props of our own components, strict null handling).
 // They do NOT check HTML/DOM attribute names or the real Node/React APIs - the real `npm run typecheck` does, after `npm install`.
 declare module "node:crypto" {
+  export interface Hash { update(s: string | Uint8Array): Hash; digest(enc: string): string; }
   export function randomBytes(n: number): { toString(enc: string): string };
-  export function createHash(a: string): { update(s: string): { digest(enc: string): string } };
+  export function createHash(a: string): Hash;
 }
 declare module "node:crypto" { export function createHmac(a: string, k: string): { update(d: unknown): { digest(e: string): string } }; export function timingSafeEqual(a: unknown, b: unknown): boolean; }
 declare const Buffer: any; type Buffer = any;
 declare function structuredClone<T>(v: T): T;
 declare const process: { env: Record<string, string | undefined>; cwd(): string };
 declare module "node:child_process" { export function spawn(c: string, a: string[], o?: unknown): { on(ev: string, cb: (...args: any[]) => void): any; kill(signal?: string): boolean; stdout: { on(ev: string, cb: (d: any) => void): any }; stderr: { on(ev: string, cb: (d: any) => void): any } }; }
-declare module "node:fs/promises" { export const mkdtemp: any, writeFile: any, rm: any, mkdir: any, realpath: any, open: any, chmod: any, link: any, unlink: any, lstat: any; export function stat(p: string): Promise<{ isFile(): boolean; mode: number }>; }
+declare module "node:fs/promises" { export const mkdtemp: any, writeFile: any, rm: any, mkdir: any, realpath: any, open: any, chmod: any, link: any, unlink: any, lstat: any; export function stat(p: string): Promise<{ isFile(): boolean; mode: number; size: number }>; }
 declare module "node:os" { export const tmpdir: () => string; }
 declare module "node:path" { const p: any; export default p; }
 declare class File { name: string; type: string; arrayBuffer(): Promise<ArrayBuffer>; }
@@ -18,7 +19,7 @@ declare module "node:fs" { export function createReadStream(p: string, o?: unkno
 declare module "node:stream" { export const Readable: { toWeb(s: unknown): unknown }; }
 declare module "node:crypto" {
   export function randomBytes(n: number): Uint8Array & { toString(enc: string): string };
-  export function createHash(a: string): { update(s: string): { digest(enc: string): string } };
+  export function createHash(a: string): Hash;
   export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean;
   export function scrypt(pw: string, salt: Uint8Array, len: number, opts: { N: number; r: number; p: number; maxmem: number }, cb: (e: Error | null, key: Uint8Array) => void): void;
 }
@@ -29,6 +30,10 @@ declare module "next/headers" { export function headers(): Promise<{ get(name: s
 // MINIMAL stand-ins for @types/react: component props of OUR OWN components are still checked; HTML attributes are not.
 declare module "react" {
   export type ReactNode = any;
+  export interface ChangeEvent<T> { currentTarget: T; }
+  export function createElement(type: any, props?: any, ...children: any[]): any;
+  export function useState<T>(initial: T | (() => T)): [T, (value: T | ((current: T) => T)) => void];
+  export function useMemo<T>(factory: () => T, deps: unknown[]): T;
   export function useEffect(effect: () => void | (() => void), deps?: unknown[]): void;
 }
 declare module "react/jsx-runtime" {

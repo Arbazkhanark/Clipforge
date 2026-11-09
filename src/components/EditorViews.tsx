@@ -1,41 +1,22 @@
 import { ASPECT_RATIOS } from "../lib/render/ffmpeg-command.ts";
+import { formatEditorZoomPercent } from "../lib/domain/editor-gestures.ts";
 import { EditorSession } from "./EditorSession.tsx";
-import { LogoDragger } from "./LogoDragger.tsx";
+import { EditorVideoPreview } from "./EditorVideoPreview.tsx";
 import { Thumbnail } from "./MediaTable.tsx";
 import type { EditorPageData } from "../server/queries.ts";
 
 const ASPECT_LABELS: Record<(typeof ASPECT_RATIOS)[number], string> = { "9:16": "9:16 (Reels, recommended)", "4:5": "4:5 (portrait post)", "1:1": "1:1 (square)", "16:9": "16:9 (landscape)", original: "Original" };
 
-/** A to-scale sketch of the layout. It is NOT a rendered video and says so. */
+/** Server-authorized media URL plus owned image URLs are passed to the interactive preview. */
 export function EditorPreview({ data }: { data: EditorPageData }) {
-  const { layout, settings, source } = data;
-  if (!layout || !source) return null;
-  const { canvas, video, borderBox, logo } = layout;
-  const thumb = source.hasThumbnail ? `/api/media/file?id=${encodeURIComponent(source.id)}&variant=thumbnail` : null;
-  return (
-    <figure>
-      <svg id="editor-preview" viewBox={`0 0 ${canvas.width} ${canvas.height}`} role="img" aria-label="Layout sketch of the edited video" style={{ width: "100%", maxWidth: "22rem", border: "1px solid var(--border)" }}>
-        <defs><clipPath id="canvas-clip"><rect width={canvas.width} height={canvas.height} /></clipPath></defs>
-        <g clipPath="url(#canvas-clip)">
-          <rect width={canvas.width} height={canvas.height} fill={settings.background.kind === "solid" ? settings.background.colorHex : "#777777"} data-background={settings.background.kind} />
-          {settings.background.kind === "blur" && thumb && <image href={thumb} width={canvas.width} height={canvas.height} preserveAspectRatio="xMidYMid slice" opacity={0.45} />}
-          {layout.borderPx > 0 && <rect data-border x={borderBox.x} y={borderBox.y} width={borderBox.width} height={borderBox.height} fill={settings.border.colorHex} />}
-          {thumb ? <image data-video href={thumb} x={video.x} y={video.y} width={video.width} height={video.height} preserveAspectRatio="none" /> : <rect data-video x={video.x} y={video.y} width={video.width} height={video.height} fill="#444444" />}
-          {logo && settings.logo && (
-            <g opacity={settings.logo.opacity}>
-              <rect data-logo-handle data-x={settings.logo.centerX} data-y={settings.logo.centerY} x={logo.x} y={logo.y} width={logo.width} height={logo.height} fill="rgba(255,235,59,0.75)" stroke="#000000" strokeWidth={Math.max(2, canvas.width / 270)} strokeDasharray="12 8" style={{ cursor: "move", touchAction: "none" }} />
-            </g>
-          )}
-        </g>
-      </svg>
-      <figcaption className="muted">Layout sketch ({canvas.width} × {canvas.height}), not a rendered video. {data.assumedSourceSize ? "The video's size is unknown, so a 16:9 picture is assumed. " : ""}The exported file is a separate video.</figcaption>
-      {logo && <LogoDragger svgId="editor-preview" formId="editor-form" />}
-    </figure>
-  );
+  const { source } = data;
+  if (!data.layout || !source) return null;
+  const fileUrl = (id: string) => `/api/media/file?id=${encodeURIComponent(id)}&variant=preview`;
+  return <EditorVideoPreview videoUrl={fileUrl(source.id)} sourceId={source.id} sourceWidth={source.width} sourceHeight={source.height} durationMs={source.durationMs} assumedSourceSize={data.assumedSourceSize} settings={data.settings} maxResolution={data.maxResolution} formId="editor-form" images={data.logoChoices.map((image) => ({ id: image.id, url: fileUrl(image.id), width: image.width, height: image.height }))} />;
 }
 
 const Range = ({ name, label, min, max, step, value }: { name: string; label: string; min: number; max: number; step: number; value: number }) =>
-  <p><label>{label}: {value}<br /><input type="range" name={name} min={min} max={max} step={step} defaultValue={value} /></label></p>;
+  <p><label>{label}: <output id={`editor-range-${name}-value`}>{value}</output><br /><input type="range" name={name} min={min} max={max} step={step} defaultValue={value} /></label></p>;
 
 export function EditorForm({ data }: { data: EditorPageData }) {
   const { settings, source } = data;
@@ -44,9 +25,21 @@ export function EditorForm({ data }: { data: EditorPageData }) {
     <form id="editor-form" method="get" action="/editor">
       <input type="hidden" name="media" value={source.id} />
       <fieldset>
+        <legend>Trim video</legend>
+        <p className="muted">Times are measured from the start of the source video. Leave the end at the source duration to export through the final frame.</p>
+        <p><label>Start time (seconds)<br /><input type="number" name="trimStart" min={0} max={source.durationMs ? source.durationMs / 1000 : undefined} step={0.01} required defaultValue={settings.trim.startSeconds} /></label></p>
+        <p><label>End time (seconds)<br /><input type="number" name="trimEnd" min={0.01} max={source.durationMs ? source.durationMs / 1000 : undefined} step={0.01} required defaultValue={settings.trim.endSeconds ?? (source.durationMs ? source.durationMs / 1000 : Math.max(1, settings.trim.startSeconds + 1))} /></label></p>
+        {!source.durationMs && <p role="note">The source duration is not verified. Rendering remains unavailable until it can be checked.</p>}
+      </fieldset>
+      <fieldset>
         <legend>Shape</legend>
         <p><label>Aspect ratio<br /><select name="aspect" defaultValue={settings.aspect}>{ASPECT_RATIOS.map((a) => <option key={a} value={a}>{ASPECT_LABELS[a]}</option>)}</select></label></p>
-        <Range name="zoom" label="Zoom" min={1} max={3} step={0.05} value={settings.zoom} />
+        <p><label>Zoom: <output id="editor-range-zoom-value">{formatEditorZoomPercent(settings.zoom)}</output><br /><input type="range" name="zoom" min={1} max={3} step={0.05} defaultValue={settings.zoom} /></label></p>
+        <p className="editor-zoom-actions" aria-label="Zoom controls">
+          <button type="button" data-zoom-action="out" aria-label="Zoom out">−</button>{" "}
+          <button type="button" data-zoom-action="in" aria-label="Zoom in">+</button>{" "}
+          <button type="button" data-zoom-action="reset">Reset zoom</button>
+        </p>
         <Range name="offsetX" label="Move left / right" min={-1} max={1} step={0.05} value={settings.offsetX} />
         <Range name="offsetY" label="Move up / down" min={-1} max={1} step={0.05} value={settings.offsetY} />
       </fieldset>

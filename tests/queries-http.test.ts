@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { DEMO_USER_ID, DEMO_CYCLE_ID, seedDemoData } from "../src/server/demo-data.ts";
 import { buildContext, type Runtime } from "../src/server/runtime.ts";
-import { getCollectionDetail, getCollectionsOverview, getCycleDetail, getDashboardData, getMediaLibrary, MEDIA_PAGE_SIZE } from "../src/server/queries.ts";
+import { getCollectionDetail, getCollectionsOverview, getCycleDetail, getDashboardData, getInstagramAccounts, getMediaLibrary, MEDIA_PAGE_SIZE } from "../src/server/queries.ts";
 import { AppError } from "../src/server/errors.ts";
 import { jsonRoute, checkSameOrigin, MAX_JSON_BODY_BYTES } from "../src/server/http.ts";
 import { createCycle, mixIntoCycle, startPublishingCycle } from "../src/server/handlers/cycles.ts";
@@ -24,6 +24,23 @@ test("queries require sign-in", async () => {
   for (const q of [() => getDashboardData(anon), () => getMediaLibrary(anon, 1), () => getCollectionsOverview(anon), () => getCollectionDetail(anon, "demo-col-1"), () => getCycleDetail(anon, DEMO_CYCLE_ID)]) assert.equal((await errorOf(q())).status, 401);
 });
 
+test("Instagram account cards report safe eligibility states without exposing account ids or tokens", async () => {
+  const valid = { platform: "instagram" as const, status: "connected" as const, hasToken: true, accountType: "BUSINESS" as const, grantedScopes: ["instagram_business_basic", "instagram_business_content_publish"], tokenExpiresAt: new Date("2026-08-01T00:00:00Z") };
+  repo.socialAccounts.set("eligible", { id: "eligible", userId: DEMO_USER_ID, ...valid });
+  repo.socialAccounts.set("permissions", { id: "permissions", userId: DEMO_USER_ID, ...valid, grantedScopes: ["instagram_business_basic"] });
+  repo.socialAccounts.set("personal", { id: "personal", userId: DEMO_USER_ID, ...valid, accountType: "PERSONAL" });
+  repo.socialAccounts.set("unknown", { id: "unknown", userId: DEMO_USER_ID, ...valid, accountType: undefined });
+  repo.socialAccounts.set("expired", { id: "expired", userId: DEMO_USER_ID, ...valid, status: "token_expired" });
+  repo.socialAccounts.set("disconnected", { id: "disconnected", userId: DEMO_USER_ID, ...valid, status: "disconnected" });
+  repo.socialAccounts.set("unknown-status", { id: "unknown-status", userId: DEMO_USER_ID, ...valid, status: "unknown" as never });
+  const cards = await getInstagramAccounts(await ctxFor(DEMO_USER_ID));
+  assert.deepEqual(Object.fromEntries(cards.filter((card) => card.id !== "demo-account").map((card) => [card.id, card.eligibilityStatus])), {
+    eligible: "connected_eligible", permissions: "missing_permissions", personal: "unsupported_personal", unknown: "unsupported_account_type", expired: "expired_connection", disconnected: "not_connected", "unknown-status": "reconnection_required",
+  });
+  assert.equal(JSON.stringify(cards).includes("externalAccountId"), false);
+  assert.equal(JSON.stringify(cards).includes("accessToken"), false);
+});
+
 test("media library paging: page size, totals, newest first, bounds", async () => {
   const ctx = await ctxFor(DEMO_USER_ID);
   const first = await getMediaLibrary(ctx, undefined);
@@ -40,6 +57,20 @@ test("view models contain ONLY whitelisted fields (no storage keys, urls, owner 
   assert.ok(!/storageKey|ownerId|granteeId|grantedById|https?:|s3/i.test(everything), everything.slice(0, 200));
   const media = (await getMediaLibrary(ctx, 1)).items[0]!;
   assert.deepEqual(Object.keys(media).sort(), ["durationMs", "hasThumbnail", "height", "id", "kind", "sizeBytes", "status", "title", "validation", "width"]);
+});
+
+test("dashboard summaries include owner-safe campaign counts, next planned time, and status filtering", async () => {
+  const ctx = await ctxFor(DEMO_USER_ID);
+  const all = await getDashboardData(ctx);
+  assert.equal(all.campaigns.length, 1);
+  assert.deepEqual([all.campaigns[0]!.totalItems, all.campaigns[0]!.scheduledItems], [4, 2]);
+  assert.equal(all.campaigns[0]!.nextScheduledAt!.toISOString(), new Date(NOW.getTime() + 24 * 3_600_000).toISOString());
+  assert.equal(all.campaigns[0]!.accountName, "Instagram account");
+  assert.equal((await getDashboardData(ctx, "Asia/Kolkata", "completed")).campaigns.length, 0);
+  repo.cycles.set(DEMO_CYCLE_ID, { ...repo.cycles.get(DEMO_CYCLE_ID)!, status: "running" });
+  assert.equal((await getDashboardData(ctx, "Asia/Kolkata", "running")).campaigns[0]!.status, "running");
+  const eve = await getDashboardData(await ctxFor("eve"));
+  assert.deepEqual(eve.campaigns, []);
 });
 
 test("a collection you cannot view is indistinguishable from a missing one; expired and revoked grants end access", async () => {

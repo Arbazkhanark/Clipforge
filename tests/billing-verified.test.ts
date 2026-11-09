@@ -12,11 +12,11 @@ const call = (raw: string, over: Partial<Parameters<typeof interpretRazorpayWebh
 
 test("webhook: valid signed subscription event is interpreted", () => {
   const result = call(body("subscription.activated"));
-  assert.deepEqual(result, { kind: "subscription_event", eventId: "evt_1", event: "subscription.activated", subscriptionId: "sub_1", newStatus: "active", createdAt: 1000 });
+  assert.deepEqual(result, { kind: "subscription_event", eventId: "evt_1", event: "subscription.activated", subscriptionId: "sub_1", newStatus: "authenticated", createdAt: 1000 });
 });
 
 test("webhook: every documented subscription event maps to the right status", () => {
-  const expected: Record<string, string> = { authenticated: "authenticated", activated: "active", charged: "active", pending: "pending", halted: "halted", cancelled: "cancelled" };
+  const expected: Record<string, string> = { authenticated: "authenticated", activated: "authenticated", charged: "active", pending: "pending", halted: "halted", cancelled: "cancelled" };
   for (const [name, status] of Object.entries(expected)) assert.equal(WEBHOOK_EVENT_TO_STATUS[`subscription.${name}`], status);
 });
 

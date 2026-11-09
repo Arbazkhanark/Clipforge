@@ -7,12 +7,12 @@ export type SubscriptionStatus =
   | "paused" | "cancelled" | "completed" | "expired";
 
 const ALLOWED_TRANSITIONS: Record<SubscriptionStatus, SubscriptionStatus[]> = {
-  created: ["authenticated", "active", "cancelled", "expired"],
+  created: ["authenticated", "active", "pending", "cancelled", "expired"],
   authenticated: ["active", "cancelled", "expired"],
-  active: ["pending", "paused", "cancelled", "completed"],
-  pending: ["active", "halted", "cancelled"],
-  halted: ["active", "cancelled"],
-  paused: ["active", "cancelled"],
+  active: ["pending", "halted", "paused", "cancelled", "completed", "expired"],
+  pending: ["active", "halted", "cancelled", "expired"],
+  halted: ["active", "cancelled", "expired"],
+  paused: ["active", "cancelled", "expired"],
   cancelled: [], completed: [], expired: [],
 };
 

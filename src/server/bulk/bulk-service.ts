@@ -1,14 +1,15 @@
 // Bulk style changes and bulk renders. Original files are never written. Each video keeps the settings that were not ticked.
+import { createHash } from "node:crypto";
 import { getPlan } from "../../lib/billing/catalog.ts";
 import { applySettingsPatch, checkedPatch, parseBulkForm, samplePreviewSettings, type SettingsPatch } from "../../lib/domain/bulk-edit.ts";
 import { DEFAULT_EDITING_SETTINGS, parseEditingSettings, videoSettingsName, type EditingSettings } from "../../lib/domain/editing-settings.ts";
 import { sourceRenderProblems } from "../../lib/render/render-limits.ts";
 import { requireUser, type RequestContext } from "../context.ts";
-import { AppError, notFound, planLimit, validationFailed } from "../errors.ts";
+import { AppError, conflict, notFound, planLimit, validationFailed } from "../errors.ts";
 import type { EditingTemplateRecord } from "../repository.ts";
 import { startExport, type ExportRunner, type RenderJob } from "../render/export-service.ts";
 
-export interface BulkVideoPlan { mediaId: string; title: string; notes: string[]; after: EditingSettings; }
+export interface BulkVideoPlan { mediaId: string; title: string; notes: string[]; before: EditingSettings | null; after: EditingSettings; applyStatus: "pending" | "applied" | "failed"; }
 export interface BulkSkip { reason: string; }
 export interface BulkDraft {
   id: string;
@@ -18,6 +19,9 @@ export interface BulkDraft {
   videos: BulkVideoPlan[];
   skipped: BulkSkip[];
   applied: boolean;
+  applyError?: string;
+  styleName?: string;
+  copyTemplateTrim: boolean;
 }
 export interface RenderBatchItem { mediaId: string; title: string; jobId: string | null; refused: string | null; }
 export interface RenderBatch { id: string; ownerId: string; key: string; items: RenderBatchItem[]; }
@@ -47,11 +51,23 @@ async function classify(ctx: RequestContext, userId: string, mediaIds: string[],
   const skipped: BulkSkip[] = [];
   for (const mediaId of mediaIds) {
     const media = await ctx.repo.getMedia(mediaId);
-    if (!media || media.ownerId !== userId || media.status === "deleted") { skipped.push({ reason: "Not available" }); continue; }
-    if ((media.kind ?? "video") !== "video") { skipped.push({ reason: `${media.title ?? "An image"} is an image, so it cannot take video settings.` }); continue; }
-    const merged = checkedPatch(savedFrom(templates, media.id), patch);
+    if (!media || media.ownerId !== userId || media.status !== "active") throw notFound("Selected video");
+    if ((media.kind ?? "video") !== "video") throw validationFailed(["Every selected item must be an active video."]);
+    const savedRow = templates.find((template) => template.name === videoSettingsName(media.id));
+    const beforeParsed = savedRow ? parseEditingSettings(savedRow.settings) : null;
+    if (beforeParsed && !beforeParsed.ok) throw validationFailed(["A selected video's saved settings are invalid. Open it in the editor and save valid settings first."]);
+    const before = beforeParsed?.ok ? beforeParsed.settings : null;
+    const merged = checkedPatch(before ?? DEFAULT_EDITING_SETTINGS, patch);
     if (!merged.ok) throw validationFailed(merged.problems);
-    videos.push({ mediaId: media.id, title: media.title ?? "Untitled", notes: merged.notes, after: merged.settings });
+    if (merged.settings.logo) {
+      const image = await ctx.repo.getMedia(merged.settings.logo.mediaId);
+      if (!image || image.ownerId !== userId || image.status !== "active" || image.kind !== "image") throw validationFailed(["The style's logo must be one of your active images."]);
+    }
+    if (merged.settings.background.kind === "image") {
+      const image = await ctx.repo.getMedia(merged.settings.background.mediaId);
+      if (!image || image.ownerId !== userId || image.status !== "active" || image.kind !== "image") throw validationFailed(["The style's background must be one of your active images."]);
+    }
+    videos.push({ mediaId: media.id, title: media.title ?? "Untitled", notes: merged.notes, before, after: merged.settings, applyStatus: "pending" });
   }
   return { videos, skipped };
 }
@@ -59,11 +75,22 @@ async function classify(ctx: RequestContext, userId: string, mediaIds: string[],
 export async function reviewBulkEdit(ctx: RequestContext, rawInput: unknown): Promise<{ draftId: string }> {
   const userId = requireUser(ctx);
   const parsed = readBulk(rawInput);
-  const plan = getPlan(await ctx.repo.getPlanIdForUser(userId));
-  const { videos, skipped } = await classify(ctx, userId, parsed.mediaIds, parsed.patch);
+  let patch = parsed.patch;
+  let styleName: string | undefined;
+  if (parsed.styleTemplateId) {
+    const style = (await ctx.repo.listTemplatesForOwner(userId)).find((template) => template.id === parsed.styleTemplateId && !template.name.startsWith("v:"));
+    if (!style) throw notFound("Saved style");
+    const validStyle = parseEditingSettings(style.settings);
+    if (!validStyle.ok) throw validationFailed(["That saved style is invalid and cannot be applied."]);
+    styleName = style.name;
+    patch = patchFromStyle(validStyle.settings, parsed.copyTemplateTrim);
+    parsed.lines = [`Saved style: ${style.name}`, parsed.copyTemplateTrim ? "Trim range: copied from the style" : "Trim range: preserved for each video"];
+  }
+  const plan = getPlan(await ctx.repo.getPlanIdForUser(userId, ctx.now));
+  const { videos, skipped } = await classify(ctx, userId, parsed.mediaIds, patch);
   if (videos.length > plan.limits.batchSize) throw planLimit(`Your plan can edit ${plan.limits.batchSize} videos at a time. You selected ${videos.length}. Nothing was changed.`);
   if (videos.length === 0) throw validationFailed(["None of the selected items can be edited."]);
-  const draft: BulkDraft = { id: ctx.newId(), ownerId: userId, patch: parsed.patch, lines: parsed.lines, videos, skipped, applied: false };
+  const draft: BulkDraft = { id: ctx.newId(), ownerId: userId, patch, lines: parsed.lines, videos, skipped, applied: false, ...(styleName ? { styleName } : {}), copyTemplateTrim: parsed.copyTemplateTrim };
   drafts.set(draft.id, draft);
   return { draftId: draft.id };
 }
@@ -74,13 +101,28 @@ export async function applyBulkEdit(ctx: RequestContext, rawInput: unknown): Pro
   const draft = drafts.get(draftId);
   if (!draft || draft.ownerId !== userId) throw notFound("Bulk edit");
   if (draft.applied) return { draftId, updated: draft.videos.length, skipped: draft.skipped.length };
-  for (const video of draft.videos) {
-    const media = await ctx.repo.getMedia(video.mediaId);
-    if (!media || media.ownerId !== userId || media.status !== "active" || (media.kind ?? "video") !== "video") throw notFound("Video");
-    await ctx.repo.saveVideoSettings({ id: ctx.newId(), ownerId: userId, name: videoSettingsName(video.mediaId), settings: video.after, createdAt: ctx.now });
+  // A reviewed draft is not a reservation of its original plan allowance. Promotions may
+  // expire or be revoked between review and application, so authorize the write at commit time.
+  const currentPlanId = await ctx.repo.getPlanIdForUser(userId, ctx.now);
+  const currentBatchLimit = getPlan(currentPlanId).limits.batchSize;
+  if (draft.videos.length > currentBatchLimit) {
+    draft.applyError = `Your current plan can edit ${currentBatchLimit} videos at a time. No settings were changed.`;
+    draft.videos.forEach((video) => { video.applyStatus = "failed"; });
+    throw planLimit(`Your current plan can edit ${currentBatchLimit} videos at a time. This draft contains ${draft.videos.length}. Nothing was changed.`);
   }
-  draft.applied = true;
-  await ctx.repo.appendAudit({ actorId: userId, action: "editor.bulk_applied", entityType: "User", entityId: userId, metadata: { updated: draft.videos.length, skipped: draft.skipped.length, fields: draft.lines } });
+  const templates = draft.videos.map((video) => ({ id: ctx.newId(), ownerId: userId, name: videoSettingsName(video.mediaId), settings: video.after, createdAt: ctx.now }));
+  const operationFingerprint = createHash("sha256").update(JSON.stringify({ ownerId: userId, videos: [...draft.videos].sort((a, b) => a.mediaId.localeCompare(b.mediaId)).map((video) => [video.mediaId, video.before, video.after]) })).digest("hex");
+  const requiredImageIds = [...new Set(draft.videos.flatMap((video) => [video.after.logo?.mediaId, video.after.background.kind === "image" ? video.after.background.mediaId : undefined].filter((id): id is string => Boolean(id))))];
+  try {
+    const result = await ctx.repo.applyVideoSettingsBatch({ ownerId: userId, operationId: draft.id, operationFingerprint, templates, expectedSettings: draft.videos.map((video) => ({ name: videoSettingsName(video.mediaId), settings: video.before })), requiredImageIds, audit: { actorId: userId, action: "editor.bulk_applied", entityType: "BulkEditDraft", entityId: draft.id, metadata: { operationFingerprint, updated: draft.videos.length, fields: draft.lines } } });
+    if (result === "not_owned") throw notFound("Selected video");
+    if (result === "conflict") throw conflict("This bulk edit conflicts with an earlier operation. Review the videos and try again.");
+    draft.applied = true; draft.applyError = undefined; draft.videos.forEach((video) => { video.applyStatus = "applied"; });
+  } catch (error) {
+    draft.applyError = "No video settings were changed. The bulk edit could not be applied; review the selection and try again.";
+    draft.videos.forEach((video) => { video.applyStatus = "failed"; });
+    throw error;
+  }
   return { draftId, updated: draft.videos.length, skipped: draft.skipped.length };
 }
 
@@ -125,7 +167,7 @@ export function batchJobs(ctx: RequestContext, batch: RenderBatch): { title: str
   });
 }
 
-function readBulk(rawInput: unknown): { mediaIds: string[]; patch: SettingsPatch; lines: string[] } {
+function readBulk(rawInput: unknown): { mediaIds: string[]; patch: SettingsPatch; lines: string[]; styleTemplateId?: string; copyTemplateTrim: boolean } {
   if (typeof rawInput !== "object" || rawInput === null) throw validationFailed(["The bulk edit is not valid."]);
   const input = rawInput as Record<string, unknown>;
   const get = (key: string): string | undefined => typeof input[key] === "string" ? input[key] : undefined;
@@ -133,6 +175,20 @@ function readBulk(rawInput: unknown): { mediaIds: string[]; patch: SettingsPatch
   const parsed = parseBulkForm(get, getAll);
   if (!parsed.ok) throw validationFailed(parsed.problems);
   return parsed;
+}
+
+function patchFromStyle(settings: EditingSettings, copyTrim: boolean): SettingsPatch {
+  return {
+    aspect: settings.aspect,
+    backgroundKind: settings.background.kind,
+    ...(settings.background.kind === "solid" ? { solidColor: settings.background.colorHex } : {}),
+    ...(settings.background.kind === "image" ? { backgroundImageId: settings.background.mediaId } : {}),
+    ...(settings.background.kind === "blur" ? { blurStrength: settings.background.strength } : {}),
+    zoom: settings.zoom, offsetX: settings.offsetX, offsetY: settings.offsetY,
+    borderEnabled: settings.border.thicknessPx > 0, borderColor: settings.border.colorHex, borderThickness: settings.border.thicknessPx,
+    ...(settings.logo ? { logoMediaId: settings.logo.mediaId, logoPosition: { centerX: settings.logo.centerX, centerY: settings.logo.centerY }, logoSize: settings.logo.widthFraction, logoOpacity: settings.logo.opacity } : { clearLogo: true }),
+    ...(copyTrim ? { trim: { ...settings.trim } } : {}),
+  };
 }
 
 function safeError(error: unknown): string {

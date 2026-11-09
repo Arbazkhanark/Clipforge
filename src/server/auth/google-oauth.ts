@@ -54,20 +54,20 @@ export function safeEqual(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function cookieName(kind: "state" | "pkce" | "link", secure: boolean): string {
-  const suffix = kind === "state" ? "google_state" : kind === "pkce" ? "google_pkce" : "google_link";
+function cookieName(kind: "state" | "pkce" | "link" | "return", secure: boolean): string {
+  const suffix = kind === "state" ? "google_state" : kind === "pkce" ? "google_pkce" : kind === "link" ? "google_link" : "google_return";
   return `${secure ? "__Host-" : ""}clipforge_${suffix}`;
 }
 
-export function buildOAuthCookie(kind: "state" | "pkce" | "link", value: string, secure: boolean): string {
+export function buildOAuthCookie(kind: "state" | "pkce" | "link" | "return", value: string, secure: boolean): string {
   return [`${cookieName(kind, secure)}=${value}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${OAUTH_MAX_AGE_SECONDS}`, ...(secure ? ["Secure"] : [])].join("; ");
 }
 
-export function buildClearedOAuthCookie(kind: "state" | "pkce" | "link", secure: boolean): string {
+export function buildClearedOAuthCookie(kind: "state" | "pkce" | "link" | "return", secure: boolean): string {
   return [`${cookieName(kind, secure)}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0", ...(secure ? ["Secure"] : [])].join("; ");
 }
 
-export function readOAuthCookie(cookieHeader: string | null | undefined, kind: "state" | "pkce" | "link", secure: boolean): string | null {
+export function readOAuthCookie(cookieHeader: string | null | undefined, kind: "state" | "pkce" | "link" | "return", secure: boolean): string | null {
   if (!cookieHeader || cookieHeader.length > 8192) return null;
   const expected = cookieName(kind, secure);
   for (const part of cookieHeader.split(";")) {

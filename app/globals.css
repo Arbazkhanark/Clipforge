@@ -33,6 +33,7 @@ button[disabled] { opacity: 0.55; cursor: not-allowed; }
 .data-table { width: 100%; border-collapse: collapse; }
 .data-table caption { text-align: left; font-weight: 600; padding: 0.4rem 0; }
 .data-table th, .data-table td { text-align: left; padding: 0.4rem; border-bottom: 1px solid var(--border); }
+.data-table img { display: block; max-width: 80px; height: auto; }
 .card-list { list-style: none; padding: 0; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 0.75rem; padding: 0.75rem 1rem; }
 .stat-grid { list-style: none; padding: 0; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
@@ -56,3 +57,724 @@ video, img { max-width: 100%; height: auto; }
 .library-actions p { margin: 0; }
 .button-link { display: inline-block; padding: 0.35rem 0.75rem; border-radius: 0.5rem; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
 @media (max-width: 40rem) { .hide-narrow { display: none; } }
+
+/* ---- Super Admin console (scoped to the protected admin route group) ---- */
+.admin-layout {
+  --admin-ink: #17211f;
+  --admin-muted: #71807b;
+  --admin-line: #e5ebe8;
+  --admin-surface: #ffffff;
+  --admin-canvas: #f4f7f5;
+  --admin-green: #16845b;
+  --admin-green-soft: #e9f5ef;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 252px minmax(0, 1fr);
+  background: var(--admin-canvas);
+  color: var(--admin-ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.45;
+}
+.admin-sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: 1.45rem 1rem 1.1rem;
+  border-right: 1px solid var(--admin-line);
+  background: var(--admin-surface);
+}
+.admin-brand { display: flex; align-items: center; gap: .8rem; padding: .2rem .5rem 1.7rem; color: var(--admin-ink); text-decoration: none; }
+.admin-brand-mark { display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: .8rem; background: #173f34; color: white; font-size: 1.25rem; font-weight: 800; }
+.admin-brand strong, .admin-brand small { display: block; }
+.admin-brand strong { font-size: 1rem; letter-spacing: -.02em; }
+.admin-brand small { margin-top: .1rem; color: var(--admin-muted); font-size: .61rem; font-weight: 750; letter-spacing: .14em; }
+.admin-nav-groups { display: grid; gap: 1.45rem; }
+.admin-nav-label { margin: 0 0 .45rem .75rem; color: #8b9893; font-size: .64rem; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
+.admin-nav-group nav { display: grid; gap: .2rem; }
+.admin-layout .admin-nav-link { position: relative; display: flex; align-items: center; gap: .75rem; min-height: 2.55rem; margin: 0; padding: .55rem .7rem; border: 1px solid transparent; border-radius: .65rem; color: #53615c; font-size: .88rem; font-weight: 550; text-decoration: none; transition: background .15s ease, color .15s ease, border-color .15s ease; }
+.admin-layout .admin-nav-link:hover { background: #f5f8f6; color: var(--admin-ink); }
+.admin-layout .admin-nav-link[aria-current="page"] { border-color: #d7ebe0; background: var(--admin-green-soft); color: #176b4d; font-weight: 700; }
+.admin-nav-icon { display: grid; place-items: center; width: 1.2rem; color: #87958f; font-size: 1.08rem; }
+.admin-nav-link[aria-current="page"] .admin-nav-icon { color: var(--admin-green); }
+.admin-nav-active-mark { position: absolute; right: .62rem; width: .38rem; height: .38rem; border-radius: 50%; background: var(--admin-green); }
+.admin-sidebar-footer { display: flex; align-items: flex-start; gap: .6rem; margin-top: auto; padding: 1rem .45rem 0; border-top: 1px solid var(--admin-line); }
+.admin-sidebar-footer strong, .admin-sidebar-footer small { display: block; }
+.admin-sidebar-footer strong { color: #42514b; font-size: .75rem; }
+.admin-sidebar-footer small { margin-top: .15rem; color: var(--admin-muted); font-size: .68rem; }
+.admin-status-dot { display: inline-block; flex: 0 0 auto; width: .48rem; height: .48rem; margin-top: .26rem; border-radius: 50%; background: #dda448; box-shadow: 0 0 0 3px #fbf4e7; }
+.admin-main-column { display: flex; min-width: 0; min-height: 100vh; flex-direction: column; }
+.admin-topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 4.3rem; padding: .8rem clamp(1rem, 3vw, 2.6rem); border-bottom: 1px solid var(--admin-line); background: var(--admin-surface); }
+.admin-breadcrumb { color: var(--admin-muted); font-size: .78rem; font-weight: 550; }
+.admin-breadcrumb span { padding: 0 .45rem; color: #a5b0ab; }
+.admin-live-status { display: inline-flex; align-items: center; gap: .55rem; padding: .4rem .65rem; border: 1px solid #efe2c7; border-radius: 999px; background: #fffcf5; color: #80632f; font-size: .7rem; font-weight: 650; white-space: nowrap; }
+.admin-live-status .admin-status-dot { width: .4rem; height: .4rem; margin: 0; box-shadow: none; }
+.admin-main-content { width: min(100%, 1360px); box-sizing: border-box; flex: 1; margin: 0 auto; padding: clamp(1.25rem, 3.4vw, 2.8rem); }
+.admin-page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; margin-bottom: 1.7rem; }
+.admin-page-heading h1 { margin: .22rem 0 .35rem; color: #17211f; font-size: clamp(1.75rem, 3vw, 2.3rem); font-weight: 720; letter-spacing: -.055em; line-height: 1.1; }
+.admin-page-heading p:last-child { margin: 0; color: var(--admin-muted); font-size: .9rem; }
+.admin-eyebrow { margin: 0; color: var(--admin-green); font-size: .64rem; font-weight: 800; letter-spacing: .14em; }
+.admin-readonly-pill { display: inline-flex; align-items: center; gap: .4rem; padding: .38rem .62rem; border: 1px solid #dce9e1; border-radius: 999px; background: #f5faf7; color: #42735d; font-size: .7rem; font-weight: 700; white-space: nowrap; }
+.admin-overview-banner { display: flex; align-items: center; gap: .9rem; margin-bottom: 1.2rem; padding: 1rem 1.1rem; border: 1px solid #dcebe1; border-radius: .9rem; background: linear-gradient(110deg, #f4faf6, #fbfdfb); }
+.admin-banner-icon { display: grid; place-items: center; flex: 0 0 auto; width: 1.8rem; height: 1.8rem; border-radius: 50%; background: #dcefe3; color: #26724f; font-family: Georgia, serif; font-weight: 800; }
+.admin-overview-banner strong { color: #245e45; font-size: .85rem; }
+.admin-overview-banner p { margin: .18rem 0 0; color: #60736a; font-size: .76rem; }
+.admin-connection-badge { margin-left: auto; padding: .34rem .55rem; border-radius: 999px; background: #fff; color: #7a6a4a; font-size: .67rem; font-weight: 700; white-space: nowrap; }
+.admin-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
+.admin-summary-card { min-width: 0; padding: 1.05rem; border: 1px solid var(--admin-line); border-radius: .9rem; background: var(--admin-surface); box-shadow: 0 2px 6px rgb(26 49 38 / 3%); }
+.admin-summary-card-top { display: flex; align-items: center; justify-content: space-between; gap: .4rem; }
+.admin-summary-icon { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: .62rem; background: #f0f5f2; color: #47725c; font-size: 1rem; }
+.admin-summary-state { color: #8a9691; font-size: .65rem; font-weight: 700; }
+.admin-summary-card h2 { margin: .9rem 0 .22rem; color: #25332e; font-size: .95rem; letter-spacing: -.02em; }
+.admin-summary-card p { min-height: 2.35rem; margin: 0; color: var(--admin-muted); font-size: .73rem; }
+.admin-summary-placeholder { margin-top: .9rem; padding-top: .72rem; border-top: 1px solid #edf1ef; color: #9aa59f; font-size: .72rem; font-weight: 650; }
+.admin-overview-note { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1.15rem; padding: 1.2rem 1.25rem; border: 1px solid var(--admin-line); border-radius: .9rem; background: var(--admin-surface); }
+.admin-overview-note h2 { margin: .3rem 0; color: #273630; font-size: 1rem; letter-spacing: -.025em; }
+.admin-overview-note p:last-child { max-width: 52rem; margin: 0; color: var(--admin-muted); font-size: .78rem; }
+.admin-source-indicator { display: inline-flex; align-items: center; gap: .5rem; color: #7e8c85; font-size: .7rem; font-weight: 650; white-space: nowrap; }
+.admin-source-indicator .admin-status-dot { margin: 0; }
+.admin-empty-state { display: flex; flex-direction: column; align-items: center; min-height: 22rem; justify-content: center; padding: 2rem; border: 1px dashed #d5e0da; border-radius: 1rem; background: rgb(255 255 255 / 72%); text-align: center; }
+.admin-empty-icon { display: grid; place-items: center; width: 3rem; height: 3rem; margin-bottom: 1rem; border: 1px solid #e2ebe5; border-radius: .95rem; background: #f3f8f5; color: #498264; font-size: 1.35rem; }
+.admin-empty-badge { display: inline-flex; align-items: center; gap: .45rem; margin-bottom: .85rem; color: #8a734a; font-size: .68rem; font-weight: 700; }
+.admin-empty-badge .admin-status-dot { width: .4rem; height: .4rem; margin: 0; box-shadow: none; }
+.admin-empty-state h2 { margin: 0; color: #293831; font-size: 1.08rem; letter-spacing: -.025em; }
+.admin-empty-state > p { max-width: 27rem; margin: .5rem 0 1.1rem; color: var(--admin-muted); font-size: .82rem; }
+.admin-empty-caption { color: #9aa69f; font-size: .67rem; }
+.admin-footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem clamp(1rem, 3vw, 2.6rem); border-top: 1px solid var(--admin-line); color: #97a39d; font-size: .68rem; }
+.admin-layout a:focus-visible { outline: 3px solid #65ae89; outline-offset: 2px; }
+@media (max-width: 1050px) { .admin-layout { grid-template-columns: 220px minmax(0, 1fr); } .admin-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 720px) {
+  .admin-layout { display: block; }
+  .admin-sidebar { position: static; min-height: 0; padding: .85rem 1rem .7rem; border-right: 0; border-bottom: 1px solid var(--admin-line); }
+  .admin-brand { padding: 0 .15rem .8rem; }
+  .admin-brand-mark { width: 2.15rem; height: 2.15rem; }
+  .admin-nav-groups { display: flex; gap: 0; overflow-x: auto; margin: 0 -.4rem; padding: .1rem .4rem .4rem; scrollbar-width: thin; }
+  .admin-nav-group, .admin-nav-group:not(:first-child) { display: contents; }
+  .admin-nav-label { display: none; }
+  .admin-nav-group nav { display: contents; }
+  .admin-layout .admin-nav-link { min-height: 2.25rem; padding: .4rem .6rem; font-size: .77rem; white-space: nowrap; }
+  .admin-nav-icon { width: 1rem; }
+  .admin-nav-active-mark { display: none; }
+  .admin-sidebar-footer { display: none; }
+  .admin-topbar { min-height: 3.5rem; }
+  .admin-main-content { padding: 1.25rem 1rem 1.7rem; }
+  .admin-page-heading { align-items: flex-start; }
+  .admin-overview-banner { align-items: flex-start; flex-wrap: wrap; }
+  .admin-connection-badge { margin-left: 2.7rem; }
+  .admin-overview-note { align-items: flex-start; flex-direction: column; }
+}
+@media (max-width: 450px) { .admin-summary-grid { grid-template-columns: 1fr; } .admin-live-status { font-size: 0; gap: 0; padding: .48rem; } .admin-live-status .admin-status-dot { width: .45rem; height: .45rem; } .admin-footer { flex-direction: column; gap: .25rem; } }
+
+/* ---- Separate, responsive administrator sign-in ---- */
+body:has(.admin-login-page) { background: #0a100e; }
+.admin-login-page {
+  --login-ink: #f1f5f2;
+  --login-muted: #a1b0a8;
+  --login-line: #34453d;
+  display: grid;
+  min-height: calc(100vh - 2rem);
+  box-sizing: border-box;
+  align-content: center;
+  justify-items: center;
+  gap: 1.5rem;
+  margin: -1rem;
+  padding: clamp(2rem, 7vh, 5rem) 1.1rem 1.5rem;
+  background: radial-gradient(ellipse at 50% 0%, rgb(29 88 61 / 30%), transparent 48%), linear-gradient(145deg, #0b1511, #111a16 55%, #0b1210);
+  color: var(--login-ink);
+}
+.admin-login-card {
+  width: min(100%, 27rem);
+  box-sizing: border-box;
+  padding: clamp(1.5rem, 5vw, 2.35rem);
+  border: 1px solid #2c4036;
+  border-radius: 1.15rem;
+  background: linear-gradient(155deg, #19251f, #141e19 72%);
+  box-shadow: 0 28px 80px rgb(0 0 0 / 36%), inset 0 1px 0 rgb(255 255 255 / 3%);
+}
+.admin-login-brand { display: inline-flex; align-items: center; gap: .75rem; margin-bottom: 2.35rem; color: var(--login-ink); text-decoration: none; }
+.admin-login-brand-mark { display: grid; place-items: center; width: 2.55rem; height: 2.55rem; border: 1px solid #3c7455; border-radius: .78rem; background: linear-gradient(145deg, #237448, #17462e); color: white; font-size: 1.2rem; font-weight: 800; }
+.admin-login-brand strong, .admin-login-brand small { display: block; }
+.admin-login-brand strong { font-size: .98rem; letter-spacing: -.025em; }
+.admin-login-brand small { margin-top: .14rem; color: #8fa89a; font-size: .58rem; font-weight: 800; letter-spacing: .16em; }
+.admin-login-intro { margin-bottom: 1.7rem; }
+.admin-login-eyebrow { margin: 0 0 .55rem; color: #75c394; font-size: .64rem; font-weight: 800; letter-spacing: .16em; }
+.admin-login-intro h1 { margin: 0; color: #f1f5f2; font-size: clamp(1.55rem, 5vw, 1.9rem); font-weight: 720; letter-spacing: -.045em; line-height: 1.2; }
+.admin-login-intro > p:last-child { margin: .55rem 0 0; color: var(--login-muted); font-size: .86rem; line-height: 1.55; }
+.admin-login-card .notice, .admin-login-unavailable { margin: 0 0 1rem; padding: .75rem .85rem; border: 1px solid #714b45; border-radius: .65rem; background: #332321; color: #f3c6bb; font-size: .82rem; }
+.admin-login-form { display: grid; gap: 1.05rem; }
+.admin-login-field { display: grid; gap: .45rem; color: #e3ebe6; font-size: .78rem; font-weight: 650; }
+.admin-login-field input { width: 100%; min-height: 3rem; box-sizing: border-box; padding: .72rem .85rem; border: 1px solid var(--login-line); border-radius: .65rem; background: #0f1813; color: #f6f8f6; font: inherit; font-size: .9rem; outline: none; transition: border-color .15s ease, box-shadow .15s ease, background .15s ease; }
+.admin-login-field input::placeholder { color: #74867b; }
+.admin-login-field input:hover { border-color: #52695b; }
+.admin-login-field input:focus-visible { border-color: #61ba82; background: #111d16; box-shadow: 0 0 0 3px rgb(76 176 111 / 18%); }
+.admin-login-submit { width: 100%; min-height: 3rem; margin-top: .3rem; border: 1px solid #40a96d; border-radius: .65rem; background: linear-gradient(180deg, #278a52, #1e7544); color: #fff; font-size: .88rem; font-weight: 750; box-shadow: 0 7px 18px rgb(15 90 47 / 22%); cursor: pointer; transition: filter .15s ease, transform .15s ease; }
+.admin-login-submit:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+.admin-login-submit:focus-visible { outline: 3px solid #8be3a9; outline-offset: 3px; }
+.admin-login-submit:disabled { border-color: #46544b; background: #39463e; color: #abb7af; box-shadow: none; cursor: not-allowed; }
+.admin-login-security-note { display: flex; align-items: center; justify-content: center; gap: .5rem; margin-top: 1.35rem; padding-top: 1rem; border-top: 1px solid #293930; color: #94a69a; font-size: .7rem; }
+.admin-login-security-note span { color: #72c48e; font-size: .55rem; }
+.admin-login-footer { margin: 0; color: #718179; font-size: .68rem; letter-spacing: .02em; }
+@media (max-width: 480px) { .admin-login-page { min-height: calc(100svh - 2rem); gap: 1rem; padding-top: 2rem; } .admin-login-card { border-radius: .95rem; } .admin-login-brand { margin-bottom: 1.8rem; } }
+
+.admin-user-filters { display: flex; align-items: end; flex-wrap: wrap; gap: .8rem; margin: 1.4rem 0 1rem; padding: 1rem; border: 1px solid var(--admin-line); border-radius: .85rem; background: var(--admin-surface); }
+.admin-user-filters label { display: grid; gap: .35rem; min-width: min(100%, 14rem); color: var(--admin-muted); font-size: .75rem; font-weight: 650; }
+.admin-user-filters input, .admin-user-filters select { min-height: 2.65rem; padding: .55rem .7rem; border: 1px solid var(--admin-line); border-radius: .55rem; background: white; color: var(--admin-ink); font: inherit; }
+.admin-user-filters button { min-height: 2.65rem; padding: .55rem 1rem; border: 0; border-radius: .55rem; background: var(--admin-green); color: white; font: inherit; font-weight: 700; cursor: pointer; }
+.admin-user-result-count, .admin-user-pagination { color: var(--admin-muted); font-size: .78rem; }
+.admin-user-table-wrap { overflow-x: auto; border: 1px solid var(--admin-line); border-radius: .85rem; background: var(--admin-surface); }
+.admin-user-table { width: 100%; border-collapse: collapse; text-align: left; font-size: .82rem; }
+.admin-user-table th, .admin-user-table td { padding: .9rem 1rem; border-bottom: 1px solid var(--admin-line); vertical-align: top; }
+.admin-user-table th { color: var(--admin-muted); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
+.admin-user-table td strong, .admin-user-table td small { display: block; }
+.admin-user-table td small { margin-top: .25rem; color: var(--admin-muted); overflow-wrap: anywhere; }
+.admin-user-table td a, .admin-user-back, .admin-user-pagination a { color: var(--admin-green); font-weight: 700; text-decoration: none; }
+.admin-user-table td a:hover, .admin-user-back:hover, .admin-user-pagination a:hover { text-decoration: underline; }
+.admin-user-pagination { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin: 1rem 0; }
+.admin-user-pagination div { display: flex; gap: 1rem; }
+.admin-user-pagination a[aria-disabled="true"] { color: #a4afaa; pointer-events: none; }
+.admin-user-unavailable, .admin-user-empty { padding: 1.15rem; border: 1px dashed var(--admin-line); border-radius: .7rem; color: var(--admin-muted); background: var(--admin-surface); }
+.admin-user-back { display: inline-block; margin: 0 0 1rem; font-size: .82rem; }
+.admin-user-profile, .admin-user-section { min-width: 0; padding: 1.1rem; border: 1px solid var(--admin-line); border-radius: .85rem; background: var(--admin-surface); }
+.admin-user-profile { display: grid; grid-template-columns: minmax(12rem, .8fr) minmax(0, 1.2fr); gap: 1.3rem; margin: 1rem 0; }
+.admin-user-profile h2, .admin-user-section h2 { margin: .1rem 0 .7rem; color: var(--admin-ink); font-size: 1rem; }
+.admin-user-profile p { color: var(--admin-muted); overflow-wrap: anywhere; }
+.admin-user-profile dl, .admin-user-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; margin: 0; }
+.admin-user-profile dl div, .admin-user-facts div { min-width: 0; }
+.admin-user-profile dt, .admin-user-facts dt { color: var(--admin-muted); font-size: .68rem; font-weight: 650; }
+.admin-user-profile dd, .admin-user-facts dd { margin: .2rem 0 0; color: var(--admin-ink); font-size: .8rem; overflow-wrap: anywhere; }
+.admin-user-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.admin-user-list { display: grid; gap: .55rem; margin: 0; padding: 0; list-style: none; }
+.admin-user-list li { display: grid; gap: .25rem; padding: .7rem; border: 1px solid var(--admin-line); border-radius: .6rem; overflow-wrap: anywhere; }
+.admin-user-list strong { color: var(--admin-ink); font-size: .78rem; }
+.admin-user-list span, .admin-user-list small, .admin-user-empty, .admin-user-footnote, .admin-user-truncation { color: var(--admin-muted); font-size: .74rem; line-height: 1.5; }
+.admin-user-truncation { margin: 1rem 0; padding: .8rem; border-radius: .6rem; background: #fff6e8; }
+.admin-user-footnote { margin-top: 1rem; }
+@media (max-width: 760px) { .admin-user-profile, .admin-user-detail-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 520px) { .admin-user-pagination { align-items: flex-start; flex-direction: column; } .admin-user-table th, .admin-user-table td { padding: .7rem; } }
+.admin-campaign-detail { display: grid; gap: .9rem; }
+.admin-campaign-meta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.admin-schedule-facts { margin-top: 1rem !important; padding-top: .9rem; border-top: 1px solid var(--admin-line); }
+.admin-campaign-reels, .admin-campaign-attempts { min-width: 0; }
+.admin-state-label { display: inline-block; padding: .28rem .5rem; border-radius: 999px; background: var(--admin-green-soft); color: #176b4d; font-size: .73rem; font-weight: 700; text-transform: capitalize; }
+.admin-billing-notice { display: grid; gap: .25rem; margin: 1rem 0; padding: .9rem 1rem; border: 1px solid #d9e7df; border-radius: .8rem; background: #f3f8f5; color: var(--admin-ink); font-size: .8rem; }
+.admin-billing-notice span { color: var(--admin-muted); line-height: 1.5; }
+.admin-billing-tabs { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; border-bottom: 1px solid var(--admin-line); }
+.admin-billing-tabs a { padding: .65rem .85rem; border-radius: .55rem .55rem 0 0; color: var(--admin-muted); font-size: .8rem; font-weight: 700; text-decoration: none; }
+.admin-billing-tabs a[aria-current="page"] { background: var(--admin-green); color: white; }
+.admin-billing-detail { display: grid; gap: .9rem; }
+.admin-billing-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.admin-billing-detail .admin-user-section > p { color: var(--admin-muted); font-size: .8rem; line-height: 1.55; overflow-wrap: anywhere; }
+.admin-billing-detail .admin-user-section ul { color: var(--admin-muted); font-size: .8rem; line-height: 1.7; }
+.admin-billing-detail .admin-user-facts small { display: block; margin-top: .25rem; color: var(--admin-muted); }
+.admin-plan-catalog, .admin-plan-subscriptions, .admin-plan-entitlements { display: grid; gap: .9rem; margin-top: 1rem; }
+.admin-plan-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.admin-plan-card { min-width: 0; padding: 1rem; border: 1px solid var(--admin-line); border-radius: .9rem; background: var(--admin-surface); }
+.admin-plan-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: .8rem; }
+.admin-plan-card h3 { margin: .15rem 0; color: var(--admin-ink); font-size: 1.2rem; }
+.admin-plan-subscriber-count { padding: .35rem .55rem; border-radius: 999px; background: var(--admin-green-soft); color: #176b4d; font-size: .68rem; font-weight: 700; text-align: right; }
+.admin-plan-prices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin: .8rem 0; }
+.admin-plan-prices div { display: grid; gap: .2rem; padding: .7rem; border: 1px solid var(--admin-line); border-radius: .6rem; }
+.admin-plan-prices span { color: var(--admin-muted); font-size: .7rem; text-transform: capitalize; }
+.admin-plan-prices strong { color: var(--admin-ink); font-size: 1rem; }
+.admin-plan-card details { border-top: 1px solid var(--admin-line); padding-top: .7rem; }
+.admin-plan-card summary { color: var(--admin-green); cursor: pointer; font-size: .78rem; font-weight: 700; }
+.admin-plan-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem .8rem; margin: .8rem 0; }
+.admin-plan-facts div { display: flex; justify-content: space-between; gap: .4rem; padding-bottom: .35rem; border-bottom: 1px solid var(--admin-line); font-size: .72rem; }
+.admin-plan-facts dt { color: var(--admin-muted); }
+.admin-plan-facts dd { margin: 0; color: var(--admin-ink); font-weight: 650; text-align: right; }
+.admin-plan-features { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .35rem .8rem; padding: 0; list-style: none; }
+.admin-plan-features li { display: flex; justify-content: space-between; gap: .4rem; font-size: .7rem; }
+.admin-plan-features span { color: var(--admin-muted); }
+.admin-plan-features strong { color: var(--admin-ink); text-align: right; }
+.admin-analytics-report { display: grid; gap: 1rem; }
+.admin-analytics-export { display: inline-flex; align-items: center; min-height: 2.65rem; padding: .55rem 1rem; border: 1px solid var(--admin-green); border-radius: .55rem; color: var(--admin-green); font-size: .8rem; font-weight: 700; text-decoration: none; }
+.admin-analytics-warning { display: grid; gap: .25rem; padding: .9rem 1rem; border: 1px solid #e8c68b; border-radius: .8rem; background: #fff8e9; color: #684b16; font-size: .8rem; }
+.admin-analytics-warning span { line-height: 1.5; }
+.admin-analytics-section { display: grid; gap: .65rem; min-width: 0; }
+.admin-analytics-section h2 { margin: 0; color: var(--admin-ink); font-size: 1rem; }
+.admin-analytics-section > p { margin: 0; color: var(--admin-muted); font-size: .78rem; line-height: 1.5; }
+.admin-analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.admin-analytics-metric { min-width: 0; padding: .95rem; border: 1px solid var(--admin-line); border-radius: .85rem; background: var(--admin-surface); }
+.admin-analytics-metric h2 { margin: 0; color: var(--admin-ink); font-size: .9rem; }
+.admin-analytics-metric p { min-height: 2.2em; margin: .35rem 0 .7rem; color: var(--admin-muted); font-size: .71rem; line-height: 1.45; }
+.admin-analytics-metric ul { display: grid; gap: .35rem; margin: 0; padding: 0; list-style: none; }
+.admin-analytics-metric li { display: flex; justify-content: space-between; gap: .8rem; padding-bottom: .3rem; border-bottom: 1px solid var(--admin-line); color: var(--admin-muted); font-size: .75rem; text-transform: capitalize; }
+.admin-analytics-metric li strong { color: var(--admin-ink); }
+.admin-analytics-metric > small { display: block; margin-top: .5rem; color: var(--admin-muted); font-size: .68rem; }
+.admin-analytics-plan-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .7rem; }
+.admin-analytics-plan-card { display: grid; gap: .15rem; padding: .8rem; border: 1px solid var(--admin-line); border-radius: .75rem; background: var(--admin-surface); }
+.admin-analytics-plan-card span { color: var(--admin-muted); font-size: .72rem; font-weight: 700; }
+.admin-analytics-plan-card strong { color: var(--admin-ink); font-size: 1.35rem; }
+.admin-analytics-plan-card small { color: var(--admin-muted); font-size: .66rem; }
+@media (max-width: 760px) { .admin-campaign-meta-grid { grid-template-columns: minmax(0, 1fr); } }
+.admin-instagram-detail { display: grid; gap: .9rem; }
+.admin-instagram-notice { display: grid; gap: .25rem; padding: .9rem 1rem; border: 1px solid #ead8a7; border-radius: .75rem; background: #fff9e9; color: #625025; font-size: .78rem; line-height: 1.5; }
+.admin-instagram-notice strong { font-size: .83rem; }
+.admin-instagram-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.admin-instagram-detail .admin-user-section > p { color: var(--admin-muted); font-size: .8rem; line-height: 1.55; overflow-wrap: anywhere; }
+.admin-instagram-detail .admin-user-section > small { color: var(--admin-muted); font-size: .72rem; }
+@media (max-width: 760px) { .admin-instagram-summary-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 760px) { .admin-billing-detail-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 760px) { .admin-plan-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 520px) { .admin-plan-facts, .admin-plan-features { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 760px) { .admin-analytics-grid { grid-template-columns: minmax(0, 1fr); } .admin-analytics-plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.admin-settings-notice { display: grid; gap: .4rem; padding: 1rem 1.1rem; border: 1px solid #c9d9ce; border-radius: .9rem; background: #f4f8f5; color: var(--admin-ink); font-size: .8rem; line-height: 1.5; }
+.admin-settings-notice > span { color: var(--admin-muted); }
+.admin-settings-environment { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; margin-top: .25rem; }
+.admin-settings-environment b { color: var(--admin-ink); text-transform: capitalize; }
+.admin-settings-environment i { color: var(--admin-muted); font-style: normal; }
+.admin-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; margin-top: 1rem; }
+.admin-settings-card { min-width: 0; overflow: hidden; border: 1px solid var(--admin-line); border-radius: .9rem; background: var(--admin-surface); }
+.admin-settings-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .8rem; padding: 1rem; border-bottom: 1px solid var(--admin-line); }
+.admin-settings-card-heading h2 { margin: 0; color: var(--admin-ink); font-size: .98rem; }
+.admin-settings-card-heading p { margin: .3rem 0 0; color: var(--admin-muted); font-size: .74rem; line-height: 1.45; }
+.admin-settings-card-heading > span { flex: 0 0 auto; color: var(--admin-muted); font-size: .67rem; }
+.admin-settings-list { display: grid; }
+.admin-settings-item { display: grid; gap: .35rem; padding: .9rem 1rem; border-bottom: 1px solid var(--admin-line); }
+.admin-settings-item:last-child { border-bottom: 0; }
+.admin-settings-item-title { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
+.admin-settings-item-title h3 { margin: 0; color: var(--admin-ink); font-size: .79rem; }
+.admin-settings-item > p { margin: 0; color: var(--admin-muted); font-size: .74rem; line-height: 1.45; }
+.admin-settings-item > small, .admin-settings-plans > small { color: var(--admin-muted); font-size: .68rem; line-height: 1.45; }
+.admin-settings-item .admin-settings-verification { color: #728079; }
+.admin-setting-state { flex: 0 0 auto; padding: .2rem .45rem; border: 1px solid var(--admin-line); border-radius: 999px; color: var(--admin-muted); font-size: .62rem; font-weight: 700; }
+.admin-setting-state-configured { border-color: #bed8c5; background: #f0f8f2; color: #28613a; }
+.admin-setting-state-incomplete { border-color: #ecd6a9; background: #fff8e9; color: #765817; }
+.admin-setting-state-missing, .admin-setting-state-not_implemented { border-color: #e4caca; background: #fff5f5; color: #8b4444; }
+.admin-settings-plans { margin-top: 1rem; }
+.admin-settings-plans .admin-user-table-wrap { margin: .9rem 1rem; }
+.admin-settings-plans > small { display: block; margin: 0 1rem 1rem; }
+@media (max-width: 850px) { .admin-settings-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 560px) { .admin-settings-card-heading { flex-direction: column; } .admin-settings-item-title { align-items: flex-start; flex-direction: column; } .admin-settings-plans .admin-user-table-wrap { overflow-x: auto; } }
+.admin-audit-filters { align-items: end; }
+.admin-audit-clear { display: inline-flex; min-height: 2.65rem; align-items: center; color: var(--admin-muted); font-size: .78rem; font-weight: 700; text-decoration: none; }
+.admin-audit-disclosure { margin: .9rem 0; padding: .9rem 1rem; border: 1px solid #e8d7af; border-radius: .8rem; background: #fffaf0; color: #675329; font-size: .77rem; line-height: 1.5; }
+.admin-audit-table-wrap .admin-user-table { min-width: 900px; }
+.admin-audit-detail { display: grid; gap: .9rem; }
+.admin-audit-detail .admin-user-profile { overflow-wrap: anywhere; }
+.admin-audit-detail .admin-user-profile dd { overflow-wrap: anywhere; }
+@media (max-width: 760px) { .admin-audit-filters { grid-template-columns: minmax(0, 1fr); } }
+/* Admin Offers uses the existing Admin shell and form/table primitives. */
+.admin-offer-primary, .admin-offer-secondary { min-height: 2.55rem; padding: .58rem .95rem; border-radius: .55rem; font: inherit; font-weight: 700; cursor: pointer; }
+.admin-offer-primary { border: 1px solid var(--admin-green); background: var(--admin-green); color: #fff; }
+.admin-offer-secondary { border: 1px solid var(--admin-line); background: #fff; color: var(--admin-ink); }
+.admin-offer-primary:disabled, .admin-offer-secondary:disabled { opacity: .55; cursor: not-allowed; }
+.admin-offer-message { display: flex; justify-content: space-between; align-items: center; gap: .75rem; padding: .8rem 1rem; border-radius: .65rem; }
+.admin-offer-success { color: #155e40; background: #eaf7ef; }
+.admin-offer-error { color: #872f32; background: #fff0ef; }
+.admin-offer-message button, .admin-offer-row-actions button, .admin-user-pagination button { border: 0; background: transparent; color: var(--admin-green); font: inherit; font-weight: 700; cursor: pointer; }
+.admin-offer-section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 1rem; }
+.admin-offer-section-heading h2 { margin: .2rem 0; color: var(--admin-ink); font-size: 1.25rem; letter-spacing: -.03em; }
+.admin-offer-section-heading p:last-child, .admin-offer-actions span, .admin-offer-form-actions span { color: var(--admin-muted); font-size: .78rem; line-height: 1.5; }
+.admin-offer-editor, .admin-offer-detail { margin: 1.25rem 0; padding: 1.2rem; border: 1px solid var(--admin-line); border-radius: .9rem; background: var(--admin-surface); }
+.admin-offer-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.admin-offer-form > label { display: grid; gap: .35rem; color: var(--admin-muted); font-size: .76rem; font-weight: 650; }
+.admin-offer-form input, .admin-offer-form select, .admin-offer-form textarea { width: 100%; min-height: 2.55rem; padding: .55rem .7rem; border: 1px solid var(--admin-line); border-radius: .55rem; background: #fff; color: var(--admin-ink); font: inherit; }
+.admin-offer-form textarea { min-height: 5rem; resize: vertical; }
+.admin-offer-form .admin-offer-wide, .admin-offer-form-actions { grid-column: 1 / -1; }
+.admin-offer-form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .8rem; }
+.admin-offer-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .7rem; margin: 1rem 0; }
+.admin-offer-facts div { padding: .75rem; border: 1px solid var(--admin-line); border-radius: .65rem; background: #fff; }
+.admin-offer-facts dt { color: var(--admin-muted); font-size: .72rem; }
+.admin-offer-facts dd { margin: .3rem 0 0; color: var(--admin-ink); font-size: .84rem; font-weight: 650; }
+.admin-offer-actions, .admin-offer-row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.admin-offer-row-actions { gap: .3rem; }
+.admin-user-pagination button:disabled { color: #a4afaa; cursor: not-allowed; }
+@media (max-width: 640px) { .admin-offer-form { grid-template-columns: 1fr; } .admin-offer-form .admin-offer-wide, .admin-offer-form-actions { grid-column: auto; } .admin-offer-section-heading { flex-direction: column; } }
+.admin-offer-history { display: grid; gap: .7rem; margin-top: 1.15rem; }
+.admin-offer-history h3 { margin: .2rem 0; color: var(--admin-ink); font-size: 1rem; }
+.admin-offer-history .admin-user-table { min-width: 880px; }
+.admin-offer-history a { color: var(--admin-green); font-weight: 700; text-decoration: none; }
+.admin-offer-history a:hover { text-decoration: underline; }
+
+/* ---- Customer-facing ClipForge redesign (never applies to Admin routes) ---- */
+a.skip-link { position: absolute; z-index: 20; top: .4rem; left: .4rem; padding: .65rem .85rem; transform: translateY(-160%); border-radius: .45rem; background: #19251f; color: #fff; }
+a.skip-link:focus { transform: translateY(0); }
+body.clipforge-public {
+  --bg: #f7f8f5;
+  --fg: #19251f;
+  --muted: #65736b;
+  --card: #fff;
+  --border: #dfe7e1;
+  --accent: #176b4b;
+  --accent-strong: #10583c;
+  --accent-soft: #e8f3ec;
+  --surface-raised: #fff;
+  --public-shadow: 0 18px 54px rgb(35 62 46 / 9%);
+  background: var(--bg);
+  color: var(--fg);
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+body.clipforge-public.clipforge-dark {
+  --bg: #111713;
+  --fg: #edf4ef;
+  --muted: #a0afa5;
+  --card: #1a241e;
+  --border: #33443a;
+  --accent: #8ad3aa;
+  --accent-strong: #a2e3bb;
+  --accent-soft: #21382a;
+  --surface-raised: #202b24;
+  --public-shadow: 0 20px 54px rgb(0 0 0 / 25%);
+  color-scheme: dark;
+}
+body.clipforge-public main { width: min(100%, 82rem); box-sizing: border-box; padding: clamp(1.15rem, 3vw, 2rem); }
+body.clipforge-public :where(h1, h2, h3, p, ul, ol) { overflow-wrap: anywhere; }
+body.clipforge-public :where(a, button, input, select, textarea, summary):focus-visible { outline: 3px solid #ca8a36; outline-offset: 3px; }
+body.clipforge-public :where(button, input, select, textarea) { font: inherit; }
+body.clipforge-public .muted { color: var(--muted); }
+body.clipforge-public .site-header { position: relative; z-index: 5; width: 100%; max-width: none; box-sizing: border-box; margin: 0; padding: .75rem clamp(1rem, 4vw, 3.5rem); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 92%, transparent); }
+body.clipforge-public .site-header-inner { display: flex; width: min(100%, 82rem); min-height: 3.7rem; align-items: center; justify-content: space-between; gap: 1rem; margin: 0 auto; }
+body.clipforge-public .site-header nav { margin: 0; }
+body.clipforge-public .site-brand { display: inline-flex; flex: 0 0 auto; align-items: center; gap: .62rem; color: var(--fg); font-size: 1.02rem; font-weight: 780; letter-spacing: -.035em; text-decoration: none; }
+body.clipforge-public .site-brand-mark { display: inline-grid; flex: 0 0 auto; place-items: center; width: 2rem; height: 2rem; border-radius: .62rem; background: #193d2d; color: #fff; font-size: 1rem; font-weight: 850; }
+body.clipforge-public .site-primary-nav { display: flex; align-items: center; gap: clamp(.5rem, 1.8vw, 1.4rem); }
+body.clipforge-public .site-primary-nav a,
+body.clipforge-public .site-workspace-link { margin: 0; padding: .45rem .2rem; color: var(--muted); font-size: .84rem; font-weight: 650; text-decoration: none; }
+body.clipforge-public .site-primary-nav a:hover,
+body.clipforge-public .site-workspace-link:hover { color: var(--accent); }
+body.clipforge-public .site-header-actions { display: flex; align-items: center; gap: .55rem; }
+body.clipforge-public .theme-toggle { display: inline-flex; min-height: 2.45rem; align-items: center; gap: .35rem; padding: .4rem .65rem; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--fg); font-size: .76rem; font-weight: 700; cursor: pointer; }
+body.clipforge-public .site-primary-cta,
+body.clipforge-public .button-primary { display: inline-flex; min-height: 2.75rem; align-items: center; justify-content: center; gap: .5rem; padding: .68rem 1rem; border: 1px solid var(--accent); border-radius: .65rem; background: var(--accent); color: #fff; font-size: .86rem; font-weight: 750; text-decoration: none; box-shadow: 0 5px 14px rgb(24 92 61 / 14%); transition: transform .16s ease, background .16s ease; }
+body.clipforge-public .site-primary-cta:hover,
+body.clipforge-public .button-primary:hover { transform: translateY(-1px); background: var(--accent-strong); }
+body.clipforge-public.clipforge-dark .site-primary-cta,
+body.clipforge-public.clipforge-dark .button-primary { color: #102117; }
+body.clipforge-public .button { display: inline-flex; min-height: 2.75rem; align-items: center; justify-content: center; gap: .45rem; padding: .65rem .95rem; border: 1px solid var(--border); border-radius: .65rem; font-size: .86rem; font-weight: 720; text-decoration: none; }
+body.clipforge-public .button-secondary { background: var(--card); color: var(--fg); }
+body.clipforge-public .button-secondary:hover { border-color: var(--accent); color: var(--accent); }
+body.clipforge-public .site-footer { width: 100%; max-width: none; box-sizing: border-box; margin: 3rem 0 0; padding: 2.25rem clamp(1rem, 4vw, 3.5rem); border-top: 1px solid var(--border); background: var(--card); }
+body.clipforge-public .site-footer-inner { display: grid; width: min(100%, 82rem); grid-template-columns: minmax(12rem, 1.2fr) minmax(18rem, 1.4fr) minmax(14rem, 1fr); gap: 2rem; margin: 0 auto; }
+body.clipforge-public .site-footer-inner > div > p,
+body.clipforge-public .site-footer-note { max-width: 28rem; color: var(--muted); font-size: .78rem; line-height: 1.65; }
+body.clipforge-public .site-footer nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: .55rem 1rem; }
+body.clipforge-public .site-footer nav a { margin: 0; color: var(--muted); font-size: .78rem; text-decoration: none; }
+body.clipforge-public .site-footer nav a:hover { color: var(--accent); text-decoration: underline; }
+body.clipforge-public .marketing-page { width: 100%; }
+body.clipforge-public .hero-section { position: relative; display: grid; min-height: 33rem; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); align-items: center; gap: clamp(2rem, 6vw, 5.5rem); padding: clamp(2.3rem, 6vw, 5.2rem) clamp(.2rem, 2vw, 1.25rem) 3rem; }
+body.clipforge-public .hero-copy { position: relative; z-index: 1; max-width: 39rem; }
+body.clipforge-public .eyebrow { margin: 0 0 .8rem; color: var(--accent); font-size: .72rem; font-weight: 820; letter-spacing: .13em; text-transform: uppercase; }
+body.clipforge-public .hero-copy h1 { max-width: 12ch; margin: 0; font-size: clamp(2.7rem, 5.6vw, 5.3rem); font-weight: 760; letter-spacing: -.075em; line-height: .99; }
+body.clipforge-public .hero-copy h1 em { color: var(--accent); font-style: normal; }
+body.clipforge-public .hero-lede { max-width: 36rem; margin: 1.35rem 0 1.5rem; color: var(--muted); font-size: clamp(1rem, 1.6vw, 1.16rem); line-height: 1.7; }
+body.clipforge-public .hero-actions { display: flex; flex-wrap: wrap; gap: .7rem; }
+body.clipforge-public .hero-footnote { max-width: 32rem; margin: 1.1rem 0 0; color: var(--muted); font-size: .73rem; line-height: 1.5; }
+body.clipforge-public .hero-visual { position: relative; min-width: 0; }
+body.clipforge-public .preview-window { position: relative; z-index: 1; overflow: hidden; padding: .65rem; border: 1px solid color-mix(in srgb, var(--border) 70%, #9eb8a5); border-radius: 1.15rem; background: var(--card); box-shadow: 0 32px 90px rgb(37 67 47 / 16%); transform: perspective(1300px) rotateY(-4deg) rotateX(1deg); }
+body.clipforge-public .preview-window-bar { display: flex; height: 2.2rem; align-items: center; justify-content: space-between; padding: 0 .55rem; color: var(--muted); font-size: .7rem; }
+body.clipforge-public .preview-brand { display: inline-flex; align-items: center; gap: .4rem; color: var(--fg); font-weight: 750; }
+body.clipforge-public .preview-brand .site-brand-mark { width: 1.35rem; height: 1.35rem; border-radius: .4rem; font-size: .7rem; }
+body.clipforge-public .preview-window-dots { letter-spacing: .2em; }
+body.clipforge-public .preview-content { display: grid; min-height: 23rem; grid-template-columns: 3rem minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: .75rem; background: color-mix(in srgb, var(--bg) 76%, var(--card)); }
+body.clipforge-public .preview-sidebar { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: .8rem .45rem; border-right: 1px solid var(--border); background: var(--card); }
+body.clipforge-public .preview-sidebar-mark { display: grid; place-items: center; width: 1.55rem; height: 1.55rem; border-radius: .47rem; background: var(--accent-soft); color: var(--accent); font-size: .7rem; font-weight: 850; }
+body.clipforge-public .preview-sidebar i { width: 1.1rem; height: .33rem; border-radius: 1rem; background: var(--border); }
+body.clipforge-public .preview-board { min-width: 0; padding: 1rem clamp(.75rem, 2vw, 1.35rem); }
+body.clipforge-public .preview-board-heading,
+body.clipforge-public .preview-queue-title { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+body.clipforge-public .preview-board-heading > div { display: grid; gap: .2rem; }
+body.clipforge-public .preview-kicker { color: var(--muted); font-size: .55rem; font-weight: 800; letter-spacing: .13em; }
+body.clipforge-public .preview-board-heading strong { font-size: .95rem; }
+body.clipforge-public .preview-badge { padding: .3rem .45rem; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: .55rem; }
+body.clipforge-public .preview-project-card { display: grid; grid-template-columns: minmax(7rem, .85fr) minmax(7rem, 1fr); overflow: hidden; margin: 1rem 0; border: 1px solid var(--border); border-radius: .65rem; background: var(--card); }
+body.clipforge-public .preview-video-art { position: relative; display: grid; min-height: 8.2rem; place-items: center; overflow: hidden; background: linear-gradient(145deg, #293d31, #71876f 49%, #c5a981); }
+body.clipforge-public .preview-video-art::before { position: absolute; width: 70%; height: 70%; border: 1px solid rgb(255 255 255 / 30%); border-radius: 48% 48% 12% 12%; background: linear-gradient(140deg, rgb(255 255 255 / 13%), rgb(11 31 19 / 50%)); content: ""; transform: rotate(-10deg); }
+body.clipforge-public .preview-play { position: relative; display: grid; width: 2rem; height: 2rem; place-items: center; border: 1px solid rgb(255 255 255 / 55%); border-radius: 50%; background: rgb(16 31 20 / 45%); color: #fff; font-size: .65rem; }
+body.clipforge-public .preview-video-tag { position: absolute; right: .45rem; bottom: .4rem; padding: .23rem .35rem; border-radius: .25rem; background: rgb(13 29 19 / 70%); color: #fff; font-size: .45rem; font-weight: 800; letter-spacing: .08em; }
+body.clipforge-public .preview-project-info { display: grid; align-content: center; gap: .5rem; padding: .75rem; }
+body.clipforge-public .preview-project-info strong { font-size: .72rem; }
+body.clipforge-public .preview-line { display: block; width: 80%; height: .32rem; border-radius: 1rem; background: var(--border); }
+body.clipforge-public .preview-queue-title { margin: 1.1rem 0 .4rem; font-size: .7rem; }
+body.clipforge-public .preview-queue-title > span { color: var(--muted); font-size: .58rem; }
+body.clipforge-public .preview-queue-row { display: grid; grid-template-columns: 1.55rem minmax(0, 1fr) auto; align-items: center; gap: .55rem; padding: .65rem 0; border-top: 1px solid var(--border); }
+body.clipforge-public .preview-row-icon { display: grid; width: 1.45rem; height: 1.45rem; place-items: center; border-radius: .42rem; background: var(--accent-soft); color: var(--accent); font-size: .52rem; font-weight: 800; }
+body.clipforge-public .preview-row-icon-muted { background: var(--bg); color: var(--muted); }
+body.clipforge-public .preview-queue-row > span:nth-child(2) { display: grid; gap: .1rem; min-width: 0; }
+body.clipforge-public .preview-queue-row strong { font-size: .63rem; }
+body.clipforge-public .preview-queue-row small { color: var(--muted); font-size: .53rem; }
+body.clipforge-public .preview-state { color: var(--accent); font-size: .55rem; font-weight: 750; }
+body.clipforge-public .preview-state-muted { color: var(--muted); }
+body.clipforge-public .preview-disclaimer { margin: .55rem 0 .05rem; color: var(--muted); font-size: .56rem; text-align: center; }
+body.clipforge-public .hero-orbit { position: absolute; display: block; border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent); border-radius: 50%; pointer-events: none; }
+body.clipforge-public .hero-orbit-one { top: -8%; right: -10%; width: 22rem; height: 22rem; }
+body.clipforge-public .hero-orbit-two { right: 0; bottom: -10%; width: 14rem; height: 14rem; }
+body.clipforge-public .trust-strip { display: flex; flex-wrap: wrap; justify-content: center; gap: .6rem; padding: 1rem; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); color: var(--muted); font-size: .73rem; }
+body.clipforge-public .trust-strip span { padding: .42rem .72rem; border: 1px solid var(--border); border-radius: 999px; background: var(--card); }
+body.clipforge-public .content-section { padding: clamp(3rem, 7vw, 5.5rem) clamp(.15rem, 1.8vw, 1.2rem); }
+body.clipforge-public .section-heading { max-width: 45rem; margin-bottom: 1.7rem; }
+body.clipforge-public .section-heading-centered { margin-right: auto; margin-left: auto; text-align: center; }
+body.clipforge-public .section-heading h2,
+body.clipforge-public .feedback-section h2 { margin: 0; font-size: clamp(1.8rem, 3.7vw, 3.1rem); font-weight: 730; letter-spacing: -.06em; line-height: 1.08; }
+body.clipforge-public .section-heading > p:last-child { max-width: 40rem; margin: .75rem auto 0; color: var(--muted); line-height: 1.65; }
+body.clipforge-public .intro-section { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 3rem; border-bottom: 1px solid var(--border); }
+body.clipforge-public .intro-copy { max-width: 43rem; color: var(--muted); line-height: 1.75; }
+body.clipforge-public .text-link { display: inline-flex; align-items: center; gap: .35rem; margin-top: .45rem; color: var(--accent); font-size: .85rem; font-weight: 760; text-decoration: none; }
+body.clipforge-public .text-link:hover { text-decoration: underline; }
+body.clipforge-public .feature-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; }
+body.clipforge-public .feature-card,
+body.clipforge-public .home-plan-card,
+body.clipforge-public .faq-preview-grid article,
+body.clipforge-public .comparison-card { padding: 1.2rem; border: 1px solid var(--border); border-radius: .85rem; background: var(--card); }
+body.clipforge-public .feature-card { min-height: 11rem; }
+body.clipforge-public .feature-number { display: inline-grid; width: 1.8rem; height: 1.8rem; place-items: center; border-radius: .52rem; background: var(--accent-soft); color: var(--accent); font-size: .65rem; font-weight: 820; }
+body.clipforge-public .feature-card h3,
+body.clipforge-public .faq-preview-grid h3,
+body.clipforge-public .comparison-card h3 { margin: 1rem 0 .4rem; font-size: 1rem; letter-spacing: -.025em; }
+body.clipforge-public .feature-card p,
+body.clipforge-public .faq-preview-grid p,
+body.clipforge-public .comparison-card li { margin: 0; color: var(--muted); font-size: .83rem; line-height: 1.65; }
+body.clipforge-public .feature-footnote { display: flex; align-items: flex-start; gap: .7rem; margin-top: 1rem; padding: .9rem 1rem; border: 1px solid var(--border); border-radius: .7rem; color: var(--muted); font-size: .76rem; line-height: 1.55; }
+body.clipforge-public .feature-footnote p { margin: 0; }
+body.clipforge-public .feature-footnote-icon { display: grid; flex: 0 0 auto; width: 1.35rem; height: 1.35rem; place-items: center; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: .75rem; font-weight: 800; }
+body.clipforge-public .process-section { background: color-mix(in srgb, var(--accent-soft) 48%, var(--bg)); }
+body.clipforge-public .process-list,
+body.clipforge-public .guide-steps { display: grid; gap: .75rem; max-width: 58rem; margin: 0; padding: 0; list-style: none; }
+body.clipforge-public .process-list li,
+body.clipforge-public .guide-steps li { display: grid; grid-template-columns: 2.5rem minmax(0, 1fr); gap: 1rem; padding: 1.1rem; border: 1px solid var(--border); border-radius: .8rem; background: var(--card); }
+body.clipforge-public .process-list li > span,
+body.clipforge-public .guide-steps li > span { display: grid; width: 2.25rem; height: 2.25rem; place-items: center; border-radius: .65rem; background: var(--accent-soft); color: var(--accent); font-size: .68rem; font-weight: 820; }
+body.clipforge-public .process-list h3,
+body.clipforge-public .guide-steps h2 { margin: 0 0 .35rem; font-size: 1rem; }
+body.clipforge-public .process-list p,
+body.clipforge-public .guide-steps p { margin: 0; color: var(--muted); font-size: .84rem; line-height: 1.65; }
+body.clipforge-public .comparison-section { background: var(--card); }
+body.clipforge-public .comparison-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+body.clipforge-public .comparison-card ul { display: grid; gap: .65rem; margin: .7rem 0 0; padding-left: 1.1rem; }
+body.clipforge-public .comparison-card-featured { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); background: var(--accent-soft); }
+body.clipforge-public .comparison-note,
+body.clipforge-public .pricing-note { color: var(--muted); font-size: .74rem; line-height: 1.6; }
+body.clipforge-public .home-plan-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; align-items: stretch; }
+body.clipforge-public .home-plan-card { display: flex; flex-direction: column; min-width: 0; }
+body.clipforge-public .home-plan-card-featured { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); box-shadow: var(--public-shadow); }
+body.clipforge-public .plan-name { color: var(--muted); font-size: .78rem; font-weight: 730; }
+body.clipforge-public .home-plan-price { margin-top: .7rem; font-size: clamp(1.5rem, 2.5vw, 2rem); letter-spacing: -.055em; }
+body.clipforge-public .home-plan-price small { color: var(--muted); font-size: .72rem; font-weight: 500; letter-spacing: 0; }
+body.clipforge-public .home-plan-weekly { margin-top: .2rem; color: var(--muted); font-size: .73rem; }
+body.clipforge-public .home-plan-card ul { display: grid; gap: .55rem; flex: 1; margin: 1.1rem 0; padding-left: 1rem; color: var(--muted); font-size: .75rem; line-height: 1.5; }
+body.clipforge-public .home-plan-card .button { margin-top: auto; }
+body.clipforge-public .faq-preview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+body.clipforge-public .faq-preview-grid h3 { margin-top: 0; }
+body.clipforge-public .feedback-section { display: flex; align-items: center; justify-content: space-between; gap: 2rem; margin: 0 clamp(.15rem, 1.8vw, 1.2rem) 2rem; padding: clamp(1.2rem, 4vw, 2.5rem); border: 1px solid var(--border); border-radius: 1rem; background: var(--accent-soft); }
+body.clipforge-public .feedback-section > div { max-width: 44rem; }
+body.clipforge-public .feedback-section h2 { font-size: clamp(1.45rem, 3vw, 2.3rem); }
+body.clipforge-public .feedback-section > div > p:last-child { color: var(--muted); font-size: .84rem; line-height: 1.6; }
+body.clipforge-public .public-page { max-width: 58rem; margin: 1rem auto 3rem; padding: clamp(1.2rem, 4vw, 3rem); border: 1px solid var(--border); border-radius: 1rem; background: var(--card); box-shadow: 0 8px 30px rgb(35 62 46 / 4%); }
+body.clipforge-public .public-page-heading { max-width: 48rem; margin-bottom: 2rem; }
+body.clipforge-public .public-page-heading h1 { margin: 0; font-size: clamp(2.1rem, 5vw, 3.6rem); letter-spacing: -.07em; line-height: 1.03; }
+body.clipforge-public .public-page-intro { margin: .9rem 0 0; color: var(--muted); font-size: 1rem; line-height: 1.7; }
+body.clipforge-public .public-page-body { color: var(--fg); line-height: 1.7; }
+body.clipforge-public .public-page-body > section + section { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+body.clipforge-public .public-page-body h2 { margin: 0 0 .45rem; font-size: 1.15rem; letter-spacing: -.035em; }
+body.clipforge-public .public-page-body p { color: var(--muted); font-size: .9rem; }
+body.clipforge-public .public-page-body a:not(.button) { color: var(--accent); font-weight: 680; }
+body.clipforge-public .public-feature-list { display: grid; gap: .65rem; margin-bottom: 1.4rem; }
+body.clipforge-public .public-feature-row { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 1rem; padding: 1rem; border: 1px solid var(--border) !important; border-radius: .75rem; background: var(--bg); }
+body.clipforge-public .public-feature-row > span { color: var(--accent); font-size: .72rem; font-weight: 820; }
+body.clipforge-public .public-feature-row h2 { margin-bottom: .2rem; }
+body.clipforge-public .public-feature-row p { margin: 0; }
+body.clipforge-public .faq-list { display: grid; gap: .55rem; }
+body.clipforge-public .faq-list details { padding: .9rem 1rem; border: 1px solid var(--border); border-radius: .7rem; background: var(--bg); }
+body.clipforge-public .faq-list summary { color: var(--fg); font-size: .9rem; font-weight: 720; cursor: pointer; }
+body.clipforge-public .faq-list details p { margin-bottom: 0; }
+body.clipforge-public .public-page .notice { margin: 1rem 0; border-color: var(--border); background: var(--accent-soft); color: var(--fg); }
+body.clipforge-public .auth-card { width: min(100%, 29rem); box-sizing: border-box; margin: clamp(1rem, 5vw, 3rem) auto; padding: clamp(1.25rem, 4vw, 2rem); border: 1px solid var(--border); border-radius: 1rem; background: var(--card); box-shadow: var(--public-shadow); }
+body.clipforge-public .auth-card h1 { margin-top: 0; font-size: clamp(1.7rem, 4vw, 2.25rem); letter-spacing: -.05em; }
+body.clipforge-public .auth-card label { display: grid; gap: .35rem; margin: .8rem 0; color: var(--muted); font-size: .82rem; font-weight: 670; }
+body.clipforge-public .auth-card input { min-height: 2.7rem; padding: .6rem .7rem; border: 1px solid var(--border); border-radius: .55rem; background: var(--bg); color: var(--fg); }
+body.clipforge-public .auth-card button,
+body.clipforge-public .auth-card [type="submit"] { min-height: 2.7rem; }
+body.clipforge-public .auth-card .notice { margin: .7rem 0; border-color: var(--border); background: var(--accent-soft); color: var(--fg); }
+body.clipforge-public .workspace-shell { width: min(100%, 92rem); min-height: 70vh; grid-template-columns: 14rem minmax(0, 1fr); gap: 1.25rem; margin: .5rem auto 2rem; }
+body.clipforge-public .app-nav { position: sticky; top: 1rem; display: grid; gap: 1rem; align-content: start; padding: 1rem; border: 1px solid var(--border); border-radius: .9rem; background: var(--card); }
+body.clipforge-public .app-nav-brand { display: flex; align-items: center; gap: .6rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border); color: var(--fg); text-decoration: none; }
+body.clipforge-public .app-nav-brand > span:last-child { display: grid; gap: .1rem; }
+body.clipforge-public .app-nav-brand strong { font-size: .91rem; }
+body.clipforge-public .app-nav-brand small { color: var(--muted); font-size: .66rem; }
+body.clipforge-public .app-nav ul { display: grid; gap: .25rem; }
+body.clipforge-public .app-nav a:not(.app-nav-brand) { display: block; margin: 0; padding: .48rem .58rem; border: 1px solid transparent; border-radius: .5rem; color: var(--muted); font-size: .78rem; font-weight: 650; text-decoration: none; }
+body.clipforge-public .app-nav a:not(.app-nav-brand):hover { border-color: var(--border); background: var(--bg); color: var(--accent); }
+body.clipforge-public .app-nav-help { margin: 0; padding-top: .75rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .7rem; line-height: 1.5; }
+body.clipforge-public .app-nav-help a { display: inline !important; padding: 0 !important; color: var(--accent) !important; }
+body.clipforge-public .app-content { display: grid; align-content: start; gap: 1rem; min-width: 0; overflow-x: auto; }
+body.clipforge-public .app-content > :not(.notice) { min-width: 0; }
+body.clipforge-public .app-content > h1 { margin: .25rem 0; font-size: clamp(1.65rem, 3vw, 2.4rem); letter-spacing: -.055em; }
+body.clipforge-public .app-content .notice { border-color: var(--border); background: var(--card); color: var(--fg); }
+body.clipforge-public .app-content :where(input, select, textarea) { max-width: 100%; border-color: var(--border); border-radius: .45rem; background-color: var(--card); color: var(--fg); }
+body.clipforge-public .app-content :where(button, .button-link) { min-height: 2.35rem; border-radius: .5rem; }
+body.clipforge-public .app-content :where(.card, .plan-card, .stat-grid li) { border-color: var(--border); border-radius: .7rem; background: var(--card); }
+body.clipforge-public .app-content :where(.data-table, .cycle-items) { min-width: 36rem; }
+body.clipforge-public .app-content :where(.data-table th, .data-table td, .cycle-items th, .cycle-items td) { border-color: var(--border); }
+body.clipforge-public .app-content :where(.pager, .filter-bar, .library-actions) { flex-wrap: wrap; }
+body.clipforge-public .app-content a:not(.button-link) { color: var(--accent); }
+body.clipforge-public .skip-link { position: absolute; z-index: 20; top: .4rem; left: .4rem; padding: .65rem .85rem; transform: translateY(-160%); border-radius: .45rem; background: var(--fg); color: var(--bg); }
+body.clipforge-public .skip-link:focus { transform: translateY(0); }
+@media (max-width: 960px) {
+  body.clipforge-public .hero-section { min-height: 0; grid-template-columns: minmax(0, 1fr); gap: 2.2rem; }
+  body.clipforge-public .hero-copy { max-width: 48rem; }
+  body.clipforge-public .hero-copy h1 { max-width: 15ch; }
+  body.clipforge-public .hero-visual { width: min(100%, 45rem); margin: 0 auto; }
+  body.clipforge-public .preview-window { transform: none; }
+  body.clipforge-public .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body.clipforge-public .home-plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body.clipforge-public .site-footer-inner { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body.clipforge-public .site-footer-note { grid-column: 1 / -1; }
+}
+@media (max-width: 680px) {
+  body.clipforge-public .site-header { padding: .55rem .8rem; }
+  body.clipforge-public .site-header-inner { flex-wrap: wrap; gap: .45rem .7rem; }
+  body.clipforge-public .site-primary-nav { order: 3; width: 100%; justify-content: space-between; gap: .2rem; padding-top: .25rem; }
+  body.clipforge-public .site-primary-nav a { padding: .35rem .2rem; font-size: .73rem; }
+  body.clipforge-public .site-header-actions { margin-left: auto; gap: .3rem; }
+  body.clipforge-public .site-workspace-link { font-size: .72rem; }
+  body.clipforge-public .theme-toggle { min-height: 2.2rem; padding: .35rem .5rem; }
+  body.clipforge-public .theme-toggle-label { display: none; }
+  body.clipforge-public .site-primary-cta { min-height: 2.25rem; padding: .48rem .65rem; font-size: .74rem; }
+  body.clipforge-public main { padding: .7rem .8rem; }
+  body.clipforge-public .hero-section { padding: 2.5rem 0 2rem; }
+  body.clipforge-public .hero-copy h1 { font-size: clamp(2.55rem, 12vw, 4rem); }
+  body.clipforge-public .hero-actions > .button { flex: 1 1 auto; }
+  body.clipforge-public .preview-content { min-height: 19rem; grid-template-columns: 2.5rem minmax(0, 1fr); }
+  body.clipforge-public .preview-board { padding: .75rem; }
+  body.clipforge-public .preview-project-card { grid-template-columns: minmax(5.5rem, .85fr) minmax(5.5rem, 1fr); }
+  body.clipforge-public .preview-video-art { min-height: 6.7rem; }
+  body.clipforge-public .preview-queue-row { grid-template-columns: 1.4rem minmax(0, 1fr); }
+  body.clipforge-public .preview-state { display: none; }
+  body.clipforge-public .trust-strip { justify-content: flex-start; font-size: .68rem; }
+  body.clipforge-public .intro-section { grid-template-columns: minmax(0, 1fr); gap: .7rem; }
+  body.clipforge-public .content-section { padding: 2.8rem 0; }
+  body.clipforge-public .feature-grid,
+  body.clipforge-public .comparison-grid,
+  body.clipforge-public .faq-preview-grid { grid-template-columns: minmax(0, 1fr); }
+  body.clipforge-public .feature-card { min-height: 0; }
+  body.clipforge-public .home-plan-grid { grid-template-columns: minmax(0, 1fr); }
+  body.clipforge-public .home-plan-card { padding: 1rem; }
+  body.clipforge-public .feedback-section { align-items: flex-start; flex-direction: column; gap: .5rem; margin: 0 0 1.2rem; }
+  body.clipforge-public .site-footer { margin-top: 1.5rem; padding: 1.6rem .9rem; }
+  body.clipforge-public .site-footer-inner { grid-template-columns: minmax(0, 1fr); gap: 1.1rem; }
+  body.clipforge-public .site-footer-note { grid-column: auto; margin: 0; }
+  body.clipforge-public .public-page { margin: .4rem auto 1.2rem; padding: 1.1rem; border-radius: .75rem; }
+  body.clipforge-public .public-page-heading { margin-bottom: 1.5rem; }
+  body.clipforge-public .workspace-shell { grid-template-columns: minmax(0, 1fr); gap: .65rem; margin: .25rem auto 1rem; }
+  body.clipforge-public .app-nav { position: static; gap: .55rem; padding: .65rem; }
+  body.clipforge-public .app-nav-brand { padding-bottom: .5rem; }
+  body.clipforge-public .app-nav ul { display: flex; gap: .35rem; overflow-x: auto; padding: .1rem .1rem .45rem; scrollbar-width: thin; }
+  body.clipforge-public .app-nav li { flex: 0 0 auto; }
+  body.clipforge-public .app-nav a:not(.app-nav-brand) { white-space: nowrap; }
+  body.clipforge-public .app-nav-help { display: none; }
+}
+@media (max-width: 390px) {
+  body.clipforge-public .site-brand { font-size: .88rem; }
+  body.clipforge-public .site-brand-mark { width: 1.75rem; height: 1.75rem; }
+  body.clipforge-public .site-primary-nav a { font-size: .68rem; }
+  body.clipforge-public .site-workspace-link { padding-right: .1rem; padding-left: .1rem; font-size: .67rem; }
+  body.clipforge-public .preview-content { grid-template-columns: 2.15rem minmax(0, 1fr); }
+  body.clipforge-public .preview-project-card { grid-template-columns: minmax(4.8rem, .75fr) minmax(4.8rem, 1fr); }
+  body.clipforge-public .preview-project-info { padding: .5rem; }
+  body.clipforge-public .preview-board-heading strong { font-size: .82rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.clipforge-public *, body.clipforge-public *::before, body.clipforge-public *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+/* ---- Homepage product story and text-based feature walkthrough ---- */
+body.clipforge-public .product-story { padding: clamp(2.8rem, 7vw, 5.2rem) clamp(.1rem, 1.5vw, 1rem); }
+body.clipforge-public .product-story > .section-heading { max-width: 54rem; }
+body.clipforge-public .product-story > .section-heading h2 { max-width: 18ch; margin: 0 auto; font-size: clamp(2rem, 4.6vw, 3.8rem); letter-spacing: -.065em; line-height: 1.03; }
+body.clipforge-public .product-story > .section-heading > p:last-child { max-width: 45rem; }
+body.clipforge-public .story-scenes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .7rem; margin: 2rem 0 0; padding: 0; list-style: none; }
+body.clipforge-public .story-scene { display: grid; min-width: 0; grid-template-columns: 2rem minmax(0, 1fr); gap: .55rem .7rem; padding: .8rem; border: 1px solid var(--border); border-radius: .8rem; background: var(--card); animation: story-step 18s ease-in-out infinite; }
+body.clipforge-public .story-scene-01 { animation-delay: 0s; }
+body.clipforge-public .story-scene-02 { animation-delay: 3s; }
+body.clipforge-public .story-scene-03 { animation-delay: 6s; }
+body.clipforge-public .story-scene-04 { animation-delay: 9s; }
+body.clipforge-public .story-scene-05 { animation-delay: 12s; }
+body.clipforge-public .story-scene-06 { animation-delay: 15s; }
+@keyframes story-step { 0%, 13% { border-color: color-mix(in srgb, var(--accent) 58%, var(--border)); box-shadow: 0 6px 20px rgb(20 70 42 / 9%); transform: translateY(-2px); } 18%, 100% { border-color: var(--border); box-shadow: none; transform: none; } }
+body.clipforge-public .story-scene-number { display: grid; width: 1.8rem; height: 1.8rem; place-items: center; border-radius: .55rem; background: var(--accent-soft); color: var(--accent); font-size: .62rem; font-weight: 840; }
+body.clipforge-public .story-visual { display: flex; min-width: 0; min-height: 6.25rem; grid-column: 2; align-items: center; justify-content: center; gap: .5rem; padding: .5rem; border: 1px solid var(--border); border-radius: .6rem; background: color-mix(in srgb, var(--bg) 75%, var(--card)); color: var(--accent); }
+body.clipforge-public .story-creator { justify-content: space-around; }
+body.clipforge-public .story-creator-glyph { width: min(46%, 6rem); height: 4.6rem; }
+body.clipforge-public .story-visual-note { max-width: 5rem; color: var(--muted); font-size: .62rem; line-height: 1.45; }
+body.clipforge-public .story-source { display: grid; justify-items: center; gap: .3rem; color: var(--muted); font-size: .55rem; text-align: center; }
+body.clipforge-public .story-source i { display: block; width: 2.4rem; height: 3.4rem; border: 2px solid color-mix(in srgb, var(--accent) 50%, var(--border)); border-radius: .3rem; background: linear-gradient(145deg, var(--accent-soft), var(--card)); }
+body.clipforge-public .story-arrow { color: var(--muted); font-size: .95rem; }
+body.clipforge-public .story-segments { display: flex; gap: .25rem; }
+body.clipforge-public .story-segments i { width: 1.25rem; height: 2.45rem; border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border)); border-radius: .25rem; background: var(--accent-soft); }
+body.clipforge-public .story-clips small { align-self: flex-end; color: var(--muted); font-size: .52rem; }
+body.clipforge-public .story-edit { flex-direction: column; align-items: stretch; }
+body.clipforge-public .story-frame { position: relative; display: grid; min-height: 3.2rem; place-items: center; border: .25rem solid color-mix(in srgb, var(--accent) 53%, var(--border)); border-radius: .4rem; background: linear-gradient(135deg, #d5c2a1, #667c6b); color: #fff; font-size: .55rem; text-shadow: 0 1px 2px #111; }
+body.clipforge-public .story-frame b { position: absolute; right: .22rem; bottom: .18rem; padding: .15rem .25rem; border-radius: .2rem; background: rgb(12 28 18 / 75%); font-size: .45rem; }
+body.clipforge-public .story-edit-chips { display: flex; flex-wrap: wrap; gap: .25rem; }
+body.clipforge-public .story-edit-chips i { padding: .17rem .28rem; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: .48rem; font-style: normal; }
+body.clipforge-public .story-calendar { display: block; padding: .45rem; }
+body.clipforge-public .story-calendar-head { display: flex; justify-content: space-between; gap: .3rem; margin-bottom: .3rem; color: var(--fg); font-size: .48rem; }
+body.clipforge-public .story-calendar-head span { color: var(--muted); font-weight: 400; }
+body.clipforge-public .story-calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: .12rem; }
+body.clipforge-public .story-calendar-grid > * { display: grid; min-height: .8rem; place-items: center; border-radius: .12rem; background: var(--card); color: var(--muted); font-size: .4rem; font-style: normal; }
+body.clipforge-public .story-calendar-grid > i { min-height: .6rem; background: none; font-size: .39rem; }
+body.clipforge-public .story-calendar-grid > span:not(:empty) { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+body.clipforge-public .story-status { flex-wrap: wrap; gap: .25rem; }
+body.clipforge-public .story-status span { padding: .25rem .35rem; border: 1px solid var(--border); border-radius: 99px; background: var(--card); color: var(--muted); font-size: .47rem; }
+body.clipforge-public .story-status span:nth-of-type(3) { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: var(--accent-soft); color: var(--accent); }
+body.clipforge-public .story-status b { color: var(--muted); font-size: .5rem; }
+body.clipforge-public .story-status em { flex-basis: 100%; color: var(--muted); font-size: .49rem; font-style: normal; text-align: center; }
+body.clipforge-public .story-scene-copy { grid-column: 1 / -1; }
+body.clipforge-public .story-scene-copy h3 { margin: .15rem 0 .22rem; font-size: .87rem; letter-spacing: -.02em; }
+body.clipforge-public .story-scene-copy p { margin: 0; color: var(--muted); font-size: .7rem; line-height: 1.5; }
+body.clipforge-public .story-disclaimer { max-width: 65rem; margin: .85rem auto 0; color: var(--muted); font-size: .68rem; line-height: 1.6; text-align: center; }
+body.clipforge-public .walkthrough-section { background: color-mix(in srgb, var(--accent-soft) 34%, var(--bg)); }
+body.clipforge-public .walkthrough-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+body.clipforge-public .walkthrough-card { min-width: 0; padding: .9rem; border: 1px solid var(--border); border-radius: .8rem; background: var(--card); }
+body.clipforge-public .walkthrough-card-heading { display: flex; align-items: center; gap: .55rem; }
+body.clipforge-public .walkthrough-card-heading > span { display: grid; flex: 0 0 auto; width: 1.65rem; height: 1.65rem; place-items: center; border-radius: .5rem; background: var(--accent-soft); color: var(--accent); font-size: .59rem; font-weight: 800; }
+body.clipforge-public .walkthrough-card-heading h3 { margin: 0; font-size: .83rem; }
+body.clipforge-public .walkthrough-preview { min-height: 5.3rem; margin: .75rem 0; padding: .55rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--bg); }
+body.clipforge-public .walkthrough-preview-label { display: block; margin-bottom: .45rem; color: var(--muted); font-size: .49rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+body.clipforge-public .walkthrough-preview-rows { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .3rem; }
+body.clipforge-public .walkthrough-preview-row { display: flex; min-width: 0; align-items: center; gap: .3rem; padding: .34rem; border: 1px solid var(--border); border-radius: .3rem; background: var(--card); color: var(--fg); font-size: .53rem; line-height: 1.35; }
+body.clipforge-public .walkthrough-preview-row i { display: block; flex: 0 0 auto; width: .65rem; height: .65rem; border: 1px solid var(--accent); border-radius: .2rem; background: var(--accent-soft); }
+body.clipforge-public .walkthrough-preview-variant-5 .walkthrough-preview-row,
+body.clipforge-public .walkthrough-preview-variant-6 .walkthrough-preview-row { border-radius: 999px; }
+body.clipforge-public .walkthrough-preview-variant-8 .walkthrough-preview-row { border-left: 2px solid var(--accent); }
+body.clipforge-public .walkthrough-card > p { margin: 0; color: var(--muted); font-size: .68rem; line-height: 1.55; }
+body.clipforge-public .problem-solution-section { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(14rem, .9fr); gap: clamp(1.5rem, 5vw, 4rem); }
+body.clipforge-public .problem-copy h2 { margin: 0; font-size: clamp(1.8rem, 3.7vw, 3rem); letter-spacing: -.06em; line-height: 1.08; }
+body.clipforge-public .problem-copy > p:not(.eyebrow) { max-width: 46rem; color: var(--muted); font-size: .88rem; line-height: 1.7; }
+body.clipforge-public .problem-list { display: grid; align-content: center; gap: .6rem; }
+body.clipforge-public .problem-list article { display: grid; grid-template-columns: 2rem minmax(0, 1fr); align-items: center; gap: .65rem; padding: .8rem; border: 1px solid var(--border); border-radius: .65rem; background: var(--card); }
+body.clipforge-public .problem-list article > span { color: var(--accent); font-size: .65rem; font-weight: 850; }
+body.clipforge-public .problem-list p { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+body.clipforge-public .audience-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .7rem; }
+body.clipforge-public .audience-grid article { padding: 1rem; border: 1px solid var(--border); border-radius: .75rem; background: var(--card); }
+body.clipforge-public .audience-grid h3 { margin: 0 0 .35rem; font-size: .9rem; }
+body.clipforge-public .audience-grid p { margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+body.clipforge-public .faq-preview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+body.clipforge-public .final-cta { display: flex; align-items: center; justify-content: space-between; gap: 2rem; margin: 0 clamp(.15rem, 1.8vw, 1.2rem) 2rem; padding: clamp(1.3rem, 4vw, 2.6rem); border-radius: 1rem; background: #173c2d; color: #f1f7f3; }
+body.clipforge-public .final-cta h2 { max-width: 18ch; margin: 0; font-size: clamp(1.6rem, 3vw, 2.5rem); letter-spacing: -.055em; line-height: 1.08; }
+body.clipforge-public .final-cta p:last-child { max-width: 37rem; margin-bottom: 0; color: #c3d5ca; font-size: .84rem; line-height: 1.6; }
+body.clipforge-public .final-cta .eyebrow { color: #9ddbb3; }
+body.clipforge-public .final-cta .button-secondary { border-color: #668a75; background: transparent; color: #f1f7f3; }
+@media (max-width: 960px) {
+  body.clipforge-public .story-scenes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body.clipforge-public .walkthrough-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body.clipforge-public .audience-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body.clipforge-public .faq-preview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  body.clipforge-public .story-scenes,
+  body.clipforge-public .walkthrough-grid,
+  body.clipforge-public .audience-grid,
+  body.clipforge-public .faq-preview-grid { grid-template-columns: minmax(0, 1fr); }
+  body.clipforge-public .story-scene { grid-template-columns: 1.8rem minmax(0, 1fr); }
+  body.clipforge-public .story-visual { min-height: 5.6rem; }
+  body.clipforge-public .problem-solution-section { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  body.clipforge-public .final-cta { align-items: flex-start; flex-direction: column; gap: .5rem; margin-right: 0; margin-left: 0; }
+  body.clipforge-public .final-cta .hero-actions { width: 100%; }
+  body.clipforge-public .final-cta .button { flex: 1 1 auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.clipforge-public .story-scene { animation: none; transform: none; }
+}

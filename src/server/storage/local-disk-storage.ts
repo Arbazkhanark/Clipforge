@@ -2,7 +2,8 @@
 // anything the web server serves (public/, .next/, app/). Nothing here is reachable by URL: the only way
 // to read a file is through authorised server code.
 import { createReadStream } from "node:fs";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { chmod, link, lstat, mkdir, open, readFile, realpath, rm, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { AppError } from "../errors.ts";
@@ -72,6 +73,7 @@ export class LocalDiskMediaStorage implements MediaStorage {
     const info = (await stat(target).then((i) => i, () => null)) as { isFile(): boolean; size: number } | null;
     return info && info.isFile() ? info.size : null;
   }
+  async getPrivateMetadata(key: string) { const sizeBytes = await this.statSize(key); return sizeBytes === null ? null : { sizeBytes, storageKind: this.kind }; }
   async openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>> {
     const target = await this.resolveInside(key, false);
     return Readable.toWeb(createReadStream(target, range ? { start: range.start, end: range.end } : {})) as unknown as ReadableStream<Uint8Array>;
@@ -91,6 +93,30 @@ export class LocalDiskMediaStorage implements MediaStorage {
     await chmod(destination, 0o600);
     return bytes.length;
   }
+  async copyCommittedToStaging(sourceKey: string, stagingKey: string, assertLease?: () => void): Promise<number> {
+    const source = await this.resolveInside(sourceKey, false);
+    const destination = await this.resolveInside(stagingKey, true);
+    // Open exclusively before streaming so a failed lease check can remove only the object
+    // created by this attempt. The transform checks the fencing state between chunks.
+    const handle = await open(destination, "wx", 0o600);
+    try {
+      await pipeline(
+        createReadStream(source),
+        new Transform({ transform(chunk, _encoding, callback) { try { assertLease?.(); callback(null, chunk); } catch (error) { callback(error as Error); } } }),
+        handle.createWriteStream({ autoClose: true }),
+      );
+      assertLease?.();
+      await chmod(destination, 0o600);
+      const info = await stat(destination);
+      if (!info.isFile()) throw new Error("The copied media object is not a file.");
+      assertLease?.();
+      return info.size;
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await unlink(destination).catch(() => undefined);
+      throw error;
+    }
+  }
 }
 
 /** Used when database mode cannot open the private folder. It never stores bytes in memory. */
@@ -105,8 +131,10 @@ export class UnavailableDiskStorage implements MediaStorage {
   discardStaged(): Promise<void> { return this.reject(); }
   exists(): Promise<boolean> { return this.reject(); }
   statSize(): Promise<number | null> { return this.reject(); }
+  getPrivateMetadata(): Promise<null> { return this.reject(); }
   openRead(): Promise<ReadableStream<Uint8Array>> { return this.reject(); }
   deleteUnreferencedUpload(): Promise<void> { return this.reject(); }
   runWithCommittedFile<T>(): Promise<T> { return this.reject(); }
   importLocalFile(): Promise<number> { return this.reject(); }
+  copyCommittedToStaging(): Promise<number> { return this.reject(); }
 }

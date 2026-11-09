@@ -1,6 +1,7 @@
 // Razorpay signature verification (HMAC-SHA256, hex).
-// NOTE: formulas below come from the previous brief + memory of Razorpay docs.
-// They were NOT re-verified against live docs (no network). Re-verify before going live.
+// Subscription checkout signature follows Razorpay's official subscription checkout
+// guidance: HMAC(payment_id|subscription_id), where the subscription ID is loaded
+// from server-side storage rather than trusted from the browser.
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 function hmacHex(message: string | Buffer, secret: string): string {

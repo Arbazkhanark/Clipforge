@@ -5,40 +5,1100 @@
 //   - cycle status moves are conditional updates (where status = from),
 //   - the storage quota check and insert happen in one transaction that first locks the owner's user row,
 //   - read methods select only what the screens need and page large lists.
-import { effectivePlanId, type SubscriptionState } from "../../lib/billing/subscription-state.ts";
-import type { PlanId } from "../../lib/billing/catalog.ts";
+// PROMOTION/BILLING LOCK ORDER: every transaction that can change a user's paid-period or promotional
+// entitlement first locks that User row. Coupon reservation then locks Promotion; subscription and payment
+// operations then touch Subscription/intent/payment rows; grant/redemption rows and lifecycle/audit rows
+// are written afterward. Never acquire a User lock after locking one of these rows.
+import { applySubscriptionEvent, effectivePlanId, type SubscriptionState, type SubscriptionStatus } from "../../lib/billing/subscription-state.ts";
+import { getPlan, type PlanId } from "../../lib/billing/catalog.ts";
+import { parseEditingSettings } from "../../lib/domain/editing-settings.ts";
+import { randomUUID } from "node:crypto";
 import type { CaptionRevision } from "../../lib/domain/caption-cover-updates.ts";
 import type { MediaSort } from "../../lib/domain/media-list.ts";
-import type { CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../../lib/domain/types.ts";
+import type { Capability, CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../../lib/domain/types.ts";
 import type { UsageRecordDraft } from "../../lib/domain/usage-accounting.ts";
-import type { AuditEntry, CycleRecord, EditingTemplateRecord, InstagramConnectionWrite, PublishingJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SocialAccountRecord } from "../repository.ts";
+import type { ApplyVideoSettingsBatchInput, AuditEntry, ClaimPublishingAttemptInput, CollectionAccessRequestRecord, CreateCollectionAccessRequestInput, CreatePublishingAttemptInput, CreateRenderJobResult, CycleRecord, DecideCollectionAccessRequestInput, EditingTemplateRecord, InstagramConnectionWrite, PersistedCycleSchedule, PublishingAttemptRecord, PublishingJobRecord, PublishingAttemptUpdate, RazorpaySubscriptionEventInput, RazorpaySubscriptionEventResult, RenderJobClaim, RenderJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SelectCycleItemRenderOutputInput, SocialAccountRecord, RazorpaySubscriptionIntentRecord, ReserveRazorpaySubscriptionIntentInput, RazorpayIntentStatus, ManualPaymentIntentRecord, ManualIntentStatus, SettleManualPaymentInput } from "../repository.ts";
 import { cycleToRow, grantToRow, itemToMutableData, itemToRow, mediaToRow, rowToCollection, rowToCycle, rowToGrant, rowToItem, rowToMedia, rowToSocialAccount } from "./mappers.ts";
 import { isUniqueViolation, type PrismaClientLike } from "./prisma-client-like.ts";
+import { canTransitionPublishingAttempt, isActivePublishingAttempt, publishingOutcomeForStage, safePublishingError } from "../../lib/domain/publishing-attempt.ts";
+import { buildPublishIdempotencyKey, isCycleFinished } from "../../lib/domain/cycle-state.ts";
+import { decideSettledCycle, itemsEligibleForRepeat } from "../../lib/domain/publish-workflow.ts";
+import { evaluateInstagramEligibility } from "../../lib/integrations/instagram-eligibility.ts";
+import { accessPeriodEnd } from "../../lib/billing/access-period.ts";
+import { resolveDeferredAccessState, resolveEffectiveEntitlement } from "../../lib/billing/entitlement-resolver.ts";
+import { planGrantCreation, planGrantRevocation } from "../../lib/domain/sharing-management.ts";
+import { mediaKeyFor, stagingKeyFor } from "../storage/media-storage.ts";
+import { canCreateAccessRequest, canImportVideo, decideAccessRequest, getCollectionCapabilities, validateShareLinkSettings } from "../../lib/domain/sharing-permissions.ts";
+import { calculateDiscountAmounts, normalizePromotionCode, promotionRedemptionTransitionAllowed, samePromotionDefinition, validDiscountSnapshot, validPromotionEventMetadata, validPromotionRecord } from "../../lib/domain/promotions.ts";
+import type { CreatePromotionRedemptionInput, CreatePromotionalAccessGrantInput, PromotionLifecycleEventInput, PromotionLifecycleEventRecord, PromotionRecord, PromotionRedemptionRecord, PromotionalAccessGrantRecord, RedeemFreeAccessCouponInput, RedeemFreeAccessCouponResult, ReserveDiscountedManualPaymentIntentInput, ReserveDiscountedManualPaymentIntentResult, UpdateDraftPromotionResult, TransitionCouponStatusResult } from "../repository.ts";
+import type { CollectionGrantMutationResult, CollectionShareLinkRecord, CollectionShareLinkSummary, CreateCollectionGrantInput, CreateCollectionShareLinkInput, MediaImportClaim, MediaImportFinalizationInput, MediaImportJobRecord, MediaImportRequestInput, MediaImportVerificationInput, RevokeCollectionGrantInput, UpdateCollectionShareLinkInput } from "../repository.ts";
+
+function accessRequestFromRow(row: Record<string, unknown>): CollectionAccessRequestRecord {
+  return { id: String(row["id"]), collectionId: String(row["collectionId"]), requesterId: String(row["requesterId"]), requestedCapabilities: Array.isArray(row["requestedCapabilities"]) ? row["requestedCapabilities"] as CollectionAccessRequestRecord["requestedCapabilities"] : [], status: row["status"] as CollectionAccessRequestRecord["status"], decidedById: row["decidedById"] as string | null ?? null, decidedAt: row["decidedAt"] as Date | null ?? null, createdAt: row["createdAt"] as Date };
+}
+
+function shareLinkFromRow(row: Record<string, unknown>): CollectionShareLinkRecord {
+  return { id: String(row["id"]), collectionId: String(row["collectionId"]), tokenHash: String(row["tokenHash"]), capabilities: Array.isArray(row["capabilities"]) ? row["capabilities"] as Capability[] : [], expiresAt: row["expiresAt"] as Date | null ?? null, revokedAt: row["revokedAt"] as Date | null ?? null, createdById: String(row["createdById"]), createdAt: row["createdAt"] as Date };
+}
+function shareLinkSummary(link: CollectionShareLinkRecord): CollectionShareLinkSummary {
+  const { tokenHash: _tokenHash, ...summary } = link;
+  return summary;
+}
+
+function publishingAttemptFromRow(row: Record<string, unknown>): PublishingAttemptRecord {
+  return { id: String(row["id"]), ownerId: String(row["ownerId"]), cycleId: String(row["cycleId"]), cycleItemId: String(row["cycleItemId"]), socialAccountId: String(row["socialAccountId"]), attemptNumber: Number(row["attemptNumber"]), idempotencyKey: String(row["idempotencyKey"]), stage: row["stage"] as PublishingAttemptRecord["stage"], outcome: row["outcome"] as PublishingAttemptRecord["outcome"], workerId: row["workerId"] as string | null, lockToken: row["lockToken"] as string | null, leaseExpiresAt: row["leaseExpiresAt"] as Date | null, containerId: row["containerId"] as string | null, instagramMediaId: row["instagramMediaId"] as string | null, errorCategory: row["errorCategory"] as string | null, errorDetails: row["errorDetails"] as string | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date, startedAt: row["startedAt"] as Date, finishedAt: row["finishedAt"] as Date | null };
+}
+
+function mediaImportJobFromRow(row: Record<string, unknown>): MediaImportJobRecord {
+  return {
+    id: String(row["id"]), importerId: String(row["importerId"]), sourceMediaId: String(row["sourceMediaId"]),
+    sourceCollectionId: String(row["sourceCollectionId"]), status: row["status"] as MediaImportJobRecord["status"],
+    idempotencyKey: String(row["idempotencyKey"]), newObjectKey: String(row["newObjectKey"]),
+    stagingObjectKey: row["stagingObjectKey"] as string | null ?? null, attemptStorageKeys: Array.isArray(row["attemptStorageKeys"]) ? row["attemptStorageKeys"] as string[] : [],
+    resultMediaAssetId: String(row["resultMediaAssetId"]), failureReason: row["failureReason"] as string | null ?? null,
+    attempts: Number(row["attempts"] ?? 0), lockedBy: row["lockedBy"] as string | null ?? null,
+    lockToken: row["lockToken"] as string | null ?? null, leaseExpiresAt: row["leaseExpiresAt"] as Date | null ?? null,
+    createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date,
+  };
+}
+
+const lockedUsers = async (tx: PrismaClientLike, ids: string[]): Promise<boolean> => {
+  const unique = [...new Set(ids)].sort();
+  // For two-user operations use individual locks in sorted order: PostgreSQL lock order is explicit and stable.
+  if (unique.length > 0) {
+    for (const id of unique) {
+      const one = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${id} FOR UPDATE`;
+      if (!Array.isArray(one) || one.length !== 1) return false;
+    }
+  }
+  return true;
+};
 
 const ACTIVE_CYCLE_STATUSES = ["draft", "running", "paused"];
+const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]` : typeof value === "object" && value !== null ? `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}` : JSON.stringify(value) ?? "undefined";
+
+function renderJobFromRow(row: Record<string, unknown>): RenderJobRecord {
+  return {
+    id: row["id"] as string, ownerId: row["ownerId"] as string, kind: "render", status: row["status"] as RenderJobRecord["status"],
+    cycleItemId: row["cycleItemId"] as string | null, mediaAssetId: row["mediaAssetId"] as string | null,
+    progressPercent: row["progressPercent"] as number, attempts: row["attempts"] as number, idempotencyKey: row["idempotencyKey"] as string,
+    lockedBy: row["lockedBy"] as string | null, lockExpiresAt: row["lockExpiresAt"] as Date | null, errorMessage: row["errorMessage"] as string | null,
+    createdAt: row["createdAt"] as Date, finishedAt: row["finishedAt"] as Date | null, settingsHash: row["settingsHash"] as string | null,
+    payload: row["payload"] ?? null, pendingOutputId: row["pendingOutputId"] as string | null, outputDerivativeId: row["outputDerivativeId"] as string | null,
+    lockToken: row["lockToken"] as string | null, ffmpegPid: row["ffmpegPid"] as number | null, ffmpegStartedAt: row["ffmpegStartedAt"] as Date | null,
+  };
+}
+
+function renderJobToRow(job: RenderJobRecord): Record<string, unknown> {
+  return { ...job };
+}
+
+function promotionEventMatchesRow(row: Record<string, unknown>, input: PromotionLifecycleEventInput): boolean {
+  const expectedMetadata = validPromotionEventMetadata(input.metadata);
+  const occurredAt = row["occurredAt"] instanceof Date ? row["occurredAt"].getTime() : NaN;
+  const actualMetadata = row["metadata"] && typeof row["metadata"] === "object" && !Array.isArray(row["metadata"]) ? row["metadata"] as Record<string, unknown> : null;
+  const stable = (metadata: Record<string, unknown> | null): string => JSON.stringify(metadata ? Object.fromEntries(Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right))) : null);
+  const redemptionId = input.redemptionId ?? null;
+  const grantId = input.accessGrantId ?? null;
+  const subjectUserId = input.subjectUserId ?? null;
+  return row["eventKey"] === input.eventKey && row["promotionId"] === input.promotionId && row["eventType"] === input.eventType && row["subjectUserId"] === subjectUserId &&
+    row["actorUserId"] === (input.actorUserId ?? null) && row["redemptionId"] === redemptionId && row["redemptionUserId"] === (redemptionId ? subjectUserId : null) && row["redemptionPromotionId"] === (redemptionId ? input.promotionId : null) &&
+    row["accessGrantId"] === grantId && row["accessGrantUserId"] === (grantId ? subjectUserId : null) && row["accessGrantPromotionId"] === (grantId ? input.promotionId : null) &&
+    row["outcome"] === (input.outcome ?? null) && occurredAt === input.occurredAt.getTime() && stable(actualMetadata) === stable(expectedMetadata);
+}
+
+/** Only a missing promotion table/column permits paid-only compatibility. All other failures fail closed. */
+function isPromotionSchemaUnavailable(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: unknown; meta?: { table?: unknown; column?: unknown; modelName?: unknown } };
+  if (candidate.code !== "P2021" && candidate.code !== "P2022") return false;
+  const target = `${String(candidate.meta?.table ?? "")} ${String(candidate.meta?.column ?? "")} ${String(candidate.meta?.modelName ?? "")}`.toLowerCase();
+  return target.includes("promotion") || target.includes("promotionalaccessgrant");
+}
 
 export class PrismaRepository implements Repository {
   private db: PrismaClientLike; private now: () => Date;
   constructor(db: PrismaClientLike, now: () => Date = () => new Date()) { this.db = db; this.now = now; }
 
-  async getPlanIdForUser(userId: string): Promise<PlanId> {
+  private promotionFromRow(row: Record<string, unknown>): PromotionRecord {
+    return { id: String(row["id"]), type: row["type"] as PromotionRecord["type"], status: row["status"] as PromotionRecord["status"], code: row["code"] as string | null,
+      discountType: row["discountType"] as PromotionRecord["discountType"], discountValue: row["discountValue"] as number | null, accessPlanId: row["accessPlanId"] as PlanId | null,
+      durationDays: row["durationDays"] as number | null, eligiblePlanIds: Array.isArray(row["eligiblePlanIds"]) ? row["eligiblePlanIds"] as PlanId[] : [], targetUserId: row["targetUserId"] as string | null,
+      startsAt: row["startsAt"] as Date, expiresAt: row["expiresAt"] as Date | null, usageLimit: row["usageLimit"] as number | null, createdByAdminId: String(row["createdByAdminId"]),
+      reason: row["reason"] as string | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date };
+  }
+  private promotionRedemptionFromRow(row: Record<string, unknown>): PromotionRedemptionRecord {
+    return { id: String(row["id"]), promotionId: String(row["promotionId"]), userId: String(row["userId"]), status: row["status"] as PromotionRedemptionRecord["status"], idempotencyKey: String(row["idempotencyKey"]),
+      planId: row["planId"] as PlanId | null, interval: row["interval"] as PromotionRedemptionRecord["interval"], listPricePaise: row["listPricePaise"] as number | null, discountPaise: row["discountPaise"] as number | null,
+      payablePaise: row["payablePaise"] as number | null, currency: row["currency"] as "INR" | null, manualPaymentIntentId: row["manualPaymentIntentId"] as string | null,
+      manualPaymentIntentUserId: row["manualPaymentIntentUserId"] as string | null, reservedAt: row["reservedAt"] as Date, redeemedAt: row["redeemedAt"] as Date | null,
+      releasedAt: row["releasedAt"] as Date | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date };
+  }
+  private promotionalGrantFromRow(row: Record<string, unknown>): PromotionalAccessGrantRecord {
+    return { id: String(row["id"]), promotionId: String(row["promotionId"]), userId: String(row["userId"]), redemptionId: row["redemptionId"] as string | null,
+      kind: row["kind"] as PromotionalAccessGrantRecord["kind"], activationPolicy: row["activationPolicy"] as PromotionalAccessGrantRecord["activationPolicy"], status: row["status"] as PromotionalAccessGrantRecord["status"],
+      planId: row["planId"] as PromotionalAccessGrantRecord["planId"], durationDays: Number(row["durationDays"]), queueSequence: BigInt(row["queueSequence"] as bigint | number | string),
+      startsAt: row["startsAt"] as Date | null, expiresAt: row["expiresAt"] as Date | null, activatedAt: row["activatedAt"] as Date | null, revokedAt: row["revokedAt"] as Date | null,
+      grantedByAdminId: row["grantedByAdminId"] as string | null, reason: row["reason"] as string | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date };
+  }
+  private promotionEventFromRow(row: Record<string, unknown>): PromotionLifecycleEventRecord {
+    const metadata = row["metadata"];
+    return { id: String(row["id"]), eventKey: String(row["eventKey"]), eventType: row["eventType"] as PromotionLifecycleEventRecord["eventType"], promotionId: String(row["promotionId"]),
+      subjectUserId: row["subjectUserId"] as string | null, actorUserId: row["actorUserId"] as string | null, redemptionId: row["redemptionId"] as string | null,
+      accessGrantId: row["accessGrantId"] as string | null, occurredAt: row["occurredAt"] as Date, outcome: row["outcome"] as string | null,
+      metadata: metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as PromotionLifecycleEventRecord["metadata"] : null };
+  }
+  private async insertPromotionEvent(tx: PrismaClientLike, input: PromotionLifecycleEventInput): Promise<void> {
+    const metadata = validPromotionEventMetadata(input.metadata);
+    if (input.metadata && !metadata) throw new Error("Invalid promotion event metadata");
+    const redemption = input.redemptionId ? await tx.promotionRedemption.findUnique({ where: { id: input.redemptionId } }) : null;
+    const grant = input.accessGrantId ? await tx.promotionalAccessGrant.findUnique({ where: { id: input.accessGrantId } }) : null;
+    if (input.redemptionId && (!redemption || redemption["promotionId"] !== input.promotionId || redemption["userId"] !== input.subjectUserId)) throw new Error("Promotion event redemption relationship mismatch");
+    if (input.accessGrantId && (!grant || grant["promotionId"] !== input.promotionId || grant["userId"] !== input.subjectUserId)) throw new Error("Promotion event grant relationship mismatch");
+    if (input.actorUserId) {
+      const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { role: true } });
+      if (actor?.["role"] !== "admin") throw new Error("Promotion event actor is not an administrator");
+    }
+    if (input.subjectUserId && !await tx.user.findUnique({ where: { id: input.subjectUserId }, select: { id: true } })) throw new Error("Promotion event subject is missing");
+    await tx.promotionLifecycleEvent.create({ data: { eventKey: input.eventKey, eventType: input.eventType, promotionId: input.promotionId, subjectUserId: input.subjectUserId ?? null,
+      actorUserId: input.actorUserId ?? null, redemptionId: redemption ? input.redemptionId : null, redemptionUserId: redemption ? redemption["userId"] : null,
+      redemptionPromotionId: redemption ? redemption["promotionId"] : null, accessGrantId: grant ? input.accessGrantId : null, accessGrantUserId: grant ? grant["userId"] : null,
+      accessGrantPromotionId: grant ? grant["promotionId"] : null, occurredAt: input.occurredAt, outcome: input.outcome ?? null, metadata } });
+    const entityType = input.accessGrantId ? "PromotionalAccessGrant" : input.redemptionId ? "PromotionRedemption" : "Promotion";
+    const entityId = input.accessGrantId ?? input.redemptionId ?? input.promotionId;
+    await tx.auditLog.create({ data: { actorId: input.actorUserId ?? null, action: `promotion.${input.eventType}`, entityType, entityId,
+      metadata: { eventKey: input.eventKey, outcome: input.outcome ?? null, ...(metadata ?? {}) } } });
+  }
+  private async hasPaidAccessForPromotion(tx: PrismaClientLike, userId: string, now: Date): Promise<boolean> {
+    const [manualRows, row] = await Promise.all([
+      tx.manualPlanAccess.findMany({ where: { userId }, select: { planId: true, startsAt: true, expiresAt: true } }),
+      tx.subscription.findUnique({ where: { userId }, select: { planId: true, status: true, trialEndsAt: true, currentPeriodEnd: true, cancelAtPeriodEnd: true, razorpaySubscriptionId: true } }),
+    ]);
+    const [capturedPayment, failedPayment] = row?.["razorpaySubscriptionId"] ? await Promise.all([
+      tx.paymentRecord.findFirst({ where: { userId, providerSubscriptionId: row["razorpaySubscriptionId"], status: "captured" }, select: { id: true } }),
+      tx.paymentRecord.findFirst({ where: { userId, providerSubscriptionId: row["razorpaySubscriptionId"], status: "failed" }, select: { id: true } }),
+    ]) : [null, null];
+    const hasCapturedPayment = Boolean(capturedPayment);
+    const hasFailedPayment = Boolean(failedPayment);
+    return resolveDeferredAccessState({
+      now,
+      subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,
+      manualAccess: manualRows.map((access) => ({ planId: String(access["planId"]), startsAt: access["startsAt"] as Date, expiresAt: access["expiresAt"] as Date })),
+    }) !== "ended";
+  }
+
+  async createPromotion(record: PromotionRecord): Promise<boolean> {
+    if (!validPromotionRecord(record) || (record.code && normalizePromotionCode(record.code) !== record.code)) return false;
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const actor = await tx.user.findUnique({ where: { id: record.createdByAdminId }, select: { role: true } });
+        if (actor?.["role"] !== "admin") return false;
+        if (record.targetUserId && !await tx.user.findUnique({ where: { id: record.targetUserId }, select: { id: true } })) return false;
+        const existing = await tx.promotion.findUnique({ where: { id: record.id } });
+        if (existing) return samePromotionDefinition(this.promotionFromRow(existing), record);
+        await tx.promotion.create({ data: { ...record } });
+        await this.insertPromotionEvent(tx, { id: `event-${record.id}`, eventKey: `promotion:${record.id}:created`, eventType: "promotion_created", promotionId: record.id, subjectUserId: record.targetUserId, actorUserId: record.createdByAdminId, occurredAt: record.createdAt, metadata: { reason: record.reason, status: record.status } });
+        return true;
+      });
+    } catch (error) { if (isUniqueViolation(error)) return false; throw error; }
+  }
+  async updateDraftPromotion(input: { record: PromotionRecord; expectedUpdatedAt: Date; actorUserId: string }): Promise<UpdateDraftPromotionResult> {
+    const { record, expectedUpdatedAt, actorUserId } = input;
+    if (!Number.isFinite(expectedUpdatedAt.getTime()) || !validPromotionRecord(record) || (record.code && normalizePromotionCode(record.code) !== record.code)) return { status: "conflict" };
+    const auditWriteFailure = Symbol("promotion update audit write failed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const actor = await tx.user.findUnique({ where: { id: actorUserId }, select: { role: true } });
+        if (actor?.["role"] !== "admin") return { status: "conflict" };
+        const currentRow = await tx.promotion.findUnique({ where: { id: record.id } });
+        if (!currentRow) return { status: "missing" };
+        const current = this.promotionFromRow(currentRow);
+        if (current.status !== "draft") return { status: "not_draft" };
+        if (current.updatedAt.getTime() !== expectedUpdatedAt.getTime()) return { status: "stale" };
+        if ((current.type !== "discount_coupon" && current.type !== "free_access_coupon") || record.type !== current.type || record.id !== current.id || record.status !== "draft" || record.createdByAdminId !== current.createdByAdminId || record.createdAt.getTime() !== current.createdAt.getTime()) return { status: "conflict" };
+        if (record.targetUserId !== null && !await tx.user.findUnique({ where: { id: record.targetUserId }, select: { id: true } })) return { status: "target_user_missing" };
+        const [redemptionCount, grantCount] = await Promise.all([
+          tx.promotionRedemption.count({ where: { promotionId: record.id } }),
+          tx.promotionalAccessGrant.count({ where: { promotionId: record.id } }),
+        ]);
+        if (redemptionCount > 0 || grantCount > 0) return { status: "history" };
+        if (record.code !== null) {
+          const duplicateCode = await tx.promotion.findUnique({ where: { code: record.code }, select: { id: true } });
+          if (duplicateCode && duplicateCode["id"] !== record.id) return { status: "duplicate_code" };
+        }
+        // updatedAt is a millisecond-precision compare-and-swap token. Force strict monotonicity
+        // so rapid concurrent edits cannot reuse an ETag even when the wall clock has not ticked.
+        const updatedAt = new Date(Math.max(record.updatedAt.getTime(), expectedUpdatedAt.getTime() + 1));
+        const changed = await tx.promotion.updateMany({
+          where: { id: record.id, status: "draft", updatedAt: expectedUpdatedAt },
+          data: {
+            type: record.type, code: record.code, discountType: record.discountType, discountValue: record.discountValue,
+            accessPlanId: record.accessPlanId, durationDays: record.durationDays, eligiblePlanIds: record.eligiblePlanIds,
+            targetUserId: record.targetUserId, startsAt: record.startsAt, expiresAt: record.expiresAt,
+            usageLimit: record.usageLimit, reason: record.reason, updatedAt,
+          },
+        });
+        if (changed.count !== 1) return { status: "stale" };
+        try {
+          await this.insertPromotionEvent(tx, {
+            id: `event-${record.id}-updated-${updatedAt.getTime()}`, eventKey: `promotion:${record.id}:updated:${updatedAt.getTime()}`,
+            eventType: "promotion_updated", promotionId: record.id, actorUserId, occurredAt: updatedAt,
+            metadata: { status: "draft", source: "admin_draft_edit", reason: record.reason },
+          });
+        } catch { throw auditWriteFailure; }
+        const updatedRow = await tx.promotion.findUnique({ where: { id: record.id } });
+        return updatedRow ? { status: "updated", promotion: this.promotionFromRow(updatedRow) } : { status: "conflict" };
+      });
+    } catch (error) {
+      if (error === auditWriteFailure) return { status: "conflict" };
+      if (isUniqueViolation(error)) return { status: "duplicate_code" };
+      throw error;
+    }
+  }
+  async transitionCouponStatus(input: { id: string; expectedStatus: "draft" | "active"; nextStatus: "active" | "paused"; expectedUpdatedAt: Date; actorUserId: string; now: Date }): Promise<TransitionCouponStatusResult> {
+    if (!Number.isFinite(input.expectedUpdatedAt.getTime()) || !Number.isFinite(input.now.getTime()) || !((input.expectedStatus === "draft" && input.nextStatus === "active") || (input.expectedStatus === "active" && input.nextStatus === "paused"))) return { status: "conflict" };
+    const auditWriteFailure = Symbol("coupon status audit write failed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { role: true } });
+        if (actor?.["role"] !== "admin") return { status: "conflict" };
+        const row = await tx.promotion.findUnique({ where: { id: input.id } });
+        if (!row) return { status: "missing" };
+        const current = this.promotionFromRow(row);
+        if (current.type !== "discount_coupon" && current.type !== "free_access_coupon") return { status: "not_coupon" };
+        if (current.status !== input.expectedStatus) return { status: "invalid_status" };
+        if (current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()) return { status: "stale" };
+        const updatedAt = new Date(Math.max(input.now.getTime(), input.expectedUpdatedAt.getTime() + 1));
+        const changed = await tx.promotion.updateMany({
+          where: { id: input.id, status: input.expectedStatus, updatedAt: input.expectedUpdatedAt },
+          data: { status: input.nextStatus, updatedAt },
+        });
+        if (changed.count !== 1) return { status: "stale" };
+        const eventType = input.nextStatus === "paused" ? "promotion_paused" as const : "promotion_updated" as const;
+        const action = input.nextStatus === "paused" ? "deactivated" : "activated";
+        try {
+          await this.insertPromotionEvent(tx, {
+            id: `event-${input.id}-${action}-${updatedAt.getTime()}`, eventKey: `promotion:${input.id}:${action}:${updatedAt.getTime()}`,
+            eventType, promotionId: input.id, actorUserId: input.actorUserId, occurredAt: updatedAt,
+            metadata: { status: input.nextStatus, source: `admin_coupon_${action}` },
+          });
+        } catch { throw auditWriteFailure; }
+        const updatedRow = await tx.promotion.findUnique({ where: { id: input.id } });
+        return updatedRow ? { status: "updated", promotion: this.promotionFromRow(updatedRow) } : { status: "conflict" };
+      });
+    } catch (error) {
+      if (error === auditWriteFailure) return { status: "conflict" };
+      throw error;
+    }
+  }
+  async listPromotions(query: { skip: number; take: number; search?: string; type?: "discount_coupon" | "free_access_coupon"; status?: PromotionRecord["status"] }): Promise<{ items: PromotionRecord[]; total: number }> {
+    if (!Number.isSafeInteger(query.skip) || query.skip < 0 || !Number.isSafeInteger(query.take) || query.take < 1 || query.take > 100) return { items: [], total: 0 };
+    const select = { id: true, type: true, status: true, code: true, discountType: true, discountValue: true, accessPlanId: true, durationDays: true, eligiblePlanIds: true, targetUserId: true, startsAt: true, expiresAt: true, usageLimit: true, createdByAdminId: true, reason: true, createdAt: true, updatedAt: true };
+    const where = {
+      type: query.type ?? { in: ["discount_coupon", "free_access_coupon"] },
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.search ? { code: { contains: query.search, mode: "insensitive" } } : {}),
+    };
+    const [rows, total] = await Promise.all([
+      this.db.promotion.findMany({ where, select, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], skip: query.skip, take: query.take }),
+      this.db.promotion.count({ where }),
+    ]);
+    return { items: rows.map((row) => this.promotionFromRow(row)), total };
+  }
+  async getPromotionUsageCounts(promotionIds: string[]) {
+    const ids = [...new Set(promotionIds)].slice(0, 100);
+    const result: Record<string, { reserved: number; redeemed: number; released: number; manualReview: number }> = {};
+    for (const id of ids) result[id] = { reserved: 0, redeemed: 0, released: 0, manualReview: 0 };
+    if (ids.length === 0) return result;
+    const rows = await this.db.promotionRedemption.groupBy({ by: ["promotionId", "status"], where: { promotionId: { in: ids } }, _count: { _all: true } });
+    for (const row of rows) {
+      const counts = result[String(row["promotionId"])];
+      if (!counts) continue;
+      const count = Number((row["_count"] as Record<string, unknown> | undefined)?.["_all"]);
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error("Admin promotion usage count was invalid.");
+      if (row["status"] === "reserved") counts.reserved = count;
+      else if (row["status"] === "redeemed") counts.redeemed = count;
+      else if (row["status"] === "released") counts.released = count;
+      else if (row["status"] === "manual_review") counts.manualReview = count;
+    }
+    return result;
+  }
+  async listPromotionRedemptionHistory(promotionId: string, query: { skip: number; take: number }) {
+    if (!Number.isSafeInteger(query.skip) || query.skip < 0 || !Number.isSafeInteger(query.take) || query.take < 1 || query.take > 100) return { items: [], total: 0 };
+    const where = { promotionId };
+    const select = { id: true, userId: true, status: true, planId: true, interval: true, listPricePaise: true, discountPaise: true, payablePaise: true, currency: true, createdAt: true, updatedAt: true };
+    const [rows, total] = await Promise.all([
+      this.db.promotionRedemption.findMany({ where, select, orderBy: [{ createdAt: "desc" }, { id: "asc" }], skip: query.skip, take: query.take }),
+      this.db.promotionRedemption.count({ where }),
+    ]);
+    return { items: rows.map((row) => ({ id: String(row["id"]), userId: String(row["userId"]), status: row["status"] as PromotionRedemptionRecord["status"], planId: row["planId"] as PlanId | null, interval: row["interval"] as PromotionRedemptionRecord["interval"], listPricePaise: row["listPricePaise"] as number | null, discountPaise: row["discountPaise"] as number | null, payablePaise: row["payablePaise"] as number | null, currency: row["currency"] as string | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date })), total };
+  }
+  async listPromotionLifecycleHistory(promotionId: string, query: { skip: number; take: number }) {
+    if (!Number.isSafeInteger(query.skip) || query.skip < 0 || !Number.isSafeInteger(query.take) || query.take < 1 || query.take > 100) return { items: [], total: 0 };
+    const where = { promotionId };
+    const select = { id: true, eventKey: true, eventType: true, subjectUserId: true, actorUserId: true, redemptionId: true, accessGrantId: true, occurredAt: true, outcome: true };
+    const [rows, total] = await Promise.all([
+      this.db.promotionLifecycleEvent.findMany({ where, select, orderBy: [{ occurredAt: "desc" }, { id: "asc" }], skip: query.skip, take: query.take }),
+      this.db.promotionLifecycleEvent.count({ where }),
+    ]);
+    const auditClauses = rows.map((row) => {
+      const entityType = row["accessGrantId"] ? "PromotionalAccessGrant" : row["redemptionId"] ? "PromotionRedemption" : "Promotion";
+      const entityId = row["accessGrantId"] ?? row["redemptionId"] ?? promotionId;
+      return { entityType, entityId, action: `promotion.${String(row["eventType"])}`, metadata: { path: ["eventKey"], equals: String(row["eventKey"]) } };
+    });
+    const auditRows = auditClauses.length ? await this.db.auditLog.findMany({ where: { OR: auditClauses }, select: { id: true, metadata: true } }) : [];
+    const auditIdByEventKey = new Map<string, string>();
+    for (const audit of auditRows) {
+      const metadata = audit["metadata"];
+      if (metadata && typeof metadata === "object" && !Array.isArray(metadata) && typeof (metadata as Record<string, unknown>)["eventKey"] === "string") auditIdByEventKey.set(String((metadata as Record<string, unknown>)["eventKey"]), String(audit["id"]));
+    }
+    return { items: rows.map((row) => ({ id: String(row["id"]), eventType: row["eventType"] as PromotionLifecycleEventRecord["eventType"], subjectUserId: row["subjectUserId"] as string | null, actorUserId: row["actorUserId"] as string | null, redemptionId: row["redemptionId"] as string | null, accessGrantId: row["accessGrantId"] as string | null, occurredAt: row["occurredAt"] as Date, outcome: row["outcome"] as string | null, auditId: auditIdByEventKey.get(String(row["eventKey"])) ?? null })), total };
+  }
+  async getUserPromotionRedemptionStatus(userId: string, redemptionId: string) {
+    const row = await this.db.promotionRedemption.findFirst({ where: { id: redemptionId, userId }, select: { id: true, promotionId: true, userId: true, status: true, planId: true, interval: true, listPricePaise: true, discountPaise: true, payablePaise: true, currency: true, manualPaymentIntentId: true, manualPaymentIntentUserId: true, redeemedAt: true, createdAt: true, updatedAt: true } });
+    if (!row) return null;
+    const [promotion, intent, grantRow] = await Promise.all([
+      this.db.promotion.findUnique({ where: { id: row["promotionId"] }, select: { type: true, status: true, startsAt: true, expiresAt: true } }),
+      typeof row["manualPaymentIntentId"] === "string" ? this.db.manualPaymentIntent.findFirst({ where: { id: row["manualPaymentIntentId"], userId }, select: { id: true, userId: true, status: true, accessStartsAt: true, accessEndsAt: true } }) : Promise.resolve(null),
+      this.db.promotionalAccessGrant.findFirst({ where: { redemptionId }, select: { id: true, promotionId: true, userId: true, kind: true, status: true, planId: true, startsAt: true, expiresAt: true } }),
+    ]);
+    if (!promotion || (promotion["type"] !== "discount_coupon" && promotion["type"] !== "free_access_coupon")) return null;
+    if (row["currency"] !== null && row["currency"] !== "INR") return null;
+    const hasIntentLink = typeof row["manualPaymentIntentId"] === "string";
+    if (hasIntentLink && (row["manualPaymentIntentUserId"] !== userId || !intent || intent["userId"] !== userId)) return null;
+    if (!hasIntentLink && (row["manualPaymentIntentUserId"] !== null || promotion["type"] === "discount_coupon")) return null;
+    if (grantRow && (grantRow["userId"] !== userId || grantRow["promotionId"] !== row["promotionId"] || grantRow["kind"] !== "free_access_coupon")) return null;
+    if (promotion["type"] === "discount_coupon" && grantRow) return null;
+    if (promotion["type"] === "free_access_coupon" && (!grantRow || row["status"] !== "redeemed")) return null;
+    return {
+      redemption: { id: String(row["id"]), promotionId: String(row["promotionId"]), userId: String(row["userId"]), status: row["status"] as PromotionRedemptionRecord["status"], planId: row["planId"] as PlanId | null, interval: row["interval"] as PromotionRedemptionRecord["interval"], listPricePaise: row["listPricePaise"] as number | null, discountPaise: row["discountPaise"] as number | null, payablePaise: row["payablePaise"] as number | null, currency: row["currency"] as "INR" | null, redeemedAt: row["redeemedAt"] as Date | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date },
+      coupon: { status: promotion["status"] as PromotionRecord["status"], startsAt: promotion["startsAt"] as Date, expiresAt: promotion["expiresAt"] as Date | null },
+      manualPayment: intent ? { id: String(intent["id"]), status: intent["status"] as ManualPaymentIntentRecord["status"], accessStartsAt: intent["accessStartsAt"] as Date | null, accessEndsAt: intent["accessEndsAt"] as Date | null } : null,
+      grant: grantRow ? { id: String(grantRow["id"]), status: grantRow["status"] as PromotionalAccessGrantRecord["status"], planId: grantRow["planId"] as Exclude<PlanId, "free">, startsAt: grantRow["startsAt"] as Date | null, expiresAt: grantRow["expiresAt"] as Date | null } : null,
+    };
+  }
+  async getPromotion(id: string): Promise<PromotionRecord | null> { const row = await this.db.promotion.findUnique({ where: { id } }); return row ? this.promotionFromRow(row) : null; }
+  async getPromotionByCode(code: string): Promise<PromotionRecord | null> {
+    const normalized = normalizePromotionCode(code);
+    if (!/^[A-Z0-9_-]{3,64}$/.test(normalized)) return null;
+    const row = await this.db.promotion.findUnique({ where: { code: normalized } }); return row ? this.promotionFromRow(row) : null;
+  }
+  async createOrGetPromotionRedemption(input: CreatePromotionRedemptionInput): Promise<{ status: "created" | "existing" | "conflict"; redemption?: PromotionRedemptionRecord }> {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.id) || !/^[A-Za-z0-9_-]{1,64}$/.test(input.userId) || !input.idempotencyKey || input.idempotencyKey.length > 128 || !Number.isFinite(input.now.getTime())) return { status: "conflict" };
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const lockedUser = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+        if (!Array.isArray(lockedUser) || lockedUser.length === 0) return { status: "conflict" as const };
+        const lockedPromotion = await tx.$queryRaw`SELECT "id" FROM "Promotion" WHERE "id" = ${input.promotionId} FOR UPDATE`;
+        if (!Array.isArray(lockedPromotion) || lockedPromotion.length === 0) return { status: "conflict" as const };
+        const promotionRow = await tx.promotion.findUnique({ where: { id: input.promotionId } });
+        const user = await tx.user.findUnique({ where: { id: input.userId }, select: { id: true } });
+        if (!promotionRow || !user) return { status: "conflict" as const };
+        const promotion = this.promotionFromRow(promotionRow);
+        if (promotion.type !== "discount_coupon") return { status: "conflict" as const };
+        const existing = await tx.promotionRedemption.findFirst({ where: { userId: input.userId, idempotencyKey: input.idempotencyKey } });
+        if (existing) {
+          const same = existing["promotionId"] === input.promotionId && existing["planId"] === (input.planId ?? null) && existing["interval"] === (input.interval ?? null) && existing["listPricePaise"] === (input.listPricePaise ?? null) && existing["discountPaise"] === (input.discountPaise ?? null) && existing["payablePaise"] === (input.payablePaise ?? null);
+          return same ? { status: "existing" as const, redemption: this.promotionRedemptionFromRow(existing) } : { status: "conflict" as const };
+        }
+        const discounted = input.planId !== undefined && input.planId !== null && input.interval !== undefined && input.interval !== null && input.listPricePaise !== undefined && input.listPricePaise !== null && input.discountPaise !== undefined && input.discountPaise !== null && input.payablePaise !== undefined && input.payablePaise !== null && validDiscountSnapshot(promotion, { userId: input.userId, planId: input.planId, interval: input.interval, listPricePaise: input.listPricePaise, discountPaise: input.discountPaise, payablePaise: input.payablePaise, now: input.now });
+        if (!discounted) return { status: "conflict" as const };
+        const activeForUser = await tx.promotionRedemption.findFirst({ where: { promotionId: input.promotionId, userId: input.userId, status: { in: ["reserved", "redeemed", "manual_review"] } }, select: { id: true } });
+        if (activeForUser) return { status: "conflict" as const };
+        const counted = await tx.promotionRedemption.count({ where: { promotionId: input.promotionId, status: { in: ["reserved", "redeemed", "manual_review"] } } });
+        if (promotion.usageLimit !== null && counted >= promotion.usageLimit) return { status: "conflict" as const };
+        if (input.manualPaymentIntentId) {
+          const intent = await tx.manualPaymentIntent.findFirst({ where: { id: input.manualPaymentIntentId, userId: input.userId } });
+          if (!intent || !["creating", "created"].includes(String(intent["status"])) || !discounted || intent["planId"] !== input.planId || intent["interval"] !== input.interval || intent["amountPaise"] !== input.payablePaise) return { status: "conflict" as const };
+        }
+        const row = await tx.promotionRedemption.create({ data: { id: input.id, promotionId: input.promotionId, userId: input.userId, status: "reserved", idempotencyKey: input.idempotencyKey,
+          planId: input.planId ?? null, interval: input.interval ?? null, listPricePaise: input.listPricePaise ?? null, discountPaise: input.discountPaise ?? null, payablePaise: input.payablePaise ?? null, currency: "INR",
+          manualPaymentIntentId: input.manualPaymentIntentId ?? null, manualPaymentIntentUserId: input.manualPaymentIntentId ? input.userId : null, reservedAt: input.now, redeemedAt: null, releasedAt: null, createdAt: input.now, updatedAt: input.now } });
+        await this.insertPromotionEvent(tx, { id: `event-${row["id"]}`, eventKey: `redemption:${String(row["id"])}:reserved`, eventType: "coupon_reserved", promotionId: input.promotionId, subjectUserId: input.userId, redemptionId: String(row["id"]), occurredAt: input.now, metadata: { status: String(row["status"]), planId: row["planId"] as string | null, discountPaise: row["discountPaise"] as number | null, payablePaise: row["payablePaise"] as number | null } });
+        return { status: "created" as const, redemption: this.promotionRedemptionFromRow(row) };
+      });
+    } catch (error) { if (isUniqueViolation(error)) return { status: "conflict" }; throw error; }
+  }
+  async redeemFreeAccessCoupon(input: RedeemFreeAccessCouponInput): Promise<RedeemFreeAccessCouponResult> {
+    const code = normalizePromotionCode(input.code);
+    if (!/^[A-Z0-9_-]{3,64}$/.test(code) || !/^[A-Za-z0-9_-]{1,64}$/.test(input.redemptionId) || !/^[A-Za-z0-9_-]{1,64}$/.test(input.grantId) ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(input.userId) || !/^[A-Za-z0-9_-]{16,128}$/.test(input.idempotencyKey) || !Number.isFinite(input.now.getTime())) return { status: "conflict" };
+    const eventWriteFailure = Symbol("free coupon redemption event write failed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        // Shared entitlement lock order: User first, then Promotion, then redemption/grant/events.
+        const lockedUser = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+        if (!Array.isArray(lockedUser) || lockedUser.length === 0) return { status: "conflict" as const };
+        const initial = await tx.promotion.findUnique({ where: { code } });
+        if (!initial) return { status: "unavailable" as const };
+        const promotionId = String(initial["id"]);
+        const lockedPromotion = await tx.$queryRaw`SELECT "id" FROM "Promotion" WHERE "id" = ${promotionId} FOR UPDATE`;
+        if (!Array.isArray(lockedPromotion) || lockedPromotion.length === 0) return { status: "unavailable" as const };
+        const promotionRow = await tx.promotion.findUnique({ where: { id: promotionId } });
+        if (!promotionRow || promotionRow["code"] !== code) return { status: "unavailable" as const };
+        const promotion = this.promotionFromRow(promotionRow);
+
+        const priorKey = await tx.promotionRedemption.findFirst({ where: { userId: input.userId, idempotencyKey: input.idempotencyKey } });
+        if (priorKey) {
+          if (priorKey["promotionId"] !== promotion.id || priorKey["planId"] !== null || priorKey["interval"] !== null || priorKey["listPricePaise"] !== null || priorKey["discountPaise"] !== null || priorKey["payablePaise"] !== null || priorKey["manualPaymentIntentId"] !== null) return { status: "conflict" as const };
+          const grantRow = await tx.promotionalAccessGrant.findUnique({ where: { redemptionId: priorKey["id"] } });
+          if (!grantRow || grantRow["userId"] !== input.userId || grantRow["promotionId"] !== promotion.id || grantRow["kind"] !== "free_access_coupon") return { status: "conflict" as const };
+          return { status: "existing" as const, redemption: this.promotionRedemptionFromRow(priorKey), grant: this.promotionalGrantFromRow(grantRow) };
+        }
+
+        if (!validPromotionRecord(promotion) || promotion.type !== "free_access_coupon" || promotion.status !== "active" || promotion.code !== code ||
+          promotion.startsAt > input.now || (promotion.expiresAt !== null && promotion.expiresAt <= input.now) || (promotion.targetUserId !== null && promotion.targetUserId !== input.userId) ||
+          !promotion.accessPlanId || !Number.isSafeInteger(promotion.durationDays) || promotion.durationDays === null || promotion.durationDays < 1 || promotion.durationDays > 30) return { status: "unavailable" as const };
+
+        // Enforce the one-redemption-per-user rule against all statuses, including released history.
+        const previousUse = await tx.promotionRedemption.findFirst({ where: { promotionId: promotion.id, userId: input.userId }, select: { id: true } });
+        if (previousUse) return { status: "unavailable" as const };
+        const usage = await tx.promotionRedemption.count({ where: { promotionId: promotion.id, status: { in: ["reserved", "redeemed", "manual_review"] } } });
+        if (promotion.usageLimit !== null && usage >= promotion.usageLimit) return { status: "unavailable" as const };
+
+        const redemption = await tx.promotionRedemption.create({ data: {
+          id: input.redemptionId, promotionId: promotion.id, userId: input.userId, status: "redeemed", idempotencyKey: input.idempotencyKey,
+          planId: null, interval: null, listPricePaise: null, discountPaise: null, payablePaise: null, currency: null,
+          manualPaymentIntentId: null, manualPaymentIntentUserId: null, reservedAt: input.now, redeemedAt: input.now, releasedAt: null,
+          createdAt: input.now, updatedAt: input.now,
+        } });
+        let grant: Record<string, unknown>;
+        try {
+          grant = await tx.promotionalAccessGrant.create({ data: {
+            id: input.grantId, promotionId: promotion.id, userId: input.userId, redemptionId: String(redemption["id"]), redemptionUserId: input.userId, redemptionPromotionId: promotion.id,
+            kind: "free_access_coupon", activationPolicy: "after_current_access", status: "queued", planId: promotion.accessPlanId, durationDays: promotion.durationDays,
+            startsAt: null, expiresAt: null, activatedAt: null, revokedAt: null, grantedByAdminId: null, reason: null, createdAt: input.now, updatedAt: input.now,
+          } });
+        } catch { throw eventWriteFailure; }
+        try {
+          await this.insertPromotionEvent(tx, { id: `event-${input.redemptionId}-redeemed`, eventKey: `redemption:${input.redemptionId}:redeemed`, eventType: "coupon_redeemed", promotionId: promotion.id, subjectUserId: input.userId, redemptionId: input.redemptionId, occurredAt: input.now, metadata: { status: "redeemed", planId: promotion.accessPlanId, durationDays: promotion.durationDays, source: "free_access_coupon" } });
+          await this.insertPromotionEvent(tx, { id: `event-${input.grantId}-created`, eventKey: `grant:${input.grantId}:created`, eventType: "grant_created", promotionId: promotion.id, subjectUserId: input.userId, redemptionId: input.redemptionId, accessGrantId: input.grantId, occurredAt: input.now, metadata: { status: "queued", planId: promotion.accessPlanId, durationDays: promotion.durationDays, source: "free_access_coupon" } });
+        } catch { throw eventWriteFailure; }
+        return { status: "created" as const, redemption: this.promotionRedemptionFromRow(redemption), grant: this.promotionalGrantFromRow(grant) };
+      });
+    } catch (error) {
+      if (error === eventWriteFailure || isUniqueViolation(error)) return { status: "conflict" };
+      throw error;
+    }
+  }
+  async transitionPromotionRedemption(input: { id: string; userId: string; expectedStatus: PromotionRedemptionRecord["status"]; nextStatus: PromotionRedemptionRecord["status"]; now: Date }): Promise<boolean> {
+    if (!promotionRedemptionTransitionAllowed(input.expectedStatus, input.nextStatus)) return false;
+    const eventType = input.nextStatus === "redeemed" ? "coupon_redeemed" : input.nextStatus === "released" ? "coupon_released" : "manual_review_required";
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      const current = await tx.promotionRedemption.findFirst({ where: { id: input.id, userId: input.userId } });
+      if (current?.["status"] === input.nextStatus) return Boolean(await tx.promotionLifecycleEvent.findUnique({ where: { eventKey: `redemption:${input.id}:${input.nextStatus}` } }));
+      const redemption = await tx.promotionRedemption.findFirst({ where: { id: input.id, userId: input.userId, status: input.expectedStatus } });
+      if (!redemption) return false;
+      if (input.nextStatus === "released" || input.nextStatus === "redeemed") {
+        const requiredPaymentStatus = input.nextStatus === "released" ? ["failed", "expired"] : ["paid"];
+        if (!redemption["manualPaymentIntentId"] || !await tx.manualPaymentIntent.findFirst({ where: { id: redemption["manualPaymentIntentId"], userId: input.userId, status: { in: requiredPaymentStatus } }, select: { id: true } })) return false;
+      }
+      const changed = await tx.promotionRedemption.updateMany({ where: { id: input.id, userId: input.userId, status: input.expectedStatus }, data: { status: input.nextStatus, redeemedAt: input.nextStatus === "redeemed" ? input.now : redemption["redeemedAt"], releasedAt: input.nextStatus === "released" ? input.now : null, updatedAt: input.now } });
+      if (changed.count !== 1) return false;
+      await this.insertPromotionEvent(tx, { id: `event-${input.id}-${input.nextStatus}`, eventKey: `redemption:${input.id}:${input.nextStatus}`, eventType, promotionId: String(redemption["promotionId"]), subjectUserId: input.userId, redemptionId: input.id, occurredAt: input.now, metadata: { status: input.nextStatus } });
+      return true;
+    });
+  }
+  async createPromotionalAccessGrant(input: CreatePromotionalAccessGrantInput): Promise<{ status: "created" | "existing" | "conflict"; grant?: PromotionalAccessGrantRecord }> {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.id) || !Number.isSafeInteger(input.durationDays) || input.durationDays < 1 || input.durationDays > 30 || !Number.isFinite(input.now.getTime())) return { status: "conflict" };
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+        if (!Array.isArray(locked) || locked.length === 0) return { status: "conflict" as const };
+        const promotionRow = await tx.promotion.findUnique({ where: { id: input.promotionId } });
+        if (!promotionRow) return { status: "conflict" as const };
+        const promotion = this.promotionFromRow(promotionRow);
+        const couponGrant = input.kind === "free_access_coupon";
+        const actor = input.grantedByAdminId ? await tx.user.findUnique({ where: { id: input.grantedByAdminId }, select: { role: true } }) : null;
+        if (couponGrant ? (input.grantedByAdminId !== null && input.grantedByAdminId !== undefined) : (!actor || actor["role"] !== "admin" || !promotion.targetUserId || promotion.targetUserId !== input.userId || promotion.createdByAdminId !== input.grantedByAdminId || promotion.status !== "active" || promotion.startsAt > input.now || (promotion.expiresAt !== null && promotion.expiresAt <= input.now))) return { status: "conflict" as const };
+        if ((input.kind === "bonus_days" && promotion.type !== "bonus_days") || (input.kind === "tier_access" && promotion.type !== "tier_access") || (input.kind === "free_access_coupon" && promotion.type !== "free_access_coupon") || promotion.accessPlanId !== input.planId || promotion.durationDays !== input.durationDays) return { status: "conflict" as const };
+        let redemption: Record<string, unknown> | null = null;
+        if (input.redemptionId) {
+          redemption = await tx.promotionRedemption.findFirst({ where: { id: input.redemptionId, userId: input.userId, promotionId: input.promotionId, status: "redeemed" } });
+          if (input.kind !== "free_access_coupon" || !redemption) return { status: "conflict" as const };
+        } else if (input.kind === "free_access_coupon") return { status: "conflict" as const };
+        const prior = await tx.promotionalAccessGrant.findUnique({ where: { id: input.id } });
+        if (prior) {
+          const same = prior["promotionId"] === input.promotionId && prior["userId"] === input.userId && prior["redemptionId"] === (input.redemptionId ?? null) && prior["kind"] === input.kind && prior["activationPolicy"] === input.activationPolicy && prior["planId"] === input.planId && prior["durationDays"] === input.durationDays && prior["grantedByAdminId"] === (input.grantedByAdminId ?? null);
+          return same ? { status: "existing" as const, grant: this.promotionalGrantFromRow(prior) } : { status: "conflict" as const };
+        }
+        const data = { id: input.id, promotionId: input.promotionId, userId: input.userId, redemptionId: redemption ? input.redemptionId : null, redemptionUserId: redemption ? input.userId : null, redemptionPromotionId: redemption ? input.promotionId : null,
+          kind: input.kind, activationPolicy: input.activationPolicy, status: "queued", planId: input.planId, durationDays: input.durationDays, startsAt: null, expiresAt: null, activatedAt: null, revokedAt: null,
+          grantedByAdminId: input.grantedByAdminId ?? null, reason: input.reason ?? null, createdAt: input.now, updatedAt: input.now };
+        const row = await tx.promotionalAccessGrant.create({ data });
+        await this.insertPromotionEvent(tx, { id: `event-${input.id}`, eventKey: `grant:${input.id}:created`, eventType: "grant_created", promotionId: input.promotionId, subjectUserId: input.userId, actorUserId: input.grantedByAdminId, redemptionId: redemption ? input.redemptionId : null, accessGrantId: input.id, occurredAt: input.now, metadata: { status: "queued", planId: input.planId, durationDays: input.durationDays, reason: input.reason ?? null } });
+        return { status: "created" as const, grant: this.promotionalGrantFromRow(row) };
+      });
+    } catch (error) { if (isUniqueViolation(error)) return { status: "conflict" }; throw error; }
+  }
+  async activateNextPromotionalAccessGrant(userId: string, now: Date): Promise<PromotionalAccessGrantRecord | null> {
+    return this.db.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length === 0) return null;
+      const next = await tx.promotionalAccessGrant.findFirst({ where: { userId, status: "queued" }, orderBy: { queueSequence: "asc" } });
+      const paidAccessBlocks = Boolean(next && next["activationPolicy"] === "after_current_access" && await this.hasPaidAccessForPromotion(tx, userId, now));
+      const expired = await tx.promotionalAccessGrant.findMany({ where: { userId, status: "active", expiresAt: { lte: now } } });
+      for (const row of expired) {
+        const changed = await tx.promotionalAccessGrant.updateMany({ where: { id: row["id"], userId, status: "active", expiresAt: { lte: now } }, data: { status: "expired", updatedAt: now } });
+        if (changed.count === 1) await this.insertPromotionEvent(tx, { id: `event-${String(row["id"])}-expired`, eventKey: `grant:${String(row["id"])}:expired`, eventType: "grant_expired", promotionId: String(row["promotionId"]), subjectUserId: userId, accessGrantId: String(row["id"]), occurredAt: now, metadata: { status: "expired" } });
+      }
+      const active = await tx.promotionalAccessGrant.findFirst({ where: { userId, status: "active", startsAt: { lte: now }, expiresAt: { gt: now } }, select: { id: true } });
+      if (active) return null;
+      if (!next || paidAccessBlocks) return null;
+      const startsAt = now; const expiresAt = new Date(now.getTime() + Number(next["durationDays"]) * 86_400_000);
+      const changed = await tx.promotionalAccessGrant.updateMany({ where: { id: next["id"], userId, status: "queued" }, data: { status: "active", startsAt, expiresAt, activatedAt: now, updatedAt: now } });
+      if (changed.count !== 1) return null;
+      await this.insertPromotionEvent(tx, { id: `event-${String(next["id"])}-activated`, eventKey: `grant:${String(next["id"])}:activated`, eventType: "grant_activated", promotionId: String(next["promotionId"]), subjectUserId: userId, accessGrantId: String(next["id"]), occurredAt: now, metadata: { status: "active", planId: String(next["planId"]), durationDays: Number(next["durationDays"]) } });
+      const updated = await tx.promotionalAccessGrant.findUnique({ where: { id: next["id"] } });
+      return updated ? this.promotionalGrantFromRow(updated) : null;
+    });
+  }
+  async transitionPromotionalAccessGrant(input: { id: string; userId: string; actorUserId?: string | null; expectedStatus: PromotionalAccessGrantRecord["status"]; nextStatus: "expired" | "revoked"; now: Date }): Promise<boolean> {
+    if (input.expectedStatus !== "queued" && input.expectedStatus !== "active") return false;
+    if (input.nextStatus === "expired" && input.expectedStatus !== "active") return false;
+    return this.db.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length === 0) return false;
+      const current = await tx.promotionalAccessGrant.findFirst({ where: { id: input.id, userId: input.userId } });
+      if (current?.["status"] === input.nextStatus) return Boolean(await tx.promotionLifecycleEvent.findUnique({ where: { eventKey: `grant:${input.id}:${input.nextStatus}` } }));
+      const row = await tx.promotionalAccessGrant.findFirst({ where: { id: input.id, userId: input.userId, status: input.expectedStatus } });
+      if (!row || (input.nextStatus === "expired" && (!(row["expiresAt"] instanceof Date) || row["expiresAt"] > input.now))) return false;
+      if (input.actorUserId) {
+        const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { role: true } });
+        if (actor?.["role"] !== "admin") return false;
+      } else if (input.nextStatus === "revoked") return false;
+      const changed = await tx.promotionalAccessGrant.updateMany({ where: { id: input.id, userId: input.userId, status: input.expectedStatus }, data: { status: input.nextStatus, revokedAt: input.nextStatus === "revoked" ? input.now : null, updatedAt: input.now } });
+      if (changed.count !== 1) return false;
+      await this.insertPromotionEvent(tx, { id: `event-${input.id}-${input.nextStatus}`, eventKey: `grant:${input.id}:${input.nextStatus}`, eventType: input.nextStatus === "revoked" ? "grant_revoked" : "grant_expired", promotionId: String(row["promotionId"]), subjectUserId: input.userId, actorUserId: input.actorUserId ?? null, accessGrantId: input.id, occurredAt: input.now, metadata: { status: input.nextStatus } });
+      return true;
+    });
+  }
+  async getPromotionalAccessGrant(userId: string, grantId: string): Promise<PromotionalAccessGrantRecord | null> { const row = await this.db.promotionalAccessGrant.findFirst({ where: { id: grantId, userId } }); return row ? this.promotionalGrantFromRow(row) : null; }
+  async listPromotionalAccessGrantsForUser(userId: string): Promise<PromotionalAccessGrantRecord[]> { const rows = await this.db.promotionalAccessGrant.findMany({ where: { userId }, orderBy: { queueSequence: "asc" } }); return rows.map((row) => this.promotionalGrantFromRow(row)); }
+  async createPromotionLifecycleEvent(input: PromotionLifecycleEventInput): Promise<"created" | "duplicate" | "conflict"> {
+    if (!input.eventKey || input.eventKey.length > 200 || !/^[A-Za-z0-9:_-]+$/.test(input.eventKey) || (input.metadata && !validPromotionEventMetadata(input.metadata))) return "conflict";
+    try { return await this.db.$transaction(async (tx) => {
+      if (!await tx.promotion.findUnique({ where: { id: input.promotionId } })) return "conflict" as const;
+      if (input.actorUserId) {
+        const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { role: true } });
+        if (actor?.["role"] !== "admin") return "conflict" as const;
+      }
+      if (input.subjectUserId && !await tx.user.findUnique({ where: { id: input.subjectUserId }, select: { id: true } })) return "conflict" as const;
+      if (input.redemptionId) {
+        const redemption = await tx.promotionRedemption.findFirst({ where: { id: input.redemptionId, promotionId: input.promotionId, userId: input.subjectUserId } });
+        if (!redemption) return "conflict" as const;
+      }
+      if (input.accessGrantId) {
+        const grant = await tx.promotionalAccessGrant.findFirst({ where: { id: input.accessGrantId, promotionId: input.promotionId, userId: input.subjectUserId } });
+        if (!grant) return "conflict" as const;
+      }
+      const existing = await tx.promotionLifecycleEvent.findUnique({ where: { eventKey: input.eventKey } });
+      if (existing) return promotionEventMatchesRow(existing, input) ? "duplicate" as const : "conflict" as const;
+      await this.insertPromotionEvent(tx, input);
+      return "created" as const;
+    }); } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      // A concurrent transaction may have committed the same event key after our in-transaction read.
+      // Revalidate the actor before treating that unique conflict as an idempotent success.
+      return this.db.$transaction(async (tx) => {
+        if (input.actorUserId) {
+          const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { role: true } });
+          if (actor?.["role"] !== "admin") return "conflict" as const;
+        }
+        const existing = await tx.promotionLifecycleEvent.findUnique({ where: { eventKey: input.eventKey } });
+        return existing && promotionEventMatchesRow(existing, input) ? "duplicate" as const : "conflict" as const;
+      });
+    }
+  }
+  async listPromotionLifecycleEvents(promotionId: string): Promise<PromotionLifecycleEventRecord[]> { const rows = await this.db.promotionLifecycleEvent.findMany({ where: { promotionId }, orderBy: { occurredAt: "asc" } }); return rows.map((row) => this.promotionEventFromRow(row)); }
+
+  async getPlanIdForUser(userId: string, at = this.now()): Promise<PlanId> {
+    let promotionsAvailable = true;
+    try { await this.activateNextPromotionalAccessGrant(userId, at); }
+    catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; promotionsAvailable = false; }
+    const row = await this.db.subscription.findUnique({ where: { userId }, select: { planId: true, status: true, trialEndsAt: true, currentPeriodEnd: true, cancelAtPeriodEnd: true, razorpaySubscriptionId: true } });
+    const [capturedPayment, failedPayment] = row?.["razorpaySubscriptionId"] ? await Promise.all([
+      this.db.paymentRecord.findFirst({ where: { userId, providerSubscriptionId: row["razorpaySubscriptionId"], status: "captured" }, select: { id: true } }),
+      this.db.paymentRecord.findFirst({ where: { userId, providerSubscriptionId: row["razorpaySubscriptionId"], status: "failed" }, select: { id: true } }),
+    ]) : [null, null];
+    const hasCapturedPayment = Boolean(capturedPayment);
+    const hasFailedPayment = Boolean(failedPayment);
+    const manualRows = await this.db.manualPlanAccess.findMany({ where: { userId }, select: { planId: true, startsAt: true, expiresAt: true } });
+    let promotionalRows: Record<string, unknown>[] = [];
+    if (promotionsAvailable) {
+      try { promotionalRows = await this.db.promotionalAccessGrant.findMany({ where: { userId, status: "active", startsAt: { lte: at }, expiresAt: { gt: at } }, select: { planId: true, startsAt: true, expiresAt: true, status: true, activationPolicy: true, activatedAt: true, revokedAt: true } }); }
+      catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; }
+    }
+    return resolveEffectiveEntitlement({
+      now: at,
+      subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,
+      manualAccess: manualRows.map((access) => ({ planId: String(access["planId"]), startsAt: access["startsAt"] as Date, expiresAt: access["expiresAt"] as Date })),
+      promotionalGrants: promotionalRows.map((grant) => ({ planId: String(grant["planId"]), startsAt: grant["startsAt"] as Date, expiresAt: grant["expiresAt"] as Date, status: String(grant["status"]), activationPolicy: String(grant["activationPolicy"]), activatedAt: grant["activatedAt"] instanceof Date ? grant["activatedAt"] : null, revokedAt: grant["revokedAt"] === null ? null : grant["revokedAt"] instanceof Date ? grant["revokedAt"] : new Date(Number.NaN) })),
+      deferredAccessState: resolveDeferredAccessState({
+        now: at,
+        subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,
+        manualAccess: manualRows.map((access) => ({ planId: String(access["planId"]), startsAt: access["startsAt"] as Date, expiresAt: access["expiresAt"] as Date })),
+      }),
+    }).planId;
+  }
+
+  private async effectivePlanIdInTransaction(tx: PrismaClientLike, userId: string, now: Date, includePromotions: boolean): Promise<PlanId> {
+    const row = await tx.subscription.findUnique({ where: { userId }, select: { planId: true, status: true, trialEndsAt: true, currentPeriodEnd: true, cancelAtPeriodEnd: true, razorpaySubscriptionId: true } });
+    const [capturedPayment, failedPayment] = row?.["razorpaySubscriptionId"] ? await Promise.all([
+      tx.paymentRecord.findFirst({ where: { userId, providerSubscriptionId: row["razorpaySubscriptionId"], status: "captured" }, select: { id: true } }),
+      tx.paymentRecord.findFirst({ where: { userId, providerSubscriptionId: row["razorpaySubscriptionId"], status: "failed" }, select: { id: true } }),
+    ]) : [null, null];
+    const hasCapturedPayment = Boolean(capturedPayment);
+    const hasFailedPayment = Boolean(failedPayment);
+    const manualRows = await tx.manualPlanAccess.findMany({ where: { userId }, select: { planId: true, startsAt: true, expiresAt: true } });
+    let promotionalRows: Record<string, unknown>[] = [];
+    if (includePromotions) promotionalRows = await tx.promotionalAccessGrant.findMany({ where: { userId, status: "active", startsAt: { lte: now }, expiresAt: { gt: now } }, select: { planId: true, startsAt: true, expiresAt: true, status: true, activationPolicy: true, activatedAt: true, revokedAt: true } });
+    return resolveEffectiveEntitlement({
+      now,
+      subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,
+      manualAccess: manualRows.map((access) => ({ planId: String(access["planId"]), startsAt: access["startsAt"] as Date, expiresAt: access["expiresAt"] as Date })),
+      promotionalGrants: promotionalRows.map((grant) => ({ planId: String(grant["planId"]), startsAt: grant["startsAt"] as Date, expiresAt: grant["expiresAt"] as Date, status: String(grant["status"]), activationPolicy: String(grant["activationPolicy"]), activatedAt: grant["activatedAt"] instanceof Date ? grant["activatedAt"] : null, revokedAt: grant["revokedAt"] === null ? null : grant["revokedAt"] instanceof Date ? grant["revokedAt"] : new Date(Number.NaN) })),
+      deferredAccessState: resolveDeferredAccessState({
+        now,
+        subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,
+        manualAccess: manualRows.map((access) => ({ planId: String(access["planId"]), startsAt: access["startsAt"] as Date, expiresAt: access["expiresAt"] as Date })),
+      }),
+    }).planId;
+  }
+
+  private razorpayIntentFromRow(row: Record<string, unknown>): RazorpaySubscriptionIntentRecord {
+    return { id: String(row["id"]), userId: String(row["userId"]), idempotencyKey: String(row["idempotencyKey"]), autoRenewConsentAt: row["autoRenewConsentAt"] as Date | null, autoRenewConsentVersion: row["autoRenewConsentVersion"] as string | null, providerSubscriptionId: row["providerSubscriptionId"] as string | null, providerPlanId: String(row["providerPlanId"]), checkoutUrl: row["checkoutUrl"] as string | null, planId: row["planId"] as PlanId, interval: row["interval"] as "weekly" | "monthly", amountPaise: Number(row["amountPaise"]), currency: "INR", status: row["status"] as RazorpayIntentStatus, errorCategory: row["errorCategory"] as string | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date };
+  }
+  async reserveRazorpaySubscriptionIntent(input: ReserveRazorpaySubscriptionIntentInput): Promise<{ status: "created" | "existing" | "conflict"; intent?: RazorpaySubscriptionIntentRecord }> {
+    if (input.planId === "free" || getPlan(input.planId).pricePaise[input.interval] !== input.amountPaise || !input.idempotencyKey || input.idempotencyKey.length > 128 || !(input.autoRenewConsentAt instanceof Date) || !input.autoRenewConsentVersion) return { status: "conflict" };
+    try { return await this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      const old = await tx.razorpaySubscriptionIntent.findUnique({ where: { userId_idempotencyKey: { userId: input.userId, idempotencyKey: input.idempotencyKey } } });
+      if (old) { const row = this.razorpayIntentFromRow(old); return row.planId === input.planId && row.interval === input.interval && row.amountPaise === input.amountPaise ? { status: "existing", intent: row } : { status: "conflict" }; }
+      const other = await tx.razorpaySubscriptionIntent.findFirst({ where: { userId: input.userId, status: { in: ["creating", "created", "active", "manual_review"] } } });
+      const manual = await tx.manualPaymentIntent.findFirst({ where: { userId: input.userId, status: { in: ["creating", "created", "manual_review"] } } });
+      const grant = await tx.manualPlanAccess.findFirst({ where: { userId: input.userId, expiresAt: { gt: input.now } } });
+      const current = await tx.subscription.findUnique({ where: { userId: input.userId } });
+      if (other || manual || grant || (current && (["active", "pending", "authenticated", "created", "halted"].includes(String(current["status"])) || (current["status"] === "cancelled" && current["cancelAtPeriodEnd"] === true)) && (!current["currentPeriodEnd"] || current["currentPeriodEnd"] > input.now))) return { status: "conflict" };
+      const row = await tx.razorpaySubscriptionIntent.create({ data: { ...input, currency: "INR", status: "creating", providerSubscriptionId: null, checkoutUrl: null, errorCategory: null, createdAt: input.now, updatedAt: input.now } });
+      return { status: "created", intent: this.razorpayIntentFromRow(row) };
+    }); } catch (error) { if (isUniqueViolation(error)) return { status: "conflict" }; throw error; }
+  }
+  async finishRazorpaySubscriptionIntent(input: { id: string; userId: string; status: RazorpayIntentStatus; providerSubscriptionId?: string; checkoutUrl?: string; errorCategory?: string; now: Date }): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      const row = await tx.razorpaySubscriptionIntent.findUnique({ where: { id: input.id } });
+      if (!row || row["userId"] !== input.userId || row["status"] !== "creating") return false;
+      const updated = await tx.razorpaySubscriptionIntent.updateMany({ where: { id: input.id, userId: input.userId, status: "creating" }, data: { status: input.status, providerSubscriptionId: input.providerSubscriptionId ?? null, checkoutUrl: input.checkoutUrl ?? null, errorCategory: input.errorCategory ?? null, updatedAt: input.now } });
+      if (updated.count !== 1) return false;
+      if (input.status === "created" && input.providerSubscriptionId) await tx.subscription.upsert({ where: { userId: input.userId }, create: { userId: input.userId, planId: row["planId"], interval: row["interval"], status: "created", razorpaySubscriptionId: input.providerSubscriptionId, lastEventAt: 0n, trialEndsAt: null, currentPeriodEnd: null, cancelAtPeriodEnd: false }, update: { planId: row["planId"], interval: row["interval"], status: "created", razorpaySubscriptionId: input.providerSubscriptionId, lastEventAt: 0n, trialEndsAt: null, currentPeriodEnd: null, cancelAtPeriodEnd: false } });
+      return true;
+    });
+  }
+  async getRazorpaySubscriptionIntent(userId: string, idempotencyKey: string): Promise<RazorpaySubscriptionIntentRecord | null> { const row = await this.db.razorpaySubscriptionIntent.findUnique({ where: { userId_idempotencyKey: { userId, idempotencyKey } } }); return row ? this.razorpayIntentFromRow(row) : null; }
+  async getRazorpaySubscriptionIntentByProviderId(userId: string, providerSubscriptionId: string): Promise<RazorpaySubscriptionIntentRecord | null> { const row = await this.db.razorpaySubscriptionIntent.findFirst({ where: { userId, providerSubscriptionId } }); return row ? this.razorpayIntentFromRow(row) : null; }
+
+  async getRazorpaySubscriptionForOwner(userId: string): Promise<{ id: string; planId: PlanId; interval: "weekly" | "monthly"; status: import("../../lib/billing/subscription-state.ts").SubscriptionStatus; razorpaySubscriptionId: string | null; currentPeriodEnd: Date | null; cancelAtPeriodEnd: boolean } | null> {
     const row = await this.db.subscription.findUnique({ where: { userId } });
-    if (!row) return "free";
-    const state: SubscriptionState = { planId: row["planId"], interval: row["interval"], status: row["status"], lastEventAt: Number(row["lastEventAt"] ?? 0), processedEventIds: [], trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]) };
-    return effectivePlanId(state, Math.floor(this.now().getTime() / 1000));
+    return row ? { id: String(row["id"]), planId: row["planId"] as PlanId, interval: row["interval"] as "weekly" | "monthly", status: row["status"] as import("../../lib/billing/subscription-state.ts").SubscriptionStatus, razorpaySubscriptionId: row["razorpaySubscriptionId"] as string | null, currentPeriodEnd: row["currentPeriodEnd"] as Date | null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true } : null;
+  }
+
+  async recordRazorpayCancellation(userId: string, providerSubscriptionId: string, cancelAtPeriodEnd: boolean, providerStatus: import("../../lib/billing/subscription-state.ts").SubscriptionStatus, currentPeriodEnd: Date | null, now: Date): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+      const result = await tx.subscription.updateMany({ where: { userId, razorpaySubscriptionId: providerSubscriptionId }, data: { cancelAtPeriodEnd, status: providerStatus, ...(currentPeriodEnd ? { currentPeriodEnd } : {}), updatedAt: now } });
+      return result.count === 1;
+    });
+  }
+
+  async requestRazorpayCancellation(userId: string, providerSubscriptionId: string, now: Date): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+      await tx.$queryRaw`SELECT "id" FROM "Subscription" WHERE "userId" = ${userId} AND "razorpaySubscriptionId" = ${providerSubscriptionId} FOR UPDATE`;
+      const row = await tx.subscription.findFirst({ where: { userId, razorpaySubscriptionId: providerSubscriptionId } });
+      if (!row) return false;
+      await tx.subscription.update({ where: { id: row["id"] }, data: { cancellationRequestedAt: row["cancellationRequestedAt"] ?? now, updatedAt: now } });
+      return true;
+    });
+  }
+
+  async listSubscriptionContinuationCandidates(now: Date): Promise<import("../repository.ts").SubscriptionContinuationCandidate[]> {
+    const rows = await this.db.subscription.findMany({ where: { status: "active", razorpaySubscriptionId: { not: null }, currentPeriodEnd: { gt: now }, cancelAtPeriodEnd: false, cancellationRequestedAt: null } });
+    return rows.filter((r) => r["currentPeriodEnd"] instanceof Date && typeof r["razorpaySubscriptionId"] === "string").map((r) => ({ id: String(r["id"]), userId: String(r["userId"]), planId: r["planId"] as PlanId, interval: r["interval"] as "weekly" | "monthly", providerSubscriptionId: String(r["razorpaySubscriptionId"]), currentPeriodEnd: r["currentPeriodEnd"] as Date }));
+  }
+
+  async reserveSubscriptionContinuation(input: import("../repository.ts").SubscriptionContinuationInput): Promise<"reserved" | "existing" | "cancelled" | "not_due"> {
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const owner = await tx.subscription.findUnique({ where: { id: input.subscriptionId }, select: { userId: true } });
+        if (!owner || typeof owner["userId"] !== "string") return "not_due" as const;
+        await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${owner["userId"]} FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "Subscription" WHERE "id" = ${input.subscriptionId} FOR UPDATE`;
+        const row = await tx.subscription.findUnique({ where: { id: input.subscriptionId } });
+        if (!row || row["razorpaySubscriptionId"] !== input.providerSubscriptionId || row["currentPeriodEnd"]?.getTime?.() !== input.cycleEnd.getTime()) return "not_due";
+        if (row["cancellationRequestedAt"] || row["cancelAtPeriodEnd"] === true || row["status"] !== "active") return "cancelled";
+        await tx.razorpaySubscriptionContinuation.create({ data: { ...input, status: "reserved" } });
+        return "reserved";
+      });
+    } catch (error) { if (isUniqueViolation(error)) return "existing"; throw error; }
+  }
+
+  async finishSubscriptionContinuation(input: { id: string; status: "applied" | "manual_review" | "skipped"; errorCategory?: string; now: Date }): Promise<boolean> {
+    const result = await this.db.razorpaySubscriptionContinuation.updateMany({ where: { id: input.id, status: "reserved" }, data: { status: input.status, errorCategory: input.errorCategory ?? null, finishedAt: input.now, updatedAt: input.now } });
+    return result.count === 1;
+  }
+
+  private manualIntentFromRow(row: Record<string, unknown>): ManualPaymentIntentRecord {
+    return { id: String(row["id"]), userId: String(row["userId"]), idempotencyKey: String(row["idempotencyKey"]), providerPaymentLinkId: row["providerPaymentLinkId"] as string | null, checkoutUrl: row["checkoutUrl"] as string | null, planId: row["planId"] as PlanId, interval: row["interval"] as "weekly" | "monthly", amountPaise: Number(row["amountPaise"]), currency: "INR", status: row["status"] as ManualIntentStatus, accessStartsAt: row["accessStartsAt"] as Date | null, accessEndsAt: row["accessEndsAt"] as Date | null, errorCategory: row["errorCategory"] as string | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date };
+  }
+  async reserveManualPaymentIntent(input: { id: string; userId: string; idempotencyKey: string; planId: PlanId; interval: "weekly" | "monthly"; amountPaise: number; now: Date }): Promise<{ status: "created" | "existing" | "conflict"; intent?: ManualPaymentIntentRecord }> {
+    if (input.planId === "free" || getPlan(input.planId).pricePaise[input.interval] !== input.amountPaise || !input.idempotencyKey || input.idempotencyKey.length > 128) return { status: "conflict" };
+    try { return await this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      const old = await tx.manualPaymentIntent.findUnique({ where: { userId_idempotencyKey: { userId: input.userId, idempotencyKey: input.idempotencyKey } } });
+      if (old) { const row = this.manualIntentFromRow(old); return row.planId === input.planId && row.interval === input.interval && row.amountPaise === input.amountPaise ? { status: "existing", intent: row } : { status: "conflict" }; }
+      const current = await tx.subscription.findUnique({ where: { userId: input.userId } });
+      if (current && (["created", "authenticated", "active", "pending", "halted"].includes(String(current["status"])) || (current["status"] === "cancelled" && current["cancelAtPeriodEnd"] === true)) && (!current["currentPeriodEnd"] || current["currentPeriodEnd"] > input.now)) return { status: "conflict" };
+      const access = await tx.manualPlanAccess.findFirst({ where: { userId: input.userId, expiresAt: { gt: input.now } } });
+      const pending = await tx.manualPaymentIntent.findFirst({ where: { userId: input.userId, status: { in: ["creating", "created", "manual_review"] } } });
+      if (access || pending) return { status: "conflict" };
+      const row = await tx.manualPaymentIntent.create({ data: { ...input, currency: "INR", status: "creating", providerPaymentLinkId: null, checkoutUrl: null, accessStartsAt: null, accessEndsAt: null, errorCategory: null, createdAt: input.now, updatedAt: input.now } });
+      return { status: "created", intent: this.manualIntentFromRow(row) };
+    }); } catch (error) { if (isUniqueViolation(error)) return { status: "conflict" }; throw error; }
+  }
+  async reserveDiscountedManualPaymentIntent(input: ReserveDiscountedManualPaymentIntentInput): Promise<ReserveDiscountedManualPaymentIntentResult> {
+    const code = normalizePromotionCode(input.couponCode);
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.id) || !/^[A-Za-z0-9_-]{1,64}$/.test(input.userId) || !/^[A-Za-z0-9_-]{16,128}$/.test(input.idempotencyKey) ||
+      !/^[A-Z0-9_-]{3,64}$/.test(code) || !Number.isFinite(input.now.getTime())) return { status: "conflict" };
+    const eventWriteFailure = Symbol("discount reservation event write failed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        // Keep the shared lock order: User first, then Promotion, then billing/redemption/audit rows.
+        const lockedUser = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+        if (!Array.isArray(lockedUser) || lockedUser.length === 0) return { status: "conflict" as const };
+        const old = await tx.manualPaymentIntent.findUnique({ where: { userId_idempotencyKey: { userId: input.userId, idempotencyKey: input.idempotencyKey } } });
+        if (old) {
+          const redemptionRow = await tx.promotionRedemption.findFirst({ where: { manualPaymentIntentId: old["id"], manualPaymentIntentUserId: input.userId } });
+          if (!redemptionRow) return { status: "conflict" as const };
+          const promotionId = String(redemptionRow["promotionId"]);
+          const lockedPromotion = await tx.$queryRaw`SELECT "id" FROM "Promotion" WHERE "id" = ${promotionId} FOR UPDATE`;
+          if (!Array.isArray(lockedPromotion) || lockedPromotion.length === 0) return { status: "conflict" as const };
+          const oldPromotion = await tx.promotion.findUnique({ where: { id: promotionId } });
+          if (!oldPromotion || oldPromotion["code"] !== code || oldPromotion["type"] !== "discount_coupon") return { status: "conflict" as const };
+          const promotion = this.promotionFromRow(oldPromotion);
+          const reservationEvent = await tx.promotionLifecycleEvent.findUnique({ where: { eventKey: `redemption:${redemptionRow["id"]}:reserved` } });
+          const reservationMetadata = reservationEvent?.["metadata"] && typeof reservationEvent["metadata"] === "object" && !Array.isArray(reservationEvent["metadata"])
+            ? reservationEvent["metadata"] as Record<string, unknown> : null;
+          if (reservationMetadata?.["discountType"] !== promotion.discountType || reservationMetadata?.["discountValue"] !== promotion.discountValue) return { status: "conflict" as const };
+          const amounts = calculateDiscountAmounts(promotion, input);
+          if (!amounts) return { status: "conflict" as const };
+          const intent = this.manualIntentFromRow(old);
+          const redemption = this.promotionRedemptionFromRow(redemptionRow);
+          const exact = intent.userId === input.userId && intent.idempotencyKey === input.idempotencyKey && intent.planId === input.planId && intent.interval === input.interval && intent.amountPaise === amounts.payablePaise &&
+            redemption.promotionId === promotion.id && redemption.userId === input.userId && redemption.idempotencyKey === input.idempotencyKey && redemption.planId === input.planId && redemption.interval === input.interval &&
+            redemption.listPricePaise === amounts.listPricePaise && redemption.discountPaise === amounts.discountPaise && redemption.payablePaise === amounts.payablePaise && redemption.manualPaymentIntentId === intent.id && redemption.manualPaymentIntentUserId === input.userId;
+          return exact ? { status: "existing" as const, intent, redemption } : { status: "conflict" as const };
+        }
+        const initial = await tx.promotion.findUnique({ where: { code } });
+        if (!initial) return { status: "unavailable" as const };
+        const promotionId = String(initial["id"]);
+        const lockedPromotion = await tx.$queryRaw`SELECT "id" FROM "Promotion" WHERE "id" = ${promotionId} FOR UPDATE`;
+        if (!Array.isArray(lockedPromotion) || lockedPromotion.length === 0) return { status: "unavailable" as const };
+        const promotionRow = await tx.promotion.findUnique({ where: { id: promotionId } });
+        if (!promotionRow || promotionRow["code"] !== code) return { status: "unavailable" as const };
+        const promotion = this.promotionFromRow(promotionRow);
+        if (promotion.type !== "discount_coupon") return { status: "unavailable" as const };
+        const amounts = calculateDiscountAmounts(promotion, input);
+        if (!amounts) return { status: "unavailable" as const };
+
+        if (promotion.status !== "active" || promotion.startsAt > input.now || (promotion.expiresAt !== null && promotion.expiresAt <= input.now) ||
+          (promotion.targetUserId !== null && promotion.targetUserId !== input.userId) || !promotion.eligiblePlanIds.includes(input.planId) || !validPromotionRecord(promotion) ||
+          !validDiscountSnapshot(promotion, { userId: input.userId, planId: input.planId, interval: input.interval, ...amounts, now: input.now })) return { status: "unavailable" as const };
+        const previous = await tx.promotionRedemption.findFirst({ where: { promotionId: promotion.id, userId: input.userId, status: { in: ["reserved", "redeemed", "manual_review"] } }, select: { id: true } });
+        if (previous) return { status: "conflict" as const };
+        const used = await tx.promotionRedemption.count({ where: { promotionId: promotion.id, status: { in: ["reserved", "redeemed", "manual_review"] } } });
+        if (promotion.usageLimit !== null && used >= promotion.usageLimit) return { status: "unavailable" as const };
+
+        const current = await tx.subscription.findUnique({ where: { userId: input.userId } });
+        if (current && (["created", "authenticated", "active", "pending", "halted"].includes(String(current["status"])) || (current["status"] === "cancelled" && current["cancelAtPeriodEnd"] === true)) && (!current["currentPeriodEnd"] || current["currentPeriodEnd"] > input.now)) return { status: "conflict" as const };
+        const access = await tx.manualPlanAccess.findFirst({ where: { userId: input.userId, expiresAt: { gt: input.now } } });
+        const pending = await tx.manualPaymentIntent.findFirst({ where: { userId: input.userId, status: { in: ["creating", "created", "manual_review"] } } });
+        if (access || pending) return { status: "conflict" as const };
+
+        const intentRow = await tx.manualPaymentIntent.create({ data: { id: input.id, userId: input.userId, idempotencyKey: input.idempotencyKey, planId: input.planId, interval: input.interval,
+          amountPaise: amounts.payablePaise, currency: "INR", status: "creating", providerPaymentLinkId: null, checkoutUrl: null, accessStartsAt: null, accessEndsAt: null, errorCategory: null, createdAt: input.now, updatedAt: input.now } });
+        const redemptionId = `redemption-${input.id}`;
+        let redemptionRow: Record<string, unknown>;
+        try {
+          redemptionRow = await tx.promotionRedemption.create({ data: { id: redemptionId, promotionId: promotion.id, userId: input.userId, status: "reserved", idempotencyKey: input.idempotencyKey,
+            planId: input.planId, interval: input.interval, listPricePaise: amounts.listPricePaise, discountPaise: amounts.discountPaise, payablePaise: amounts.payablePaise, currency: "INR",
+            manualPaymentIntentId: input.id, manualPaymentIntentUserId: input.userId, reservedAt: input.now, redeemedAt: null, releasedAt: null, createdAt: input.now, updatedAt: input.now } });
+          await this.insertPromotionEvent(tx, { id: `event-${redemptionId}-reserved`, eventKey: `redemption:${redemptionId}:reserved`, eventType: "coupon_reserved", promotionId: promotion.id,
+            subjectUserId: input.userId, redemptionId, occurredAt: input.now, metadata: { status: "reserved", planId: input.planId, discountType: promotion.discountType, discountValue: promotion.discountValue, discountPaise: amounts.discountPaise, payablePaise: amounts.payablePaise } });
+        } catch { throw eventWriteFailure; }
+        return { status: "created" as const, intent: this.manualIntentFromRow(intentRow), redemption: this.promotionRedemptionFromRow(redemptionRow) };
+      });
+    } catch (error) {
+      if (error === eventWriteFailure || isUniqueViolation(error)) return { status: "conflict" };
+      throw error;
+    }
+  }
+  async finishManualPaymentIntent(input: { id: string; userId: string; status: ManualIntentStatus; providerPaymentLinkId?: string; checkoutUrl?: string; errorCategory?: string; now: Date }): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      const result = await tx.manualPaymentIntent.updateMany({ where: { id: input.id, userId: input.userId, status: "creating" }, data: { status: input.status, providerPaymentLinkId: input.providerPaymentLinkId ?? null, checkoutUrl: input.checkoutUrl ?? null, errorCategory: input.errorCategory ?? null, updatedAt: input.now } });
+      return result.count === 1;
+    });
+  }
+  async getManualPaymentIntent(userId: string, intentId: string): Promise<ManualPaymentIntentRecord | null> { const row = await this.db.manualPaymentIntent.findFirst({ where: { id: intentId, userId } }); return row ? this.manualIntentFromRow(row) : null; }
+  async getManualPaymentIntentForWebhook(intentId: string): Promise<ManualPaymentIntentRecord | null> { const row = await this.db.manualPaymentIntent.findUnique({ where: { id: intentId } }); return row ? this.manualIntentFromRow(row) : null; }
+  async settleManualPayment(input: SettleManualPaymentInput): Promise<"applied" | "duplicate" | "invalid" | "conflict"> {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.userId) || !/^[A-Za-z0-9_-]{1,64}$/.test(input.intentId) || !/^[A-Za-z0-9_-]{1,64}$/.test(input.providerPaymentLinkId) || !/^[A-Za-z0-9_-]{1,64}$/.test(input.providerPaymentId) || !Number.isSafeInteger(input.amountPaise) || input.amountPaise < 1 || !Number.isFinite(input.paidAt.getTime()) || !Number.isFinite(input.now.getTime())) return "invalid";
+    const stale = Symbol("manual payment settlement changed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        // Global billing lock order: User, optional Promotion, then intent/payment/access/redemption/event rows.
+        const lockedUser = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+        if (!Array.isArray(lockedUser) || lockedUser.length === 0) return "invalid";
+        const intentRow = await tx.manualPaymentIntent.findFirst({ where: { id: input.intentId, userId: input.userId } });
+        if (!intentRow) return await tx.paymentRecord.findUnique({ where: { providerPaymentId: input.providerPaymentId } }) ? "conflict" : "invalid";
+
+        // This initial read only discovers the promotion lock key. All settlement data is re-read after that lock.
+        const initialRedemption = await tx.promotionRedemption.findFirst({ where: { manualPaymentIntentId: input.intentId, manualPaymentIntentUserId: input.userId } });
+        let promotion: PromotionRecord | null = null;
+        let redemptionRow: Record<string, unknown> | null = null;
+        if (initialRedemption) {
+          const promotionId = String(initialRedemption["promotionId"]);
+          const lockedPromotion = await tx.$queryRaw`SELECT "id" FROM "Promotion" WHERE "id" = ${promotionId} FOR UPDATE`;
+          if (!Array.isArray(lockedPromotion) || lockedPromotion.length === 0) return "conflict";
+          const [freshPromotion, freshRedemption] = await Promise.all([
+            tx.promotion.findUnique({ where: { id: promotionId } }),
+            tx.promotionRedemption.findFirst({ where: { id: initialRedemption["id"], manualPaymentIntentId: input.intentId, manualPaymentIntentUserId: input.userId } }),
+          ]);
+          if (!freshPromotion || !freshRedemption || freshRedemption["promotionId"] !== promotionId) return "conflict";
+          promotion = this.promotionFromRow(freshPromotion);
+          redemptionRow = freshRedemption;
+        }
+
+        const [paymentRow, accessRow, otherPayment] = await Promise.all([
+          tx.paymentRecord.findUnique({ where: { providerPaymentId: input.providerPaymentId } }),
+          tx.manualPlanAccess.findUnique({ where: { intentId: input.intentId } }),
+          tx.paymentRecord.findFirst({ where: { manualPaymentIntentId: input.intentId } }),
+        ]);
+        const intent = this.manualIntentFromRow(intentRow);
+        const redemption = redemptionRow ? this.promotionRedemptionFromRow(redemptionRow) : null;
+        let periodEnd: Date | null = null;
+        try { periodEnd = accessPeriodEnd(input.paidAt, intent.interval); } catch { /* malformed stored period fails closed */ }
+        const hasSettlement = intent.status === "paid" || Boolean(accessRow) || Boolean(otherPayment);
+
+        if (paymentRow || hasSettlement) {
+          const paymentMatches = Boolean(paymentRow && otherPayment && otherPayment["providerPaymentId"] === input.providerPaymentId && paymentRow["userId"] === input.userId && paymentRow["manualPaymentIntentId"] === intent.id && paymentRow["subscriptionIntentId"] == null && paymentRow["providerSubscriptionId"] == null && paymentRow["amountPaise"] === input.amountPaise && input.currency === "INR" && input.status === "captured" && paymentRow["currency"] === input.currency && paymentRow["status"] === input.status && paymentRow["createdAt"] instanceof Date && paymentRow["createdAt"].getTime() === input.paidAt.getTime());
+          const accessMatches = Boolean(accessRow && periodEnd && intent.status === "paid" && intent.providerPaymentLinkId === input.providerPaymentLinkId && intent.amountPaise === input.amountPaise && intent.accessStartsAt?.getTime() === input.paidAt.getTime() && intent.accessEndsAt?.getTime() === periodEnd.getTime() && accessRow["userId"] === input.userId && accessRow["intentId"] === intent.id && accessRow["providerPaymentId"] === input.providerPaymentId && accessRow["planId"] === intent.planId && accessRow["startsAt"] instanceof Date && accessRow["startsAt"].getTime() === input.paidAt.getTime() && accessRow["expiresAt"] instanceof Date && accessRow["expiresAt"].getTime() === periodEnd.getTime());
+          let redemptionMatches = redemption === null;
+          if (!redemption) {
+            try { redemptionMatches = intent.amountPaise === getPlan(intent.planId).pricePaise[intent.interval]; } catch { redemptionMatches = false; }
+          }
+          if (redemption && promotion) {
+            const [reservedEvent, redeemedEvent, redeemedAudits] = await Promise.all([
+              tx.promotionLifecycleEvent.findUnique({ where: { eventKey: `redemption:${redemption.id}:reserved` } }),
+              tx.promotionLifecycleEvent.findUnique({ where: { eventKey: `redemption:${redemption.id}:redeemed` } }),
+              tx.auditLog.findMany({ where: { action: "promotion.coupon_redeemed", entityType: "PromotionRedemption", entityId: redemption.id } }),
+            ]);
+            const reservedMetadata = reservedEvent?.["metadata"] && typeof reservedEvent["metadata"] === "object" && !Array.isArray(reservedEvent["metadata"]) ? reservedEvent["metadata"] as Record<string, unknown> : null;
+            const auditExists = redeemedAudits.some((entry) => {
+              const metadata = entry["metadata"] && typeof entry["metadata"] === "object" && !Array.isArray(entry["metadata"]) ? entry["metadata"] as Record<string, unknown> : null;
+              return metadata?.["eventKey"] === `redemption:${redemption.id}:redeemed`;
+            });
+            const amounts = calculateDiscountAmounts(promotion, { planId: intent.planId, interval: intent.interval });
+            redemptionMatches = Boolean(redemption.status === "redeemed" && promotion.type === "discount_coupon" && redemption.promotionId === promotion.id && redemption.userId === input.userId && redemption.idempotencyKey === intent.idempotencyKey && redemption.planId === intent.planId && redemption.interval === intent.interval && redemption.currency === "INR" && redemption.manualPaymentIntentId === intent.id && redemption.manualPaymentIntentUserId === input.userId && amounts && redemption.listPricePaise === amounts.listPricePaise && redemption.discountPaise === amounts.discountPaise && redemption.payablePaise === amounts.payablePaise && intent.amountPaise === amounts.payablePaise && reservedMetadata?.["discountType"] === promotion.discountType && reservedMetadata?.["discountValue"] === promotion.discountValue && redeemedEvent?.["promotionId"] === promotion.id && redeemedEvent["eventType"] === "coupon_redeemed" && redeemedEvent["subjectUserId"] === input.userId && redeemedEvent["redemptionId"] === redemption.id && auditExists);
+          }
+          return paymentMatches && accessMatches && redemptionMatches ? "duplicate" : "conflict";
+        }
+
+        if (intent.status !== "created" || intent.providerPaymentLinkId !== input.providerPaymentLinkId || intent.amountPaise !== input.amountPaise || input.currency !== "INR" || input.status !== "captured") return "invalid";
+        let amounts: ReturnType<typeof calculateDiscountAmounts> = null;
+        if (redemption) {
+          if (!promotion || promotion.type !== "discount_coupon" || redemption.status !== "reserved" || redemption.userId !== input.userId || redemption.idempotencyKey !== intent.idempotencyKey || redemption.planId !== intent.planId || redemption.interval !== intent.interval || redemption.currency !== "INR" || redemption.manualPaymentIntentId !== intent.id || redemption.manualPaymentIntentUserId !== input.userId) return "conflict";
+          amounts = calculateDiscountAmounts(promotion, { planId: intent.planId, interval: intent.interval });
+          const reservedEvent = await tx.promotionLifecycleEvent.findUnique({ where: { eventKey: `redemption:${redemption.id}:reserved` } });
+          const metadata = reservedEvent?.["metadata"] && typeof reservedEvent["metadata"] === "object" && !Array.isArray(reservedEvent["metadata"]) ? reservedEvent["metadata"] as Record<string, unknown> : null;
+          if (!amounts || redemption.listPricePaise !== amounts.listPricePaise || redemption.discountPaise !== amounts.discountPaise || redemption.payablePaise !== amounts.payablePaise || intent.amountPaise !== amounts.payablePaise || reservedEvent?.["promotionId"] !== promotion.id || reservedEvent["eventType"] !== "coupon_reserved" || reservedEvent["subjectUserId"] !== input.userId || reservedEvent["redemptionId"] !== redemption.id || metadata?.["status"] !== "reserved" || metadata?.["planId"] !== intent.planId || metadata?.["discountType"] !== promotion.discountType || metadata?.["discountValue"] !== promotion.discountValue || metadata?.["discountPaise"] !== amounts.discountPaise || metadata?.["payablePaise"] !== amounts.payablePaise) return "conflict";
+        } else {
+          try { if (getPlan(intent.planId).pricePaise[intent.interval] !== intent.amountPaise) return "conflict"; } catch { return "conflict"; }
+        }
+
+        const subscription = await tx.subscription.findUnique({ where: { userId: input.userId } });
+        if (subscription && (["created", "authenticated", "active", "pending", "halted"].includes(String(subscription["status"])) || (subscription["status"] === "cancelled" && subscription["cancelAtPeriodEnd"] === true)) && (!subscription["currentPeriodEnd"] || subscription["currentPeriodEnd"] > input.now)) return "conflict";
+        if (await tx.manualPlanAccess.findFirst({ where: { userId: input.userId, expiresAt: { gt: input.now } } })) return "conflict";
+        if (!periodEnd) return "conflict";
+
+        const startsAt = input.paidAt;
+        await tx.paymentRecord.create({ data: { userId: input.userId, providerPaymentId: input.providerPaymentId, amountPaise: input.amountPaise, currency: "INR", status: "captured", manualPaymentIntentId: intent.id, subscriptionIntentId: null, providerSubscriptionId: null, createdAt: startsAt } });
+        await tx.manualPlanAccess.create({ data: { id: randomUUID(), userId: input.userId, intentId: intent.id, providerPaymentId: input.providerPaymentId, planId: intent.planId, startsAt, expiresAt: periodEnd } });
+        const intentUpdate = await tx.manualPaymentIntent.updateMany({ where: { id: intent.id, userId: input.userId, status: "created", providerPaymentLinkId: input.providerPaymentLinkId, amountPaise: input.amountPaise }, data: { status: "paid", accessStartsAt: startsAt, accessEndsAt: periodEnd, updatedAt: input.now } });
+        if (intentUpdate.count !== 1) throw stale;
+        if (redemption && promotion && amounts) {
+          const redemptionUpdate = await tx.promotionRedemption.updateMany({ where: { id: redemption.id, promotionId: promotion.id, userId: input.userId, status: "reserved", manualPaymentIntentId: intent.id, manualPaymentIntentUserId: input.userId }, data: { status: "redeemed", redeemedAt: input.now, releasedAt: null, updatedAt: input.now } });
+          if (redemptionUpdate.count !== 1) throw stale;
+          await this.insertPromotionEvent(tx, { id: `event-${redemption.id}-redeemed`, eventKey: `redemption:${redemption.id}:redeemed`, eventType: "coupon_redeemed", promotionId: promotion.id, subjectUserId: input.userId, redemptionId: redemption.id, occurredAt: input.now, metadata: { status: "redeemed", planId: intent.planId, discountType: promotion.discountType, discountValue: promotion.discountValue, discountPaise: amounts.discountPaise, payablePaise: amounts.payablePaise } });
+        }
+        return "applied";
+      });
+    } catch (error) { if (error === stale || isUniqueViolation(error)) return "conflict"; throw error; }
+  }
+
+  async processRazorpaySubscriptionEvent(input: RazorpaySubscriptionEventInput): Promise<RazorpaySubscriptionEventResult> {
+    try {
+      return await this.db.$transaction(async (tx) => {
+        let lockedUserId: string | null = null;
+        if (input.subscriptionId) {
+          // The join discovers only the owning user and locks that User row before subscription state is read.
+          const lockedOwner = await tx.$queryRaw`SELECT u."id" AS "userId" FROM "User" AS u INNER JOIN "Subscription" AS s ON s."userId" = u."id" WHERE s."razorpaySubscriptionId" = ${input.subscriptionId} FOR UPDATE OF u`;
+          if (Array.isArray(lockedOwner) && lockedOwner.length > 0 && typeof lockedOwner[0]?.["userId"] === "string") lockedUserId = lockedOwner[0]["userId"] as string;
+        }
+        const subscription = input.subscriptionId ? await tx.subscription.findUnique({ where: { razorpaySubscriptionId: input.subscriptionId } }) : null;
+        if (input.newStatus && (!subscription || !lockedUserId || subscription["userId"] !== lockedUserId || input.createdAt === undefined)) return "unknown_subscription";
+        const intent = input.subscriptionId ? await tx.razorpaySubscriptionIntent.findUnique({ where: { providerSubscriptionId: input.subscriptionId } }) : null;
+        if (input.newStatus === "active" && (!intent || intent["status"] === "manual_review" || !input.payment || input.payment.status !== "captured" || input.payment.currency !== "INR" || input.payment.amount !== Number(intent["amountPaise"]) || !input.payment.id)) return "invalid_transition";
+        const validPlanPayment = Boolean(intent && input.payment && input.payment.currency === "INR" && input.payment.amount === Number(intent["amountPaise"]) && (input.payment.status === "captured" || input.payment.status === "failed"));
+        await tx.webhookEvent.create({ data: { providerEventId: input.providerEventId, eventType: input.eventType, status: "received", receivedAt: this.now(), processedAt: null, errorMessage: null } });
+        if (!input.newStatus || input.createdAt === undefined || !subscription) {
+          await tx.webhookEvent.update({ where: { providerEventId: input.providerEventId }, data: { status: "ignored", processedAt: this.now() } });
+          return "ignored";
+        }
+        const state: SubscriptionState = { planId: subscription["planId"] as PlanId, interval: subscription["interval"], status: subscription["status"], lastEventAt: Number(subscription["lastEventAt"] ?? 0), processedEventIds: [], trialEndsAt: subscription["trialEndsAt"] == null ? null : Number(subscription["trialEndsAt"]) };
+        const outcome = applySubscriptionEvent(state, { eventId: input.providerEventId, createdAt: input.createdAt, newStatus: input.newStatus });
+        if (!outcome.applied) {
+          await tx.webhookEvent.update({ where: { providerEventId: input.providerEventId }, data: { status: "ignored", processedAt: this.now() } });
+          return outcome.reason;
+        }
+        const update = await tx.subscription.updateMany({
+          where: { id: subscription["id"], status: subscription["status"], lastEventAt: subscription["lastEventAt"] ?? 0 },
+          data: { status: outcome.state.status, lastEventAt: BigInt(outcome.state.lastEventAt), ...(input.currentPeriodEnd === undefined ? {} : { currentPeriodEnd: new Date(input.currentPeriodEnd * 1000) }), ...(outcome.state.status === "cancelled" && input.eventType === "subscription.cancelled" ? { cancelAtPeriodEnd: Boolean(subscription["cancelAtPeriodEnd"]) } : {}) },
+        });
+        if (update.count !== 1) throw new Error("Subscription changed while applying webhook.");
+        if (intent && input.payment && validPlanPayment) {
+          await tx.paymentRecord.create({ data: { userId: subscription["userId"], providerPaymentId: input.payment.id, amountPaise: input.payment.amount, currency: input.payment.currency, status: input.payment.status, subscriptionIntentId: intent["id"], providerSubscriptionId: input.subscriptionId, createdAt: this.now() } });
+        }
+        if (intent && ["active", "cancelled", "completed", "expired"].includes(outcome.state.status)) {
+          const intentStatus = outcome.state.status === "active" ? "active" : outcome.state.status === "cancelled" ? "cancelled" : "expired";
+          await tx.razorpaySubscriptionIntent.updateMany({ where: { id: intent["id"], providerSubscriptionId: input.subscriptionId }, data: { status: intentStatus, updatedAt: this.now() } });
+        }
+        await tx.webhookEvent.update({ where: { providerEventId: input.providerEventId }, data: { status: "processed", processedAt: this.now() } });
+        return "applied";
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) return "duplicate";
+      throw error;
+    }
   }
 
   async getCycle(cycleId: string): Promise<CycleRecord | null> { const row = await this.db.publishingCycle.findUnique({ where: { id: cycleId } }); return row ? rowToCycle(row) : null; }
   async countActiveCycles(userId: string): Promise<number> { return this.db.publishingCycle.count({ where: { ownerId: userId, status: { in: ACTIVE_CYCLE_STATUSES } } }); }
   async createCycle(cycle: CycleRecord): Promise<void> { await this.db.publishingCycle.create({ data: cycleToRow(cycle) }); }
+  async createCycleWithinLimit(cycle: CycleRecord, activeCycleLimit: number): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      const lockedUser = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${cycle.ownerId} FOR UPDATE`;
+      if (!Array.isArray(lockedUser) || lockedUser.length === 0 || !Number.isInteger(activeCycleLimit) || activeCycleLimit < 1) return false;
+      const active = await tx.publishingCycle.count({ where: { ownerId: cycle.ownerId, status: { in: ACTIVE_CYCLE_STATUSES } } });
+      if (active >= activeCycleLimit) return false;
+      await tx.publishingCycle.create({ data: cycleToRow(cycle) });
+      return true;
+    });
+  }
+  async listRunningCyclesForSettlement(afterCycleId: string | null, limit: number): Promise<CycleRecord[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) return [];
+    return (await this.db.publishingCycle.findMany({
+      where: { status: "running", ...(afterCycleId === null ? {} : { id: { gt: afterCycleId } }) },
+      orderBy: { id: "asc" }, take: limit,
+    })).map(rowToCycle);
+  }
+  async completeSettledCycle(input: { cycleId: string; ownerId: string; now: Date; activeCycleLimit: number; newId: () => string }): Promise<import("../repository.ts").CompleteSettledCycleResult> {
+    return this.db.$transaction(async (tx) => {
+      // Shared order: User first, then PublishingCycle, then CycleItem/audit rows.
+      const lockedUser = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(lockedUser) || lockedUser.length === 0) return "not_found";
+      const lockedCycle = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${input.cycleId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(lockedCycle) || lockedCycle.length === 0) return "not_found";
+      const row = await tx.publishingCycle.findUnique({ where: { id: input.cycleId } });
+      if (!row || row["ownerId"] !== input.ownerId) return "not_found";
+      if (row["status"] === "completed") return "already_completed";
+      if (row["status"] !== "running") return "not_ready";
+
+      const cycle = rowToCycle(row);
+      const items = (await tx.cycleItem.findMany({ where: { cycleId: cycle.id }, orderBy: [{ position: "asc" }, { id: "asc" }] })).map(rowToItem);
+      if (!isCycleFinished(items)) return "not_ready";
+      const decision = decideSettledCycle(cycle, items, cycle.repeatBehavior ?? "never");
+      const eligible = decision === "repeat_without_published_items" ? itemsEligibleForRepeat(items) : [];
+
+      const completed = await tx.publishingCycle.updateMany({ where: { id: cycle.id, ownerId: input.ownerId, status: "running" }, data: { status: "completed" } });
+      if (completed.count !== 1) return "already_completed";
+      let nextCycle: CycleRecord | null = null;
+      let nextItems: CycleItem[] = [];
+      if (eligible.length > 0 && decision === "repeat_without_published_items") {
+        const active = await tx.publishingCycle.count({ where: { ownerId: input.ownerId, status: { in: ACTIVE_CYCLE_STATUSES } } });
+        if (active < input.activeCycleLimit) {
+          nextCycle = { ...cycle, id: input.newId(), status: "draft", finalReviewConfirmed: false, createdAt: input.now };
+          nextItems = eligible.map((item) => ({
+            ...item, id: input.newId(), cycleId: nextCycle!.id, cycleOwnerId: cycle.ownerId, status: "upcoming", version: 1,
+            scheduledFor: null, lockedBy: null, lockExpiresAt: null, reviewReason: null, externalPostId: null, publishedAt: null,
+          }));
+          await tx.publishingCycle.create({ data: cycleToRow(nextCycle) });
+          await tx.cycleItem.createMany({ data: nextItems.map(itemToRow) });
+        }
+      }
+      await tx.auditLog.create({ data: { actorId: null, action: "cycle.completed", entityType: "PublishingCycle", entityId: cycle.id, metadata: { items: items.length } } });
+      if (nextCycle) {
+        await tx.auditLog.create({ data: { actorId: null, action: "cycle.repeat_queued", entityType: "PublishingCycle", entityId: cycle.id, metadata: { nextCycleId: nextCycle.id, items: nextItems.length } } });
+        return "repeat_queued";
+      }
+      if (eligible.length > 0 && decision === "repeat_without_published_items") {
+        await tx.auditLog.create({ data: { actorId: null, action: "cycle.repeat_skipped", entityType: "PublishingCycle", entityId: cycle.id, metadata: { reason: "active_cycle_limit" } } });
+        return "repeat_skipped_limit";
+      }
+      return "completed";
+    });
+  }
   async transitionCycleStatus(cycleId: string, from: CycleStatus, to: CycleStatus, finalReviewConfirmed: boolean): Promise<boolean> {
     const result = await this.db.publishingCycle.updateMany({ where: { id: cycleId, status: from }, data: { status: to, finalReviewConfirmed } });
     return result.count === 1;
   }
+  async stopCycle(cycleId: string, ownerId: string, from: CycleStatus, finalReviewConfirmed: boolean, updates: { item: CycleItem; expectedVersion: number }[]): Promise<boolean> {
+    const changedDuringStop = Symbol("cycle changed during stop");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const cycle = await tx.publishingCycle.updateMany({ where: { id: cycleId, ownerId, status: from }, data: { status: "stopped", finalReviewConfirmed } });
+        if (cycle.count !== 1) return false;
+        for (const { item, expectedVersion } of updates) {
+          const saved = await tx.cycleItem.updateMany({ where: { id: item.id, cycleId, cycleOwnerId: ownerId, version: expectedVersion, status: { in: ["upcoming", "scheduled"] } }, data: itemToMutableData(item) });
+          if (saved.count !== 1) throw changedDuringStop;
+        }
+        return true;
+      });
+    } catch (error) {
+      if (error === changedDuringStop) return false;
+      throw error;
+    }
+  }
   async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { return (await this.db.publishingCycle.findMany({ where: { ownerId: userId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })).map(rowToCycle); }
 
   async getCycleItems(cycleId: string): Promise<CycleItem[]> { return (await this.db.cycleItem.findMany({ where: { cycleId }, orderBy: [{ position: "asc" }, { id: "asc" }] })).map(rowToItem); }
-  async addCycleItems(items: CycleItem[]): Promise<void> { if (items.length > 0) await this.db.cycleItem.createMany({ data: items.map(itemToRow) }); }
+  async addCycleItems(items: CycleItem[]): Promise<boolean> {
+    if (items.length === 0) return true;
+    const cycleId = items[0]!.cycleId;
+    const ownerId = items[0]!.cycleOwnerId;
+    if (items.some((item) => item.cycleId !== cycleId || item.cycleOwnerId !== ownerId) || new Set(items.map((item) => item.id)).size !== items.length) return false;
+    return this.db.$transaction(async (tx) => {
+      // Lock the parent so item insertion serializes with completion/stopping.
+      const lockedCycle = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${cycleId} AND "ownerId" = ${ownerId} FOR UPDATE`;
+      if (!Array.isArray(lockedCycle) || lockedCycle.length === 0) return false;
+      const cycle = await tx.publishingCycle.findUnique({ where: { id: cycleId } });
+      if (!cycle || cycle["ownerId"] !== ownerId || cycle["status"] === "completed" || cycle["status"] === "stopped") return false;
+      try { await tx.cycleItem.createMany({ data: items.map(itemToRow) }); return true; }
+      catch (error) { if (isUniqueViolation(error)) return false; throw error; }
+    });
+  }
   async saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]> {
     const results: { itemId: string; saved: boolean }[] = [];
     for (const { item, expectedVersion } of updates) {
@@ -47,6 +1107,52 @@ export class PrismaRepository implements Repository {
       results.push({ itemId: item.id, saved: outcome.count === 1 });
     }
     return results;
+  }
+  async selectCycleItemRenderOutput(input: SelectCycleItemRenderOutputInput): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      const cycle = await tx.publishingCycle.findUnique({ where: { id: input.cycleId } });
+      if (!cycle || cycle["ownerId"] !== input.ownerId || cycle["status"] !== "draft") return false;
+      const item = await tx.cycleItem.findUnique({ where: { id: input.itemId } });
+      if (!item || item["cycleId"] !== input.cycleId || item["cycleOwnerId"] !== input.ownerId || item["version"] !== input.expectedVersion || (item["status"] !== "upcoming" && item["status"] !== "scheduled")) return false;
+      if (input.renderOutputId !== null) {
+        const output = await tx.mediaDerivative.findUnique({ where: { id: input.renderOutputId } });
+        if (!output || output["kind"] !== "render" || output["ownerId"] !== input.ownerId || output["mediaAssetId"] !== item["mediaAssetId"]) return false;
+      }
+      const result = await tx.cycleItem.updateMany({
+        where: { id: item["id"], cycleId: input.cycleId, cycleOwnerId: input.ownerId, version: input.expectedVersion, status: { in: ["upcoming", "scheduled"] } },
+        data: {
+          selectedRenderOutputId: input.renderOutputId,
+          selectedRenderOwnerId: input.renderOutputId === null ? null : input.ownerId,
+          selectedRenderSourceMediaId: input.renderOutputId === null ? null : item["mediaAssetId"],
+          version: input.expectedVersion + 1,
+        },
+      });
+      return result.count === 1;
+    });
+  }
+
+  async saveCycleSchedule(cycleId: string, ownerId: string, scheduleSettings: PersistedCycleSchedule, updates: { item: CycleItem; expectedVersion: number }[]): Promise<boolean> {
+    const changedDuringSave = Symbol("cycle schedule changed during save");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const cycle = await tx.publishingCycle.updateMany({
+          where: { id: cycleId, ownerId, status: "draft" },
+          data: { scheduleSettings, timezone: scheduleSettings.timeZone },
+        });
+        if (cycle.count !== 1) return false;
+        for (const { item, expectedVersion } of updates) {
+          const saved = await tx.cycleItem.updateMany({
+            where: { id: item.id, cycleId, cycleOwnerId: ownerId, version: expectedVersion, status: { in: ["upcoming", "scheduled"] } },
+            data: itemToMutableData(item),
+          });
+          if (saved.count !== 1) throw changedDuringSave;
+        }
+        return true;
+      });
+    } catch (error) {
+      if (error === changedDuringSave) return false;
+      throw error;
+    }
   }
 
   async getMedia(mediaId: string): Promise<MediaAsset | null> { const row = await this.db.mediaAsset.findUnique({ where: { id: mediaId } }); return row ? rowToMedia(row) : null; }
@@ -79,6 +1185,172 @@ export class PrismaRepository implements Repository {
   async getMediaStorageInfo(mediaId: string): Promise<{ storageKey: string; thumbnailKey: string | null; mimeType: string | null } | null> {
     const row = await this.db.mediaAsset.findUnique({ where: { id: mediaId } });
     return row ? { storageKey: row["storageKey"], thumbnailKey: row["thumbnailKey"] ?? null, mimeType: row["mimeType"] ?? null } : null;
+  }
+
+  async createOrGetMediaImportJob(input: MediaImportRequestInput) {
+    const idempotencyKey = `import:${input.importerId}:${input.sourceMediaId}`;
+    if (input.idempotencyKey !== idempotencyKey) return { status: "conflict" as const };
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const sourceInitial = await tx.mediaAsset.findUnique({ where: { id: input.sourceMediaId } });
+        if (!sourceInitial) return { status: "not_found" as const };
+        if (!(await lockedUsers(tx, [input.importerId, String(sourceInitial["ownerId"])]))) return { status: "not_found" as const };
+        const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.sourceCollectionId} FOR UPDATE`;
+        if (!Array.isArray(locked) || locked.length !== 1) return { status: "not_found" as const };
+        const mediaLock = await tx.$queryRaw`SELECT "id" FROM "MediaAsset" WHERE "id" = ${input.sourceMediaId} FOR UPDATE`;
+        if (!Array.isArray(mediaLock) || mediaLock.length !== 1) return { status: "not_found" as const };
+        const sourceRow = await tx.mediaAsset.findUnique({ where: { id: input.sourceMediaId } });
+        const collectionRow = await tx.videoCollection.findUnique({ where: { id: input.sourceCollectionId } });
+        if (!sourceRow || !collectionRow) return { status: "not_found" as const };
+        const item = await tx.collectionItem.findUnique({ where: { collectionId_mediaAssetId: { collectionId: input.sourceCollectionId, mediaAssetId: input.sourceMediaId } } });
+        if (!item) return { status: "not_found" as const };
+        const grants = (await tx.collectionPermission.findMany({ where: { collectionId: input.sourceCollectionId } })).map(rowToGrant);
+        const collection = rowToCollection(collectionRow, [input.sourceMediaId]);
+        const source = rowToMedia(sourceRow);
+        if (collection.ownerId !== source.ownerId || source.kind === "image") return { status: "unauthorized" as const };
+        if (!canImportVideo(input.importerId, source, collection, grants, input.now).allowed) return { status: "unauthorized" as const };
+        const existing = await tx.mediaImportJob.findUnique({ where: { idempotencyKey } });
+        if (existing) {
+          const job = mediaImportJobFromRow(existing);
+          return job.importerId === input.importerId && job.sourceMediaId === input.sourceMediaId && job.sourceCollectionId === input.sourceCollectionId
+            ? { status: "existing" as const, job } : { status: "conflict" as const };
+        }
+        let importerPlan: PlanId;
+        try { importerPlan = await this.effectivePlanIdInTransaction(tx, input.importerId, input.now, true); }
+        catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; importerPlan = await this.effectivePlanIdInTransaction(tx, input.importerId, input.now, false); }
+        const [mediaSum, renderSum] = await Promise.all([
+          tx.mediaAsset.aggregate({ where: { ownerId: input.importerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } }),
+          tx.mediaDerivative.aggregate({ where: { ownerId: input.importerId, kind: "render" }, _sum: { sizeBytes: true } }),
+        ]);
+        if (Number(mediaSum._sum["sizeBytes"] ?? 0) + Number(renderSum._sum["sizeBytes"] ?? 0) + source.sizeBytes > getPlan(importerPlan).limits.storageBytes) return { status: "quota" as const };
+        const finalKey = mediaKeyFor(input.importerId, input.resultMediaAssetId);
+        const row = await tx.mediaImportJob.create({ data: { id: input.id, importerId: input.importerId, sourceMediaId: input.sourceMediaId, sourceCollectionId: input.sourceCollectionId, status: "pending", idempotencyKey, newObjectKey: finalKey, stagingObjectKey: null, lockedBy: null, lockToken: null, leaseExpiresAt: null, attempts: 0, attemptStorageKeys: [], resultMediaAssetId: input.resultMediaAssetId, failureReason: null, createdAt: input.now, updatedAt: input.now } });
+        await tx.auditLog.create({ data: { actorId: input.importerId, action: "media.import_requested", entityType: "MediaImportJob", entityId: input.id, metadata: { sourceMediaId: input.sourceMediaId, sourceCollectionId: input.sourceCollectionId } } });
+        return { status: "created" as const, job: mediaImportJobFromRow(row) };
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      // The user-first locks serialize legitimate retries. A unique violation outside that
+      // path may instead be a colliding job/result ID and must not be mistaken for idempotency.
+      return { status: "conflict" as const };
+    }
+  }
+  async getMediaImportJobForOwner(importerId: string, jobId: string) { const row = await this.db.mediaImportJob.findFirst({ where: { id: jobId, importerId } }); return row ? mediaImportJobFromRow(row) : null; }
+  async listMediaImportJobsForOwner(importerId: string) { return (await this.db.mediaImportJob.findMany({ where: { importerId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })).map(mediaImportJobFromRow); }
+  async retryMediaImportJob(importerId: string, jobId: string, now: Date) {
+    return this.db.$transaction(async (tx) => {
+      const initial = await tx.mediaImportJob.findUnique({ where: { id: jobId } }); if (!initial || initial["importerId"] !== importerId || !initial["sourceCollectionId"]) return false;
+      const sourceInitial = await tx.mediaAsset.findUnique({ where: { id: initial["sourceMediaId"] } }); if (!sourceInitial) return false;
+      if (!(await lockedUsers(tx, [importerId, String(sourceInitial["ownerId"])]))) return false;
+      const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${initial["sourceCollectionId"]} FOR UPDATE`;
+      if (!Array.isArray(collectionLock) || collectionLock.length !== 1) return false;
+      const mediaLock = await tx.$queryRaw`SELECT "id" FROM "MediaAsset" WHERE "id" = ${initial["sourceMediaId"]} FOR UPDATE`;
+      if (!Array.isArray(mediaLock) || mediaLock.length !== 1) return false;
+      const jobLock = await tx.$queryRaw`SELECT "id" FROM "MediaImportJob" WHERE "id" = ${jobId} FOR UPDATE`;
+      if (!Array.isArray(jobLock) || jobLock.length !== 1) return false;
+      const [job, sourceRow, collectionRow, member] = await Promise.all([
+        tx.mediaImportJob.findUnique({ where: { id: jobId } }),
+        tx.mediaAsset.findUnique({ where: { id: initial["sourceMediaId"] } }),
+        tx.videoCollection.findUnique({ where: { id: initial["sourceCollectionId"] } }),
+        tx.collectionItem.findUnique({ where: { collectionId_mediaAssetId: { collectionId: initial["sourceCollectionId"], mediaAssetId: initial["sourceMediaId"] } } }),
+      ]);
+      if (!job || job["importerId"] !== importerId || job["status"] !== "failed" || !sourceRow || !collectionRow || !member) return false;
+      const source = rowToMedia(sourceRow); const grants = (await tx.collectionPermission.findMany({ where: { collectionId: initial["sourceCollectionId"] } })).map(rowToGrant);
+      if (String(collectionRow["ownerId"]) !== source.ownerId || source.kind === "image" || !canImportVideo(importerId, source, rowToCollection(collectionRow, [source.id]), grants, now).allowed) return false;
+      const changed = await tx.mediaImportJob.updateMany({ where: { id: jobId, importerId, status: "failed" }, data: { status: "pending", failureReason: null, lockedBy: null, lockToken: null, leaseExpiresAt: null, stagingObjectKey: null, updatedAt: now } });
+      if (changed.count !== 1) return false;
+      await tx.auditLog.create({ data: { actorId: importerId, action: "media.import_retried", entityType: "MediaImportJob", entityId: jobId } }); return true;
+    });
+  }
+  async claimNextMediaImportJob(input: MediaImportClaim) {
+    return this.db.$transaction(async (tx) => {
+      const candidate = await tx.mediaImportJob.findFirst({ where: { ...(input.jobId ? { id: input.jobId } : {}), OR: [{ status: "pending" }, { status: { in: ["copying", "verifying"] }, leaseExpiresAt: { lte: input.now } }] }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+      if (!candidate) return null;
+      const current = await tx.mediaImportJob.findUnique({ where: { id: candidate["id"] } }); if (!current) return null;
+      const source = await tx.mediaAsset.findUnique({ where: { id: current["sourceMediaId"] } }); if (!source) return null;
+      if (!(await lockedUsers(tx, [String(current["importerId"]), String(source["ownerId"])]))) return null;
+      const collectionExists = await tx.videoCollection.findUnique({ where: { id: current["sourceCollectionId"] } });
+      if (collectionExists) {
+        const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${current["sourceCollectionId"]} FOR UPDATE`;
+        if (!Array.isArray(collectionLock) || collectionLock.length !== 1) return null;
+      }
+      const mediaLock = await tx.$queryRaw`SELECT "id" FROM "MediaAsset" WHERE "id" = ${current["sourceMediaId"]} FOR UPDATE`;
+      if (!Array.isArray(mediaLock) || mediaLock.length !== 1) return null;
+      const jobLock = await tx.$queryRaw`SELECT "id" FROM "MediaImportJob" WHERE "id" = ${current["id"]} FOR UPDATE`;
+      if (!Array.isArray(jobLock) || jobLock.length !== 1) return null;
+      const refreshed = await tx.mediaImportJob.findUnique({ where: { id: current["id"] } });
+      if (!refreshed || !(refreshed["status"] === "pending" || ((refreshed["status"] === "copying" || refreshed["status"] === "verifying") && refreshed["leaseExpiresAt"] instanceof Date && refreshed["leaseExpiresAt"] <= input.now))) return null;
+      // Claim even if collection membership or permission has disappeared. The worker must persist a
+      // terminal failure/audit event rather than leave a permanently pending job that blocks deletion.
+      const token = randomUUID(); const staging = stagingKeyFor(`import-${String(refreshed["id"])}-${Number(refreshed["attempts"] ?? 0) + 1}-${token.slice(0, 8)}`);
+      const eligible = await tx.mediaImportJob.updateMany({ where: { id: refreshed["id"], status: refreshed["status"], lockToken: refreshed["lockToken"] ?? null, leaseExpiresAt: refreshed["leaseExpiresAt"] ?? null }, data: { status: "copying", lockedBy: input.workerId, lockToken: token, leaseExpiresAt: new Date(input.now.getTime() + Math.max(1, input.leaseSeconds) * 1000), attempts: { increment: 1 }, stagingObjectKey: staging, attemptStorageKeys: [...(Array.isArray(refreshed["attemptStorageKeys"]) ? refreshed["attemptStorageKeys"] as string[] : []), staging], updatedAt: input.now } });
+      if (eligible.count !== 1) return null;
+      const claimed = await tx.mediaImportJob.findUnique({ where: { id: refreshed["id"] } }); return claimed ? mediaImportJobFromRow(claimed) : null;
+    });
+  }
+  async heartbeatMediaImportJob(input: { jobId: string; lockToken: string; now: Date; leaseSeconds: number }) {
+    const changed = await this.db.mediaImportJob.updateMany({ where: { id: input.jobId, lockToken: input.lockToken, status: { in: ["copying", "verifying"] }, leaseExpiresAt: { gt: input.now } }, data: { leaseExpiresAt: new Date(input.now.getTime() + Math.max(1, input.leaseSeconds) * 1000), updatedAt: input.now } }); return changed.count === 1;
+  }
+  async markMediaImportVerifying(input: MediaImportVerificationInput) { const changed = await this.db.mediaImportJob.updateMany({ where: { id: input.jobId, lockToken: input.lockToken, status: "copying", leaseExpiresAt: { gt: input.now } }, data: { status: "verifying", updatedAt: input.now } }); return changed.count === 1; }
+  async finalizeMediaImportJob(input: MediaImportFinalizationInput) {
+    return this.db.$transaction(async (tx) => {
+      const currentJob = await tx.mediaImportJob.findUnique({ where: { id: input.jobId } }); if (!currentJob) return "stale" as const;
+      const sourceInitial = await tx.mediaAsset.findUnique({ where: { id: currentJob["sourceMediaId"] } }); if (!sourceInitial) return "unauthorized" as const;
+      if (!(await lockedUsers(tx, [String(currentJob["importerId"]), String(sourceInitial["ownerId"])]))) return "unauthorized" as const;
+      const collLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${currentJob["sourceCollectionId"]} FOR UPDATE`;
+      if (!Array.isArray(collLock) || collLock.length !== 1) return "unauthorized" as const;
+      const sourceLock = await tx.$queryRaw`SELECT "id" FROM "MediaAsset" WHERE "id" = ${currentJob["sourceMediaId"]} FOR UPDATE`;
+      if (!Array.isArray(sourceLock) || sourceLock.length !== 1) return "unauthorized" as const;
+      const jobLock = await tx.$queryRaw`SELECT "id" FROM "MediaImportJob" WHERE "id" = ${input.jobId} FOR UPDATE`;
+      if (!Array.isArray(jobLock) || jobLock.length !== 1) return "stale" as const;
+      const jobRow = await tx.mediaImportJob.findUnique({ where: { id: input.jobId } });
+      if (!jobRow || jobRow["importerId"] !== input.importerId || jobRow["status"] !== "verifying" || jobRow["lockToken"] !== input.lockToken || !(jobRow["leaseExpiresAt"] instanceof Date) || jobRow["leaseExpiresAt"] <= input.now) return "stale" as const;
+      const sourceRow = await tx.mediaAsset.findUnique({ where: { id: jobRow["sourceMediaId"] } }); const collectionRow = await tx.videoCollection.findUnique({ where: { id: jobRow["sourceCollectionId"] } });
+      const member = await tx.collectionItem.findUnique({ where: { collectionId_mediaAssetId: { collectionId: jobRow["sourceCollectionId"], mediaAssetId: jobRow["sourceMediaId"] } } });
+      if (!sourceRow || !collectionRow || !member) return "unauthorized" as const;
+      if (await tx.mediaAsset.findUnique({ where: { id: jobRow["resultMediaAssetId"] } })) return "unauthorized" as const;
+      const source = rowToMedia(sourceRow); const grants = (await tx.collectionPermission.findMany({ where: { collectionId: jobRow["sourceCollectionId"] } })).map(rowToGrant);
+      if (String(collectionRow["ownerId"]) !== source.ownerId || source.kind === "image") return "unauthorized" as const;
+      if (!canImportVideo(input.importerId, source, rowToCollection(collectionRow, [source.id]), grants, input.now).allowed) return "unauthorized" as const;
+      if (input.media.ownerId !== input.importerId || input.media.id !== jobRow["resultMediaAssetId"] || input.media.importedFromId !== source.id || input.storageKey !== jobRow["newObjectKey"] || input.media.sizeBytes !== source.sizeBytes) return "unauthorized" as const;
+      let importerPlan: PlanId;
+      try { importerPlan = await this.effectivePlanIdInTransaction(tx, input.importerId, input.now, true); }
+      catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; importerPlan = await this.effectivePlanIdInTransaction(tx, input.importerId, input.now, false); }
+      const [mediaSum, renderSum] = await Promise.all([
+        tx.mediaAsset.aggregate({ where: { ownerId: input.importerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } }),
+        tx.mediaDerivative.aggregate({ where: { ownerId: input.importerId, kind: "render" }, _sum: { sizeBytes: true } }),
+      ]);
+      if (Number(mediaSum._sum["sizeBytes"] ?? 0) + Number(renderSum._sum["sizeBytes"] ?? 0) + source.sizeBytes > getPlan(importerPlan).limits.storageBytes) return "quota" as const;
+      await input.commitStagedObject();
+      await tx.mediaAsset.create({ data: mediaToRow(input.media, { storageKey: input.storageKey, thumbnailKey: null }) });
+      const changed = await tx.mediaImportJob.updateMany({ where: { id: input.jobId, status: "verifying", lockToken: input.lockToken, leaseExpiresAt: { gt: input.now } }, data: { status: "succeeded", failureReason: null, lockedBy: null, lockToken: null, leaseExpiresAt: null, updatedAt: input.now } });
+      if (changed.count !== 1) throw new Error("Import claim became stale during finalization.");
+      await tx.auditLog.create({ data: { actorId: input.importerId, action: "media.import_completed", entityType: "MediaImportJob", entityId: input.jobId, metadata: { sourceMediaId: source.id, importedMediaId: input.media.id, sizeBytes: input.media.sizeBytes } } });
+      return "applied" as const;
+    });
+  }
+  async failMediaImportJob(input: { jobId: string; lockToken: string; now: Date; reason: string }) {
+    return this.db.$transaction(async (tx) => {
+      const job = await tx.mediaImportJob.findUnique({ where: { id: input.jobId } }); if (!job) return false;
+      const reason = input.reason.slice(0, 300);
+      const changed = await tx.mediaImportJob.updateMany({ where: { id: input.jobId, lockToken: input.lockToken, status: { in: ["copying", "verifying"] }, leaseExpiresAt: { gt: input.now } }, data: { status: "failed", failureReason: reason, lockedBy: null, lockToken: null, leaseExpiresAt: null, updatedAt: input.now } });
+      if (changed.count !== 1) return false;
+      await tx.auditLog.create({ data: { actorId: job["importerId"] as string, action: "media.import_failed", entityType: "MediaImportJob", entityId: input.jobId, metadata: { reason } } }); return true;
+    });
+  }
+  async scheduleMediaDeletion(input: { mediaId: string; ownerId: string; now: Date; graceDays: number }) {
+    return this.db.$transaction(async (tx) => {
+      if (!(await lockedUsers(tx, [input.ownerId]))) return "missing" as const;
+      const initial = await tx.mediaAsset.findFirst({ where: { id: input.mediaId, ownerId: input.ownerId } }); if (!initial) return "missing" as const;
+      const locked = await tx.$queryRaw`SELECT "id" FROM "MediaAsset" WHERE "id" = ${input.mediaId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length !== 1) return "missing" as const;
+      const active = await tx.mediaImportJob.findFirst({ where: { sourceMediaId: input.mediaId, status: { in: ["pending", "copying", "verifying"] } } });
+      if (active) return "import_pending" as const;
+      if (initial["status"] === "pending_deletion") return "already_pending" as const;
+      const deleteAfter = new Date(input.now.getTime() + Math.max(1, Math.min(input.graceDays, 30)) * 86_400_000);
+      const updated = await tx.mediaAsset.updateMany({ where: { id: input.mediaId, ownerId: input.ownerId, status: "active" }, data: { status: "pending_deletion", deleteAfter } }); if (updated.count !== 1) return "already_pending" as const;
+      await tx.auditLog.create({ data: { actorId: input.ownerId, action: "media.deletion_scheduled", entityType: "MediaAsset", entityId: input.mediaId, metadata: { deleteAfter: deleteAfter.toISOString() } } }); return "scheduled" as const;
+    });
   }
 
   private async collectionsFromRows(rows: Record<string, unknown>[]): Promise<VideoCollection[]> {
@@ -114,8 +1386,12 @@ export class PrismaRepository implements Repository {
   }
   async replaceCollectionMedia(collectionId: string, mediaIds: string[]): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
-      if (!(await tx.videoCollection.findUnique({ where: { id: collectionId } }))) return false;
+      const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${collectionId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length !== 1 || !(await tx.videoCollection.findUnique({ where: { id: collectionId } }))) return false;
       if (!(await this.mediaRowsExist(tx, mediaIds))) return false;
+      const current = await tx.collectionItem.findMany({ where: { collectionId } });
+      const removed = current.map((item) => item["mediaAssetId"] as string).filter((id) => !mediaIds.includes(id));
+      if (removed.length && await tx.mediaImportJob.findFirst({ where: { sourceCollectionId: collectionId, sourceMediaId: { in: removed }, status: { in: ["pending", "copying", "verifying"] } } })) return false;
       await tx.collectionItem.deleteMany({ where: { collectionId } });
       if (mediaIds.length > 0) await tx.collectionItem.createMany({ data: mediaIds.map((mediaAssetId, position) => ({ collectionId, mediaAssetId, position })) });
       return true;
@@ -123,7 +1399,9 @@ export class PrismaRepository implements Repository {
   }
   async deleteCollection(collectionId: string): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
-      if (!(await tx.videoCollection.findUnique({ where: { id: collectionId } }))) return false;
+      const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${collectionId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length !== 1 || !(await tx.videoCollection.findUnique({ where: { id: collectionId } }))) return false;
+      if (await tx.mediaImportJob.findFirst({ where: { sourceCollectionId: collectionId, status: { in: ["pending", "copying", "verifying"] } } })) return false;
       await tx.collectionItem.deleteMany({ where: { collectionId } });
       await tx.collectionPermission.deleteMany({ where: { collectionId } });
       const removed = await tx.videoCollection.deleteMany({ where: { id: collectionId } });
@@ -145,6 +1423,239 @@ export class PrismaRepository implements Repository {
   }
 
   async getGrants(collectionId: string): Promise<CollectionPermissionGrant[]> { return (await this.db.collectionPermission.findMany({ where: { collectionId } })).map(rowToGrant); }
+  async createCollectionShareLink(input: CreateCollectionShareLinkInput) {
+    const initial = await this.db.videoCollection.findFirst({ where: { id: input.collectionId, ownerId: input.ownerId }, select: { id: true } });
+    if (!initial) return { status: "not_found" as const };
+    await this.getPlanIdForUser(input.ownerId, input.now);
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const userLock = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.ownerId} FOR UPDATE`;
+        if (!Array.isArray(userLock) || userLock.length !== 1) return { status: "not_found" as const };
+        const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+        if (!Array.isArray(collectionLock) || collectionLock.length !== 1) return { status: "not_found" as const };
+        const collection = await tx.videoCollection.findUnique({ where: { id: input.collectionId }, select: { id: true, ownerId: true, visibility: true, archived: true } });
+        if (!collection || collection["ownerId"] !== input.ownerId) return { status: "not_found" as const };
+        if (collection["visibility"] !== "link" || collection["archived"] === true) return { status: "invalid" as const, reason: "Only active collections set to link visibility can receive a share link." };
+        let planId: PlanId;
+        try { planId = await this.effectivePlanIdInTransaction(tx, input.ownerId, input.now, true); }
+        catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; planId = await this.effectivePlanIdInTransaction(tx, input.ownerId, input.now, false); }
+        const plan = getPlan(planId);
+        const decision = validateShareLinkSettings({ capabilities: input.capabilities, expiresAt: input.expiresAt, now: input.now, collectionSharing: plan.features.collectionSharing, expiringGrants: plan.sharing.expiringGrants });
+        if (!decision.allowed) return { status: plan.features.collectionSharing === "none" || (input.expiresAt !== null && !plan.sharing.expiringGrants) ? "plan_limit" as const : "invalid" as const, reason: decision.reason };
+        const link: CollectionShareLinkRecord = { id: input.id, collectionId: input.collectionId, tokenHash: input.tokenHash, capabilities: [...new Set(input.capabilities)], expiresAt: input.expiresAt, revokedAt: null, createdById: input.ownerId, createdAt: input.now };
+        await tx.collectionShareLink.create({ data: { ...link } });
+        await tx.auditLog.create({ data: { actorId: input.ownerId, action: "sharing.share_link_created", entityType: "CollectionShareLink", entityId: link.id, metadata: { collectionId: link.collectionId, capabilities: link.capabilities, expiresAt: link.expiresAt?.toISOString() ?? null } } });
+        return { status: "created" as const, link: shareLinkSummary(link) };
+      });
+    } catch (error) { if (isUniqueViolation(error)) return { status: "conflict" as const }; throw error; }
+  }
+  async updateCollectionShareLink(input: UpdateCollectionShareLinkInput) {
+    const initial = await this.db.collectionShareLink.findFirst({ where: { id: input.id, collectionId: input.collectionId, createdById: input.ownerId } });
+    if (!initial) return { status: "not_found" as const };
+    await this.getPlanIdForUser(input.ownerId, input.now);
+    return this.db.$transaction(async (tx) => {
+      const userLock = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(userLock) || userLock.length !== 1) return { status: "not_found" as const };
+      const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(collectionLock) || collectionLock.length !== 1) return { status: "not_found" as const };
+      const currentRow = await tx.collectionShareLink.findFirst({ where: { id: input.id, collectionId: input.collectionId, createdById: input.ownerId } });
+      const collection = await tx.videoCollection.findUnique({ where: { id: input.collectionId }, select: { id: true, ownerId: true, visibility: true, archived: true } });
+      if (!currentRow || !collection || collection["ownerId"] !== input.ownerId) return { status: "not_found" as const };
+      const current = shareLinkFromRow(currentRow);
+      if (current.revokedAt !== null) return { status: "revoked" as const };
+      if (collection["visibility"] !== "link" || collection["archived"] === true) return { status: "invalid" as const, reason: "The collection is not available for link sharing." };
+      let planId: PlanId;
+      try { planId = await this.effectivePlanIdInTransaction(tx, input.ownerId, input.now, true); }
+      catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; planId = await this.effectivePlanIdInTransaction(tx, input.ownerId, input.now, false); }
+      const plan = getPlan(planId);
+      const decision = validateShareLinkSettings({ capabilities: input.capabilities, expiresAt: input.expiresAt, now: input.now, collectionSharing: plan.features.collectionSharing, expiringGrants: plan.sharing.expiringGrants });
+      if (!decision.allowed) return { status: plan.features.collectionSharing === "none" || (input.expiresAt !== null && !plan.sharing.expiringGrants) ? "plan_limit" as const : "invalid" as const, reason: decision.reason };
+      const capabilities = [...new Set(input.capabilities)];
+      const unchanged = JSON.stringify(current.capabilities) === JSON.stringify(capabilities) && (current.expiresAt?.getTime() ?? null) === (input.expiresAt?.getTime() ?? null);
+      if (unchanged) return { status: "unchanged" as const, link: shareLinkSummary(current) };
+      const changed = await tx.collectionShareLink.updateMany({ where: { id: input.id, collectionId: input.collectionId, createdById: input.ownerId, revokedAt: null }, data: { capabilities, expiresAt: input.expiresAt } });
+      if (changed.count !== 1) return { status: "conflict" as const };
+      await tx.auditLog.create({ data: { actorId: input.ownerId, action: "sharing.share_link_updated", entityType: "CollectionShareLink", entityId: input.id, metadata: { collectionId: input.collectionId, capabilities, expiresAt: input.expiresAt?.toISOString() ?? null } } });
+      return { status: "updated" as const, link: { ...current, capabilities, expiresAt: input.expiresAt } };
+    });
+  }
+  async revokeCollectionShareLink(input: { id: string; collectionId: string; ownerId: string; now: Date }) {
+    const initial = await this.db.collectionShareLink.findFirst({ where: { id: input.id, collectionId: input.collectionId, createdById: input.ownerId }, select: { id: true, revokedAt: true } });
+    if (!initial) return "not_found" as const;
+    if (initial["revokedAt"] !== null) return "already_revoked" as const;
+    return this.db.$transaction(async (tx) => {
+      const userLock = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(userLock) || userLock.length !== 1) return "not_found" as const;
+      const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(collectionLock) || collectionLock.length !== 1) return "not_found" as const;
+      const changed = await tx.collectionShareLink.updateMany({ where: { id: input.id, collectionId: input.collectionId, createdById: input.ownerId, revokedAt: null }, data: { revokedAt: input.now } });
+      if (changed.count !== 1) return "already_revoked" as const;
+      await tx.auditLog.create({ data: { actorId: input.ownerId, action: "sharing.share_link_revoked", entityType: "CollectionShareLink", entityId: input.id, metadata: { collectionId: input.collectionId } } });
+      return "revoked" as const;
+    });
+  }
+  async listCollectionShareLinksForOwner(collectionId: string, ownerId: string): Promise<CollectionShareLinkSummary[]> {
+    const collection = await this.db.videoCollection.findFirst({ where: { id: collectionId, ownerId }, select: { id: true } });
+    if (!collection) return [];
+    return (await this.db.collectionShareLink.findMany({ where: { collectionId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], select: { id: true, collectionId: true, capabilities: true, expiresAt: true, revokedAt: true, createdById: true, createdAt: true } })).map((row) => {
+      const mapped = shareLinkFromRow({ ...row, tokenHash: "" });
+      return shareLinkSummary(mapped);
+    });
+  }
+  async getCollectionShareLinkByTokenHash(tokenHash: string): Promise<CollectionShareLinkRecord | null> {
+    const row = await this.db.collectionShareLink.findFirst({ where: { tokenHash }, select: { id: true, collectionId: true, tokenHash: true, capabilities: true, expiresAt: true, revokedAt: true, createdById: true, createdAt: true } });
+    return row ? shareLinkFromRow(row) : null;
+  }
+  async createCollectionAccessRequest(input: CreateCollectionAccessRequestInput) {
+    const initial = await this.db.videoCollection.findUnique({ where: { id: input.collectionId } });
+    if (!initial || initial["ownerId"] === input.requesterId) return { status: "not_found" as const };
+    const ownerId = String(initial["ownerId"]);
+    const requested = [...new Set(input.requestedCapabilities)];
+    if (!requested.length || requested.includes("manage") || requested.some((cap) => !["view", "use_in_cycle", "import_copy", "download"].includes(cap))) return { status: "invalid" as const, reason: "Choose one or more supported collection permissions." };
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const userIds = [...new Set([ownerId, input.requesterId])].sort();
+        const lockedUsers = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" IN (${userIds[0]}, ${userIds[1] ?? userIds[0]}) ORDER BY "id" FOR UPDATE`;
+        if (!Array.isArray(lockedUsers) || lockedUsers.length !== userIds.length) return { status: "not_found" as const };
+        const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${ownerId} FOR UPDATE`;
+        if (!Array.isArray(collectionLock) || collectionLock.length !== 1) return { status: "not_found" as const };
+        const collectionRow = await tx.videoCollection.findUnique({ where: { id: input.collectionId } });
+        if (!collectionRow || collectionRow["ownerId"] !== ownerId) return { status: "not_found" as const };
+        const collection = rowToCollection(collectionRow, []);
+        const grants = (await tx.collectionPermission.findMany({ where: { collectionId: collection.id } })).map(rowToGrant);
+        if (getCollectionCapabilities(input.requesterId, collection, grants, input.now).has("view")) return { status: "already_has_access" as const };
+        const rows = (await tx.collectionAccessRequest.findMany({ where: { collectionId: collection.id } })).map(accessRequestFromRow);
+        const pending = rows.find((request) => request.requesterId === input.requesterId && request.status === "pending");
+        if (pending) return { status: "existing" as const, request: pending };
+        const domain = canCreateAccessRequest(input.requesterId, collection, rows);
+        if (!domain.allowed) return { status: "invalid" as const, reason: domain.reason };
+        const record: CollectionAccessRequestRecord = { id: input.id, collectionId: collection.id, requesterId: input.requesterId, requestedCapabilities: requested, status: "pending", decidedById: null, decidedAt: null, createdAt: input.now };
+        await tx.collectionAccessRequest.create({ data: { ...record } });
+        await tx.auditLog.create({ data: { actorId: input.requesterId, action: "sharing.access_request_created", entityType: "CollectionAccessRequest", entityId: record.id, metadata: { collectionId: collection.id, requestedCapabilities: requested } } });
+        return { status: "created" as const, request: record };
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const row = await this.db.collectionAccessRequest.findFirst({ where: { collectionId: input.collectionId, requesterId: input.requesterId, status: "pending" } });
+      return row ? { status: "existing" as const, request: accessRequestFromRow(row) } : { status: "conflict" as const };
+    }
+  }
+  async listPendingCollectionAccessRequests(collectionId: string, ownerId: string): Promise<CollectionAccessRequestRecord[]> {
+    const collection = await this.db.videoCollection.findFirst({ where: { id: collectionId, ownerId }, select: { id: true } });
+    if (!collection) return [];
+    return (await this.db.collectionAccessRequest.findMany({ where: { collectionId, status: "pending" }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] })).map(accessRequestFromRow);
+  }
+  async listCollectionAccessRequestsForRequester(requesterId: string): Promise<CollectionAccessRequestRecord[]> {
+    return (await this.db.collectionAccessRequest.findMany({ where: { requesterId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })).map(accessRequestFromRow);
+  }
+  async decideCollectionAccessRequest(input: DecideCollectionAccessRequestInput) {
+    const initialRequest = await this.db.collectionAccessRequest.findFirst({ where: { id: input.requestId, collectionId: input.collectionId } });
+    if (!initialRequest) return { status: "not_found" as const };
+    const requesterId = String(initialRequest["requesterId"]);
+    const initialCollection = await this.db.videoCollection.findFirst({ where: { id: input.collectionId, ownerId: input.ownerId } });
+    if (!initialCollection) return { status: "not_found" as const };
+    await this.getPlanIdForUser(input.ownerId, input.now);
+    return this.db.$transaction(async (tx) => {
+      const userIds = [...new Set([input.ownerId, requesterId])].sort();
+      const lockedUsers = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" IN (${userIds[0]}, ${userIds[1] ?? userIds[0]}) ORDER BY "id" FOR UPDATE`;
+      if (!Array.isArray(lockedUsers) || lockedUsers.length !== userIds.length) return { status: "not_found" as const };
+      const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(collectionLock) || collectionLock.length !== 1) return { status: "not_found" as const };
+      const collectionRow = await tx.videoCollection.findUnique({ where: { id: input.collectionId } });
+      const row = await tx.collectionAccessRequest.findUnique({ where: { id: input.requestId } });
+      if (!collectionRow || collectionRow["ownerId"] !== input.ownerId || !row || row["collectionId"] !== input.collectionId) return { status: "not_found" as const };
+      const current = accessRequestFromRow(row);
+      if (current.status !== "pending") return { status: "already_decided" as const };
+      const collection = rowToCollection(collectionRow, []);
+      const domain = decideAccessRequest(input.ownerId, collection, { collectionId: current.collectionId, requesterId: current.requesterId, requestedCapabilities: current.requestedCapabilities, status: current.status }, input.decision);
+      if (!domain.ok) return { status: "forbidden" as const, reason: domain.reason };
+      const nowRequest = { status: input.decision, decidedById: input.ownerId, decidedAt: input.now };
+      let newGrant: CollectionPermissionGrant | null = null;
+      if (input.decision === "approved") {
+        const grants = (await tx.collectionPermission.findMany({ where: { collectionId: collection.id } })).map(rowToGrant);
+        let planId: PlanId;
+        try { planId = await this.effectivePlanIdInTransaction(tx, input.ownerId, input.now, true); }
+        catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; planId = await this.effectivePlanIdInTransaction(tx, input.ownerId, input.now, false); }
+        const planned = planGrantCreation({ actorId: input.ownerId, granteeId: current.requesterId, collection, existingGrants: grants, capabilities: current.requestedCapabilities, expiresAt: null, policy: getPlan(planId).sharing, now: input.now });
+        if (!planned.ok) return { status: planned.code === "plan_limit" ? "plan_limit" as const : planned.code === "invalid" ? "invalid" as const : "forbidden" as const, reason: planned.reason };
+        newGrant = planned.grant;
+      }
+      const changed = await tx.collectionAccessRequest.updateMany({ where: { id: current.id, collectionId: current.collectionId, requesterId: current.requesterId, status: "pending" }, data: nowRequest });
+      if (changed.count !== 1) return { status: "conflict" as const };
+      if (newGrant) {
+        const data = grantToRow(newGrant);
+        await tx.collectionPermission.upsert({ where: { collectionId_granteeId: { collectionId: collection.id, granteeId: current.requesterId } }, create: data, update: { capabilities: data["capabilities"], status: "active", expiresAt: data["expiresAt"], grantedById: data["grantedById"], revokedAt: null } });
+      }
+      await tx.auditLog.create({ data: { actorId: input.ownerId, action: `sharing.access_request_${input.decision}`, entityType: "CollectionAccessRequest", entityId: current.id, metadata: { collectionId: collection.id, requesterId: current.requesterId, ...(newGrant ? { grantedCapabilities: newGrant.capabilities } : {}) } } });
+      return { status: "applied" as const, request: { ...current, ...nowRequest }, grant: newGrant };
+    });
+  }
+  async createOrUpdateCollectionGrant(input: CreateCollectionGrantInput): Promise<CollectionGrantMutationResult> {
+    const initial = await this.db.videoCollection.findUnique({ where: { id: input.collectionId } });
+    if (!initial) return { status: "not_found" };
+    const ownerId = String(initial["ownerId"]);
+    // Activate a due queued entitlement before taking the grant transaction's shared User lock.
+    await this.getPlanIdForUser(ownerId, input.now);
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const userLock = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${ownerId} FOR UPDATE`;
+        if (!Array.isArray(userLock) || userLock.length === 0) return { status: "not_found" as const };
+        const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${ownerId} FOR UPDATE`;
+        if (!Array.isArray(collectionLock) || collectionLock.length === 0) return { status: "not_found" as const };
+        const collectionRow = await tx.videoCollection.findUnique({ where: { id: input.collectionId } });
+        if (!collectionRow || collectionRow["ownerId"] !== ownerId) return { status: "not_found" as const };
+        const collection = rowToCollection(collectionRow, []);
+        const rows = await tx.collectionPermission.findMany({ where: { collectionId: input.collectionId } });
+        const grants = rows.map(rowToGrant);
+        if (!getCollectionCapabilities(input.actorId, collection, grants, input.now).has("view")) return { status: "not_found" as const };
+        let ownerPlanId: PlanId;
+        try { ownerPlanId = await this.effectivePlanIdInTransaction(tx, ownerId, input.now, true); }
+        catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; ownerPlanId = await this.effectivePlanIdInTransaction(tx, ownerId, input.now, false); }
+        const decision = planGrantCreation({ actorId: input.actorId, granteeId: input.granteeId, collection, existingGrants: grants, capabilities: input.capabilities, expiresAt: input.expiresAt, policy: getPlan(ownerPlanId).sharing, now: input.now });
+        if (!decision.ok) return { status: decision.code === "plan_limit" ? "plan_limit" as const : decision.code === "invalid" ? "invalid" as const : "forbidden" as const, reason: decision.reason };
+        const old = grants.find((grant) => grant.granteeId === input.granteeId);
+        const sameCapabilities = old && old.capabilities.length === decision.grant.capabilities.length && [...old.capabilities].sort().every((value, index) => value === [...decision.grant.capabilities].sort()[index]);
+        if (old?.status === "active" && old.grantedById === decision.grant.grantedById && old.expiresAt?.getTime() === decision.grant.expiresAt?.getTime() && sameCapabilities) return { status: "existing" as const, grant: old };
+        const data = grantToRow(decision.grant);
+        const saved = await tx.collectionPermission.upsert({
+          where: { collectionId_granteeId: { collectionId: input.collectionId, granteeId: input.granteeId } },
+          create: data,
+          update: { capabilities: data["capabilities"], status: "active", expiresAt: data["expiresAt"], grantedById: data["grantedById"], revokedAt: null },
+        });
+        await tx.auditLog.create({ data: { actorId: input.actorId, action: "sharing.grant_created", entityType: "VideoCollection", entityId: input.collectionId, metadata: { granteeId: input.granteeId, capabilities: decision.grant.capabilities, expiresAt: input.expiresAt?.toISOString() ?? null } } });
+        return { status: "applied" as const, grant: rowToGrant(saved) };
+      });
+    } catch (error) { if (isUniqueViolation(error)) return { status: "conflict" }; throw error; }
+  }
+  async revokeCollectionGrant(input: RevokeCollectionGrantInput): Promise<CollectionGrantMutationResult> {
+    const initial = await this.db.videoCollection.findUnique({ where: { id: input.collectionId } });
+    if (!initial) return { status: "not_found" };
+    const ownerId = String(initial["ownerId"]);
+    await this.getPlanIdForUser(ownerId, input.now);
+    return this.db.$transaction(async (tx) => {
+      const userLock = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${ownerId} FOR UPDATE`;
+      if (!Array.isArray(userLock) || userLock.length === 0) return { status: "not_found" as const };
+      const collectionLock = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${ownerId} FOR UPDATE`;
+      if (!Array.isArray(collectionLock) || collectionLock.length === 0) return { status: "not_found" as const };
+      const collectionRow = await tx.videoCollection.findUnique({ where: { id: input.collectionId } });
+      if (!collectionRow || collectionRow["ownerId"] !== ownerId) return { status: "not_found" as const };
+      const collection = rowToCollection(collectionRow, []);
+      const rows = await tx.collectionPermission.findMany({ where: { collectionId: input.collectionId } });
+      const grants = rows.map(rowToGrant);
+      if (!getCollectionCapabilities(input.actorId, collection, grants, input.now).has("view")) return { status: "not_found" as const };
+      const grant = grants.find((candidate) => candidate.granteeId === input.granteeId && candidate.status === "active");
+      if (!grant) return { status: "not_found" as const };
+      let ownerPlanId: PlanId;
+      try { ownerPlanId = await this.effectivePlanIdInTransaction(tx, ownerId, input.now, true); }
+      catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; ownerPlanId = await this.effectivePlanIdInTransaction(tx, ownerId, input.now, false); }
+      const decision = planGrantRevocation({ actorId: input.actorId, collection, grant, allGrants: grants, policy: getPlan(ownerPlanId).sharing, now: input.now });
+      if (!decision.ok) return { status: "forbidden" as const, reason: decision.reason };
+      const changed = await tx.collectionPermission.updateMany({ where: { collectionId: input.collectionId, granteeId: input.granteeId, status: "active" }, data: { status: "revoked", revokedAt: input.now } });
+      if (changed.count !== 1) return { status: "not_found" as const };
+      await tx.auditLog.create({ data: { actorId: input.actorId, action: "sharing.grant_revoked", entityType: "VideoCollection", entityId: input.collectionId, metadata: { granteeId: input.granteeId } } });
+      return { status: "applied" as const, grant: decision.grant };
+    });
+  }
   async upsertGrant(grant: CollectionPermissionGrant): Promise<void> {
     const row = grantToRow(grant);
     await this.db.collectionPermission.upsert({ where: { collectionId_granteeId: { collectionId: grant.collectionId, granteeId: grant.granteeId } }, create: row, update: { capabilities: row["capabilities"], status: row["status"], expiresAt: row["expiresAt"], grantedById: row["grantedById"], revokedAt: row["revokedAt"] } });
@@ -167,11 +1678,42 @@ export class PrismaRepository implements Repository {
       return connection.id;
     });
   }
+  async saveInstagramConnectionWithinLimit(connection: InstagramConnectionWrite, now: Date): Promise<{ status: "saved"; accountId: string } | { status: "limit" }> {
+    const save = (includePromotions: boolean) => this.db.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${connection.userId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length === 0) return { status: "limit" as const };
+      const planId = await this.effectivePlanIdInTransaction(tx, connection.userId, now, includePromotions);
+      const limit = getPlan(planId).limits.connectedAccounts;
+      const existing = (await tx.socialAccount.findMany({ where: { userId: connection.userId, platform: "instagram", externalAccountId: connection.externalAccountId }, select: { id: true, status: true } }))[0];
+      const connectedCount = await tx.socialAccount.count({ where: { userId: connection.userId, platform: "instagram", status: "connected" } });
+      if (existing?.["status"] !== "connected" && connectedCount >= limit) return { status: "limit" as const };
+      const data = { username: connection.username, accountType: connection.accountType, grantedScopes: connection.grantedScopes.join(" "), tokenExpiresAt: connection.tokenExpiresAt, encryptedAccessToken: connection.encryptedAccessToken, status: "connected" };
+      if (existing) {
+        await tx.socialAccount.update({ where: { id: existing["id"] }, data });
+        return { status: "saved" as const, accountId: String(existing["id"]) };
+      }
+      await tx.socialAccount.create({ data: { id: connection.id, userId: connection.userId, platform: "instagram", externalAccountId: connection.externalAccountId, ...data } });
+      return { status: "saved" as const, accountId: connection.id };
+    });
+    try { return await save(true); }
+    catch (error) { if (isPromotionSchemaUnavailable(error)) return save(false); throw error; }
+  }
   async disconnectSocialAccount(userId: string, accountId: string): Promise<boolean> {
     const result = await this.db.socialAccount.updateMany({
       where: { id: accountId, userId },
       data: { status: "disconnected", encryptedAccessToken: null, tokenExpiresAt: null, grantedScopes: null },
     });
+    return result.count === 1;
+  }
+
+  async getInstagramTokenCiphertext(userId: string, accountId: string): Promise<import("../repository.ts").InstagramTokenCiphertext | null> {
+    const row = await this.db.socialAccount.findFirst({ where: { id: accountId, userId, platform: "instagram", status: "connected" } });
+    const encryptedAccessToken = row?.["encryptedAccessToken"];
+    if (!row || typeof encryptedAccessToken !== "string" || encryptedAccessToken.length === 0) return null;
+    return { encryptedAccessToken, tokenExpiresAt: row["tokenExpiresAt"] instanceof Date ? row["tokenExpiresAt"] : null, status: row["status"] };
+  }
+  async updateInstagramTokenCiphertext(userId: string, accountId: string, expectedCiphertext: string, encryptedAccessToken: string, tokenExpiresAt: Date): Promise<boolean> {
+    const result = await this.db.socialAccount.updateMany({ where: { id: accountId, userId, platform: "instagram", status: "connected", encryptedAccessToken: expectedCiphertext }, data: { encryptedAccessToken, tokenExpiresAt } });
     return result.count === 1;
   }
 
@@ -207,9 +1749,42 @@ export class PrismaRepository implements Repository {
   }
   async saveVideoSettings(template: EditingTemplateRecord): Promise<void> {
     await this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${template.ownerId} FOR UPDATE`;
       const existing = await tx.editingTemplate.findFirst({ where: { ownerId: template.ownerId, name: template.name } });
       if (existing) { await tx.editingTemplate.update({ where: { id: existing["id"] as string }, data: { settings: template.settings } }); return; }
       await tx.editingTemplate.create({ data: { id: template.id, ownerId: template.ownerId, name: template.name, settings: template.settings, isDefault: false, createdAt: template.createdAt } });
+    });
+  }
+  async applyVideoSettingsBatch(input: ApplyVideoSettingsBatchInput): Promise<"applied" | "existing" | "not_owned" | "conflict"> {
+    if (input.audit.actorId !== input.ownerId || input.audit.action !== "editor.bulk_applied" || input.audit.entityType !== "BulkEditDraft" || input.audit.entityId !== input.operationId || input.audit.metadata?.["operationFingerprint"] !== input.operationFingerprint || !/^[a-f0-9]{64}$/.test(input.operationFingerprint)) return "conflict";
+    const mediaIds = input.templates.map((template) => template.name.startsWith("v:") ? template.name.slice(2) : "");
+    if (input.templates.length === 0 || new Set(mediaIds).size !== mediaIds.length || input.expectedSettings.length !== input.templates.length || input.templates.some((template, index) => template.ownerId !== input.ownerId || !/^[A-Za-z0-9_-]{1,64}$/.test(mediaIds[index] ?? "") || template.name !== `v:${mediaIds[index]}` || input.expectedSettings[index]?.name !== template.name)) return "conflict";
+    return this.db.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length === 0) return "not_owned";
+      const prior = await tx.auditLog.findFirst({ where: { action: input.audit.action, entityType: input.audit.entityType, entityId: input.operationId }, select: { actorId: true, metadata: true } });
+      if (prior) {
+        const metadata = prior["metadata"];
+        return prior["actorId"] === input.ownerId && typeof metadata === "object" && metadata !== null && (metadata as Record<string, unknown>)["operationFingerprint"] === input.operationFingerprint ? "existing" : "conflict";
+      }
+      const owned = await tx.mediaAsset.findMany({ where: { id: { in: mediaIds }, ownerId: input.ownerId, status: "active", kind: "video" }, select: { id: true } });
+      if (owned.length !== mediaIds.length) return "not_owned";
+      if (input.requiredImageIds.length > 0) {
+        const images = await tx.mediaAsset.findMany({ where: { id: { in: input.requiredImageIds }, ownerId: input.ownerId, status: "active", kind: "image" }, select: { id: true } });
+        if (images.length !== new Set(input.requiredImageIds).size) return "not_owned";
+      }
+      for (let index = 0; index < input.templates.length; index++) {
+        const template = input.templates[index]!; const expected = input.expectedSettings[index]!.settings;
+        const current = await tx.editingTemplate.findFirst({ where: { ownerId: input.ownerId, name: template.name }, select: { settings: true } });
+        if (expected === null ? Boolean(current) : !current || (() => { const parsed = parseEditingSettings(current["settings"]); return !parsed.ok || stableJson(parsed.settings) !== stableJson(expected); })()) return "conflict";
+      }
+      for (const template of input.templates) {
+        const existing = await tx.editingTemplate.findFirst({ where: { ownerId: input.ownerId, name: template.name }, select: { id: true } });
+        if (existing) await tx.editingTemplate.update({ where: { id: existing["id"] as string }, data: { settings: template.settings } });
+        else await tx.editingTemplate.create({ data: { id: template.id, ownerId: template.ownerId, name: template.name, settings: template.settings, isDefault: false, createdAt: template.createdAt } });
+      }
+      await tx.auditLog.create({ data: { actorId: input.audit.actorId, action: input.audit.action, entityType: input.audit.entityType, entityId: input.audit.entityId, metadata: input.audit.metadata ?? null } });
+      return "applied";
     });
   }
   async listAuditsForEntities(entityType: string, entityIds: string[]): Promise<{ entityId: string; action: string; metadata: Record<string, unknown> | null }[]> {
@@ -228,9 +1803,13 @@ export class PrismaRepository implements Repository {
   async countRenderOutputsSince(ownerId: string, since: Date): Promise<number> {
     return this.db.mediaDerivative.count({ where: { ownerId, kind: "render", createdAt: { gte: since } } });
   }
-  async saveRenderOutput(record: { id: string; sourceMediaId: string; ownerId: string; storageKey: string; sizeBytes: number; settingsHash: string; createdAt: Date }, limitBytes: number): Promise<SaveRenderResult> {
+  async saveRenderOutput(record: { id: string; sourceMediaId: string; ownerId: string; storageKey: string; sizeBytes: number; settingsHash: string; createdAt: Date }, limitBytes: number, fence?: import("../repository.ts").RenderJobFence): Promise<SaveRenderResult> {
     return this.db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${record.ownerId} FOR UPDATE`;
+      if (fence) {
+        const currentJob = await tx.processingJob.findFirst({ where: { id: fence.id, ownerId: fence.ownerId, kind: "render", status: "running", lockToken: fence.lockToken } });
+        if (!currentJob) return { status: "stale_job" };
+      }
       const existing = await tx.mediaDerivative.findFirst({ where: { ownerId: record.ownerId, mediaAssetId: record.sourceMediaId, kind: "render", settingsHash: record.settingsHash } });
       if (existing) return { status: "duplicate", id: existing["id"] as string };
       const mediaSum = await tx.mediaAsset.aggregate({ where: { ownerId: record.ownerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } });
@@ -243,6 +1822,92 @@ export class PrismaRepository implements Repository {
   async listRenderOutputsForOwner(ownerId: string): Promise<RenderOutputRecord[]> {
     const rows = await this.db.mediaDerivative.findMany({ where: { ownerId, kind: "render" }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 20 });
     return rows.map((row) => ({ id: row["id"], sourceMediaId: row["mediaAssetId"], ownerId: row["ownerId"], sizeBytes: Number(row["sizeBytes"]), createdAt: row["createdAt"] }));
+  }
+  async listRenderOutputsForOwnerAndSource(ownerId: string, sourceMediaId: string): Promise<RenderOutputRecord[]> {
+    const rows = await this.db.mediaDerivative.findMany({ where: { ownerId, mediaAssetId: sourceMediaId, kind: "render" }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] });
+    return rows.map((row) => ({ id: row["id"], ownerId: row["ownerId"], sourceMediaId: row["mediaAssetId"], sizeBytes: Number(row["sizeBytes"]), createdAt: row["createdAt"] }));
+  }
+  async createRenderJob(job: RenderJobRecord): Promise<CreateRenderJobResult> {
+    try {
+      const row = await this.db.processingJob.create({ data: renderJobToRow(job) });
+      return { status: "created", job: renderJobFromRow(row) };
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const existing = await this.db.processingJob.findUnique({ where: { idempotencyKey: job.idempotencyKey } });
+      if (existing && existing["kind"] === "render" && existing["ownerId"] === job.ownerId && existing["mediaAssetId"] === job.mediaAssetId && existing["settingsHash"] === job.settingsHash && stableJson(existing["payload"] ?? null) === stableJson(job.payload ?? null)) return { status: "existing", job: renderJobFromRow(existing) };
+      return { status: "conflict" };
+    }
+  }
+  async getRenderJobForOwner(id: string, ownerId: string): Promise<RenderJobRecord | null> {
+    const row = await this.db.processingJob.findFirst({ where: { id, ownerId, kind: "render" } });
+    return row ? renderJobFromRow(row) : null;
+  }
+  async getRenderJobByIdempotencyKey(idempotencyKey: string, ownerId: string): Promise<RenderJobRecord | null> {
+    const row = await this.db.processingJob.findFirst({ where: { idempotencyKey, ownerId, kind: "render" } });
+    return row ? renderJobFromRow(row) : null;
+  }
+  async listRenderJobsForOwner(ownerId: string): Promise<RenderJobRecord[]> {
+    const rows = await this.db.processingJob.findMany({ where: { ownerId, kind: "render" }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] });
+    return rows.map(renderJobFromRow);
+  }
+  async claimNextRenderJob(claim: RenderJobClaim): Promise<RenderJobRecord | null> {
+    if (!claim.workerId || !Number.isFinite(claim.leaseSeconds) || claim.leaseSeconds <= 0) return null;
+    let includePromotions = true;
+    const claimableWhere = { kind: "render", OR: [{ status: "queued" }, { status: "running", lockExpiresAt: { lte: claim.now } }], ...(claim.jobId ? { id: claim.jobId } : {}) };
+    const queuedOwners = await this.db.processingJob.findMany({ where: claimableWhere, select: { ownerId: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+    for (const ownerId of new Set(queuedOwners.map((row) => String(row["ownerId"])))) {
+      try { await this.activateNextPromotionalAccessGrant(ownerId, claim.now); }
+      catch (error) { if (isPromotionSchemaUnavailable(error)) { includePromotions = false; break; } throw error; }
+    }
+    const claimWithEntitlements = (includePromotionalAccess: boolean) => this.db.$transaction(async (tx) => {
+      const queued = await tx.processingJob.findMany({ where: claimableWhere, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+      for (const candidate of queued) {
+        const ownerId = candidate["ownerId"] as string;
+        // Serialize claims for one account. Different users lock different rows and can proceed independently.
+        const lockedUsers = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${ownerId} FOR UPDATE`;
+        if (!Array.isArray(lockedUsers) || lockedUsers.length === 0) continue;
+        const planId = await this.effectivePlanIdInTransaction(tx, ownerId, claim.now, includePromotionalAccess);
+        const limit = getPlan(planId).limits.concurrentJobs;
+        const running = await tx.processingJob.count({ where: { ownerId, kind: "render", status: "running", lockExpiresAt: { gt: claim.now } } });
+        if (running >= limit) continue;
+
+        const lockToken = randomUUID();
+        const update = await tx.processingJob.updateMany({
+          where: { id: candidate["id"], ownerId, kind: "render", status: candidate["status"], ...(candidate["status"] === "running" ? { lockToken: candidate["lockToken"], lockExpiresAt: { lte: claim.now } } : {}) },
+          data: { status: "running", lockedBy: claim.workerId, lockToken, lockExpiresAt: new Date(claim.now.getTime() + claim.leaseSeconds * 1000), attempts: { increment: 1 }, pendingOutputId: randomUUID(), ffmpegPid: null, ffmpegStartedAt: null },
+        });
+        if (update.count !== 1) continue;
+        const row = await tx.processingJob.findFirst({ where: { id: candidate["id"], ownerId, kind: "render", status: "running", lockToken } });
+        if (row) return renderJobFromRow(row);
+      }
+      return null;
+    });
+    if (!includePromotions) return claimWithEntitlements(false);
+    try { return await claimWithEntitlements(true); }
+    catch (error) { if (isPromotionSchemaUnavailable(error)) return claimWithEntitlements(false); throw error; }
+  }
+  private async updateWorkerOwnedRenderJob(id: string, ownerId: string, lockToken: string, data: Record<string, unknown>): Promise<boolean> {
+    if (!lockToken) return false;
+    const result = await this.db.processingJob.updateMany({ where: { id, ownerId, kind: "render", status: "running", lockToken }, data });
+    return result.count === 1;
+  }
+  async heartbeatRenderJob(id: string, ownerId: string, lockToken: string, now: Date, leaseSeconds: number): Promise<boolean> {
+    if (!Number.isFinite(leaseSeconds) || leaseSeconds <= 0) return false;
+    return this.updateWorkerOwnedRenderJob(id, ownerId, lockToken, { lockExpiresAt: new Date(now.getTime() + leaseSeconds * 1000) });
+  }
+  async updateRenderJobProgress(id: string, ownerId: string, lockToken: string, progressPercent: number): Promise<boolean> {
+    if (!Number.isInteger(progressPercent) || progressPercent < 0 || progressPercent > 100) return false;
+    return this.updateWorkerOwnedRenderJob(id, ownerId, lockToken, { progressPercent });
+  }
+  async completeRenderJob(id: string, ownerId: string, lockToken: string, finishedAt: Date, outputDerivativeId: string): Promise<boolean> {
+    if (!outputDerivativeId) return false;
+    return this.updateWorkerOwnedRenderJob(id, ownerId, lockToken, { status: "succeeded", progressPercent: 100, finishedAt, outputDerivativeId, lockToken: null, lockedBy: null, lockExpiresAt: null });
+  }
+  async failRenderJob(id: string, ownerId: string, lockToken: string, finishedAt: Date, errorMessage: string): Promise<boolean> {
+    return this.updateWorkerOwnedRenderJob(id, ownerId, lockToken, { status: "failed", finishedAt, errorMessage, lockToken: null, lockedBy: null, lockExpiresAt: null });
+  }
+  async cancelRenderJob(id: string, ownerId: string, lockToken: string, finishedAt: Date): Promise<boolean> {
+    return this.updateWorkerOwnedRenderJob(id, ownerId, lockToken, { status: "cancelled", finishedAt, lockToken: null, lockedBy: null, lockExpiresAt: null });
   }
   async getRenderOutput(id: string): Promise<{ id: string; ownerId: string; sourceMediaId: string; sizeBytes: number; storageKey: string } | null> {
     const row = await this.db.mediaDerivative.findUnique({ where: { id } });
@@ -272,6 +1937,157 @@ export class PrismaRepository implements Repository {
       if (typeof outcome !== "string" || !outcomes.has(outcome) || !(startedAt instanceof Date)) return [];
       return [{ id: String(row["id"]), cycleItemId: String(row["cycleItemId"]), outcome: outcome as PublishingJobRecord["outcome"], startedAt }];
     });
+  }
+  async listDuePublishingCandidates(now: Date, limit: number): Promise<import("../repository.ts").DuePublishingCandidate[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1) return [];
+    const rows = await this.db.cycleItem.findMany({ where: { status: "scheduled", scheduledFor: { lte: now } }, orderBy: [{ scheduledFor: "asc" }, { position: "asc" }, { id: "asc" }], take: Math.min(limit, 500) });
+    const candidates: import("../repository.ts").DuePublishingCandidate[] = [];
+    for (const row of rows) {
+      const cycle = await this.getCycle(String(row["cycleId"]));
+      if (!cycle || cycle.status !== "running") continue;
+      const account = await this.getSocialAccount(cycle.socialAccountId);
+      candidates.push({ cycle, item: rowToItem(row), account });
+    }
+    return candidates;
+  }
+  async listPublishingAttemptsForItem(ownerId: string, cycleId: string, cycleItemId: string): Promise<PublishingAttemptRecord[]> {
+    const rows = await this.db.publishingJob.findMany({ where: { ownerId, cycleId, cycleItemId }, orderBy: [{ attemptNumber: "asc" }, { id: "asc" }] });
+    return rows.map(publishingAttemptFromRow);
+  }
+  async listActivePublishingAttemptsForWorker(workerId: string, now: Date, limit: number): Promise<PublishingAttemptRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1) return [];
+    const rows = await this.db.publishingJob.findMany({ where: { workerId, stage: { in: ["claimed", "container_creation_pending", "container_processing", "ready_to_publish", "publishing"] }, leaseExpiresAt: { gt: now } }, orderBy: [{ startedAt: "asc" }, { id: "asc" }], take: Math.min(limit, 500) });
+    return rows.map(publishingAttemptFromRow);
+  }
+  async listExpiredActivePublishingAttempts(now: Date, limit: number): Promise<{ jobId: string; ownerId: string }[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1) return [];
+    const rows = await this.db.publishingJob.findMany({ where: { stage: { in: ["claimed", "container_creation_pending", "container_processing", "ready_to_publish", "publishing"] }, leaseExpiresAt: { lte: now } }, orderBy: [{ leaseExpiresAt: "asc" }, { id: "asc" }], take: Math.min(limit, 500) });
+    return rows.map((row) => ({ jobId: String(row["id"]), ownerId: String(row["ownerId"]) }));
+  }
+  async createOrGetPublishingAttempt(input: CreatePublishingAttemptInput): Promise<{ status: "created" | "existing" | "conflict"; job?: PublishingAttemptRecord }> {
+    if (input.idempotencyKey !== buildPublishIdempotencyKey({ cycleId: input.cycleId, id: input.cycleItemId }, input.attemptNumber)) return { status: "conflict" };
+    const identityMatches = (row: Record<string, unknown>) => row["ownerId"] === input.ownerId && row["cycleId"] === input.cycleId && row["cycleItemId"] === input.cycleItemId && row["socialAccountId"] === input.socialAccountId;
+    try {
+      const result = await this.db.$transaction(async (tx) => {
+        const [cycle, item, account] = await Promise.all([tx.publishingCycle.findUnique({ where: { id: input.cycleId } }), tx.cycleItem.findUnique({ where: { id: input.cycleItemId } }), tx.socialAccount.findUnique({ where: { id: input.socialAccountId } })]);
+        if (!cycle || !item || !account || cycle["ownerId"] !== input.ownerId || cycle["socialAccountId"] !== input.socialAccountId || item["cycleId"] !== input.cycleId || item["cycleOwnerId"] !== input.ownerId || account["userId"] !== input.ownerId || input.attemptNumber < 1) return { status: "conflict" as const };
+        const existing = await tx.publishingJob.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
+        if (existing) return identityMatches(existing) ? { status: "existing" as const, job: publishingAttemptFromRow(existing) } : { status: "conflict" as const };
+        const row = await tx.publishingJob.create({ data: { id: input.id, ownerId: input.ownerId, cycleId: input.cycleId, cycleItemId: input.cycleItemId, socialAccountId: input.socialAccountId, attemptNumber: input.attemptNumber, idempotencyKey: input.idempotencyKey, stage: "queued", outcome: "in_progress", startedAt: input.now, createdAt: input.now, updatedAt: input.now } });
+        return { status: "created" as const, job: publishingAttemptFromRow(row) };
+      });
+      return result;
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const existing = await this.db.publishingJob.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
+      return existing && identityMatches(existing) ? { status: "existing", job: publishingAttemptFromRow(existing) } : { status: "conflict" };
+    }
+  }
+  async claimPublishingAttempt(input: ClaimPublishingAttemptInput): Promise<PublishingAttemptRecord | null> {
+    const stale = Symbol("claim lost");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        // Serializes claims for one account. The partial unique index is the second line of defense.
+        const locked = await tx.$queryRaw`SELECT "id" FROM "SocialAccount" WHERE "id" = ${input.socialAccountId} FOR UPDATE`;
+        if (!Array.isArray(locked) || locked.length !== 1) return null;
+        const [job, cycle, item, account] = await Promise.all([tx.publishingJob.findUnique({ where: { id: input.attemptId } }), tx.publishingCycle.findUnique({ where: { id: input.cycleId } }), tx.cycleItem.findUnique({ where: { id: input.cycleItemId } }), tx.socialAccount.findUnique({ where: { id: input.socialAccountId } })]);
+        if (!job || job["stage"] !== "queued" || !cycle || !item || !account) return null;
+        const accountEligibility = evaluateInstagramEligibility({ platform: account["platform"], status: account["status"], accountType: account["accountType"], grantedScopes: account["grantedScopes"], hasToken: typeof account["encryptedAccessToken"] === "string" && account["encryptedAccessToken"].length > 0, tokenExpiresAt: account["tokenExpiresAt"], now: input.now });
+        const eligible = accountEligibility.eligible && account["userId"] === input.ownerId;
+        const valid = eligible && cycle["ownerId"] === input.ownerId && cycle["socialAccountId"] === input.socialAccountId && cycle["status"] === "running" && item["cycleId"] === input.cycleId && item["cycleOwnerId"] === input.ownerId && item["version"] === input.expectedItemVersion && (item["status"] === "upcoming" || item["status"] === "scheduled") && (!(item["scheduledFor"] instanceof Date) || item["scheduledFor"] <= input.now) && job["ownerId"] === input.ownerId && job["cycleId"] === input.cycleId && job["cycleItemId"] === input.cycleItemId && job["socialAccountId"] === input.socialAccountId;
+        if (!valid) return null;
+        const active = await tx.publishingJob.findFirst({ where: { socialAccountId: input.socialAccountId, stage: { in: ["claimed", "container_creation_pending", "container_processing", "ready_to_publish", "publishing"] } } });
+        if (active) return null;
+        const lockToken = randomUUID(), expiresAt = new Date(input.now.getTime() + Math.max(1, input.leaseSeconds) * 1000);
+        const itemUpdate = await tx.cycleItem.updateMany({ where: { id: input.cycleItemId, cycleId: input.cycleId, cycleOwnerId: input.ownerId, version: input.expectedItemVersion, status: item["status"], scheduledFor: item["scheduledFor"] ?? null }, data: { status: "publishing", lockedBy: input.workerId, lockExpiresAt: expiresAt, version: { increment: 1 } } });
+        if (itemUpdate.count !== 1) return null;
+        const claimed = await tx.publishingJob.updateMany({ where: { id: input.attemptId, ownerId: input.ownerId, stage: "queued", lockToken: null }, data: { stage: "claimed", workerId: input.workerId, lockToken, leaseExpiresAt: expiresAt, startedAt: input.now, updatedAt: input.now } });
+        if (claimed.count !== 1) throw stale;
+        const row = await tx.publishingJob.findUnique({ where: { id: input.attemptId } });
+        return row ? publishingAttemptFromRow(row) : null;
+      });
+    } catch (error) { if (error === stale) return null; throw error; }
+  }
+  async transitionPublishingAttempt(input: PublishingAttemptUpdate): Promise<boolean> {
+    if (!canTransitionPublishingAttempt(input.expectedStage, input.nextStage) || (input.nextStage === "published" && !input.instagramMediaId) || (input.instagramMediaId && input.nextStage !== "published") || (input.nextStage === "container_processing" && !input.containerId)) return false;
+    const terminal = ["published", "failed", "needs_manual_review"].includes(input.nextStage);
+    const outcome = publishingOutcomeForStage(input.nextStage);
+    const safeError = input.errorCategory !== undefined || input.errorDetails !== undefined ? safePublishingError(input.errorCategory) : null;
+    const data: Record<string, unknown> = { stage: input.nextStage, outcome, updatedAt: input.now, ...(terminal ? { finishedAt: input.now, workerId: null, lockToken: null, leaseExpiresAt: null } : {}), ...(input.leaseSeconds === undefined ? {} : { leaseExpiresAt: new Date(input.now.getTime() + Math.max(1, input.leaseSeconds) * 1000) }), ...(input.containerId === undefined ? {} : { containerId: input.containerId }), ...(input.instagramMediaId === undefined ? {} : { instagramMediaId: input.instagramMediaId }), ...(safeError ? { errorCategory: safeError.category, errorDetails: safeError.details } : {}) };
+    const stale = Symbol("attempt changed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const job = await tx.publishingJob.findUnique({ where: { id: input.jobId } });
+        if (!job || job["ownerId"] !== input.ownerId || job["workerId"] !== input.workerId || job["lockToken"] !== input.lockToken || job["stage"] !== input.expectedStage || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] <= input.now) return false;
+        if (["ready_to_publish", "publishing"].includes(input.nextStage) && !(input.containerId ?? job["containerId"])) return false;
+        if (terminal) {
+          const itemStatus = input.nextStage === "published" ? "published" : input.nextStage === "failed" ? "failed" : "needs_review";
+          const item = await tx.cycleItem.updateMany({ where: { id: job["cycleItemId"], status: "publishing", lockedBy: input.workerId }, data: { status: itemStatus, externalPostId: input.nextStage === "published" ? input.instagramMediaId : undefined, publishedAt: input.nextStage === "published" ? input.now : undefined, lockedBy: null, lockExpiresAt: null, reviewReason: input.nextStage === "needs_manual_review" ? "ambiguous_publish_result" : null, version: { increment: 1 } } });
+          if (item.count !== 1) throw stale;
+        }
+        const changed = await tx.publishingJob.updateMany({ where: { id: input.jobId, ownerId: input.ownerId, workerId: input.workerId, lockToken: input.lockToken, stage: input.expectedStage, leaseExpiresAt: { gt: input.now } }, data });
+        if (changed.count !== 1) throw stale;
+        return true;
+      });
+    } catch (error) { if (error === stale) return false; throw error; }
+  }
+  async heartbeatPublishingAttempt(jobId: string, ownerId: string, workerId: string, lockToken: string, now: Date, leaseSeconds: number): Promise<boolean> {
+    const job = await this.db.publishingJob.findUnique({ where: { id: jobId } });
+    if (!job || job["ownerId"] !== ownerId || job["workerId"] !== workerId || job["lockToken"] !== lockToken || !isActivePublishingAttempt(job["stage"] as PublishingAttemptRecord["stage"]) || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] <= now) return false;
+    const changed = await this.db.publishingJob.updateMany({ where: { id: jobId, ownerId, workerId, lockToken, stage: job["stage"], leaseExpiresAt: { gt: now } }, data: { leaseExpiresAt: new Date(now.getTime() + Math.max(1, leaseSeconds) * 1000), updatedAt: now } });
+    return changed.count === 1;
+  }
+  async cancelPublishingAttempt(jobId: string, ownerId: string, now: Date): Promise<boolean> {
+    const stale = Symbol("cancel changed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const job = await tx.publishingJob.findUnique({ where: { id: jobId } });
+        if (!job || job["ownerId"] !== ownerId || (job["stage"] !== "queued" && job["stage"] !== "claimed")) return false;
+        if (job["stage"] === "claimed" && (!(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] > now)) return false;
+        if (job["stage"] === "claimed") {
+          const item = await tx.cycleItem.findUnique({ where: { id: job["cycleItemId"] } });
+          if (!item || item["status"] !== "publishing" || item["lockedBy"] !== job["workerId"]) return false;
+          const changedItem = await tx.cycleItem.updateMany({ where: { id: item["id"], status: "publishing", lockedBy: job["workerId"], version: item["version"] }, data: { status: "scheduled", lockedBy: null, lockExpiresAt: null, version: { increment: 1 } } });
+          if (changedItem.count !== 1) throw stale;
+        }
+        const changed = await tx.publishingJob.updateMany({ where: { id: jobId, ownerId, stage: job["stage"] }, data: { stage: "cancelled", outcome: "in_progress", workerId: null, lockToken: null, leaseExpiresAt: null, updatedAt: now, finishedAt: now } });
+        if (changed.count !== 1) throw stale;
+        return true;
+      });
+    } catch (error) { if (error === stale) return false; throw error; }
+  }
+  async cancelClaimedPublishingAttempt(jobId: string, ownerId: string, workerId: string, lockToken: string, now: Date): Promise<boolean> {
+    const stale = Symbol("claim cancellation changed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const job = await tx.publishingJob.findUnique({ where: { id: jobId } });
+        if (!job || job["ownerId"] !== ownerId || job["workerId"] !== workerId || job["lockToken"] !== lockToken || job["stage"] !== "claimed" || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] <= now) return false;
+        const [item, cycle] = await Promise.all([tx.cycleItem.findUnique({ where: { id: job["cycleItemId"] } }), tx.publishingCycle.findUnique({ where: { id: job["cycleId"] } })]);
+        if (!item || !cycle || cycle["ownerId"] !== ownerId || item["status"] !== "publishing" || item["lockedBy"] !== workerId) return false;
+        const restoredStatus = cycle["status"] === "stopped" || cycle["status"] === "completed" ? "cancelled" : item["scheduledFor"] ? "scheduled" : "upcoming";
+        const itemUpdate = await tx.cycleItem.updateMany({ where: { id: item["id"], cycleId: job["cycleId"], cycleOwnerId: ownerId, status: "publishing", lockedBy: workerId, version: item["version"] }, data: { status: restoredStatus, lockedBy: null, lockExpiresAt: null, version: { increment: 1 } } });
+        if (itemUpdate.count !== 1) throw stale;
+        const jobUpdate = await tx.publishingJob.updateMany({ where: { id: jobId, ownerId, workerId, lockToken, stage: "claimed", leaseExpiresAt: { gt: now } }, data: { stage: "cancelled", workerId: null, lockToken: null, leaseExpiresAt: null, updatedAt: now, finishedAt: now } });
+        if (jobUpdate.count !== 1) throw stale;
+        return true;
+      });
+    } catch (error) { if (error === stale) return false; throw error; }
+  }
+  async markExpiredPublishingAttemptForReview(jobId: string, ownerId: string, now: Date): Promise<boolean> {
+    const stale = Symbol("expired attempt changed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const job = await tx.publishingJob.findUnique({ where: { id: jobId } });
+        if (!job || job["ownerId"] !== ownerId || !isActivePublishingAttempt(job["stage"] as PublishingAttemptRecord["stage"]) || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] > now) return false;
+        const item = await tx.cycleItem.findUnique({ where: { id: job["cycleItemId"] } });
+        if (!item || item["status"] !== "publishing" || item["lockedBy"] !== job["workerId"]) return false;
+        const changedItem = await tx.cycleItem.updateMany({ where: { id: item["id"], status: "publishing", lockedBy: job["workerId"], version: item["version"] }, data: { status: "needs_review", lockedBy: null, lockExpiresAt: null, reviewReason: "worker_lost_during_publish", version: { increment: 1 } } });
+        if (changedItem.count !== 1) throw stale;
+        const changed = await tx.publishingJob.updateMany({ where: { id: jobId, ownerId, stage: job["stage"], leaseExpiresAt: { lte: now }, lockToken: job["lockToken"] }, data: { stage: "needs_manual_review", outcome: "ambiguous", workerId: null, lockToken: null, leaseExpiresAt: null, errorCategory: "worker_lease_expired", errorDetails: "The worker lease expired; the external outcome was not verified.", updatedAt: now, finishedAt: now } });
+        if (changed.count !== 1) throw stale;
+        return true;
+      });
+    } catch (error) { if (error === stale) return false; throw error; }
   }
   async appendAudit(entry: AuditEntry): Promise<void> {
     await this.db.auditLog.create({ data: { actorId: entry.actorId, action: entry.action, entityType: entry.entityType, entityId: entry.entityId, metadata: entry.metadata ?? null } });

@@ -26,6 +26,19 @@ export class MemoryAuthRepository implements AuthRepository {
   async revokeAllSessionsForUser(userId: string, at: Date): Promise<void> { await tick(); for (const s of this.sessions.values()) if (s.userId === userId && !s.revokedAt) s.revokedAt = at; }
 
   async createAuthToken(token: AuthTokenRecord): Promise<void> { await tick(); this.tokens.set(token.id, clone(token)); }
+  async completePasswordReset(input: { tokenHash: string; now: Date; passwordHash: string; passwordProblems: (email: string) => string[] }): Promise<{ status: "reset" } | { status: "invalid" } | { status: "rejected"; problems: string[] }> {
+    await tick();
+    const token = [...this.tokens.values()].find((item) => item.tokenHash === input.tokenHash && item.kind === "password_reset");
+    const user = token ? this.users.get(token.userId) : undefined;
+    if (!token || token.usedAt !== null || token.expiresAt <= input.now || !user) return { status: "invalid" };
+    const problems = input.passwordProblems(user.email);
+    if (problems.length > 0) return { status: "rejected", problems };
+    token.usedAt = input.now;
+    user.passwordHash = input.passwordHash;
+    if (!user.emailVerifiedAt) user.emailVerifiedAt = input.now;
+    for (const session of this.sessions.values()) if (session.userId === user.id && !session.revokedAt) session.revokedAt = input.now;
+    return { status: "reset" };
+  }
   async consumeAuthToken(kind: AuthTokenKind, tokenHash: string, now: Date): Promise<AuthTokenRecord | null> {
     await tick();
     // No await between check and write: atomic, like UPDATE ... WHERE usedAt IS NULL AND expiresAt > now.

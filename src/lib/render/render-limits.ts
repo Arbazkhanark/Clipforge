@@ -26,6 +26,7 @@ export function hashExportSettings(sourceMediaId: string, settings: RenderSettin
   const body = JSON.stringify({
     sourceMediaId, aspect: settings.aspect, maxResolution: settings.maxResolution, background: settings.background,
     zoom: settings.zoom, offsetX: settings.offsetX, offsetY: settings.offsetY, border: settings.border,
+    ...(settings.trim && (settings.trim.startSeconds !== 0 || settings.trim.endSeconds !== null) ? { trim: settings.trim } : {}),
     logo: settings.logo ?? null, logoMediaId, backgroundMediaId,
   });
   return createHash("sha256").update(body).digest("hex");

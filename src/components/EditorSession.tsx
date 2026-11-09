@@ -29,11 +29,29 @@ export function EditorSession({ formId }: { formId: string }) {
     if (!form || !undo) return;
     let previous = snapshot(form);
     let current = previous;
-    const onInput = () => { previous = current; current = snapshot(form); };
-    const onClick = (event: Event) => { event.preventDefault(); restore(form, previous); const restored = previous; previous = current; current = restored; };
+    let gestureStart: Record<string, string> | null = null;
+    const onInput = () => { if (gestureStart) return; previous = current; current = snapshot(form); };
+    const onGestureStart = () => { if (!gestureStart) gestureStart = snapshot(form); };
+    const onGestureEnd = () => {
+      if (!gestureStart) return;
+      const after = snapshot(form);
+      if (JSON.stringify(gestureStart) !== JSON.stringify(after)) { previous = gestureStart; current = after; }
+      gestureStart = null;
+    };
+    const onClick = (event: Event) => {
+      event.preventDefault();
+      const target = previous;
+      previous = current;
+      current = target;
+      restore(form, target);
+      // Notify the preview without recording the restore as a new user edit.
+      form.dispatchEvent(new Event("change", { bubbles: true }));
+    };
     form.addEventListener("input", onInput);
+    form.addEventListener("clipforge:gesturestart", onGestureStart);
+    form.addEventListener("clipforge:gestureend", onGestureEnd);
     undo.addEventListener("click", onClick);
-    return () => { form.removeEventListener("input", onInput); undo.removeEventListener("click", onClick); };
+    return () => { form.removeEventListener("input", onInput); form.removeEventListener("clipforge:gesturestart", onGestureStart); form.removeEventListener("clipforge:gestureend", onGestureEnd); undo.removeEventListener("click", onClick); };
   }, [formId]);
   return <button type="button" id="editor-undo">Undo</button>;
 }

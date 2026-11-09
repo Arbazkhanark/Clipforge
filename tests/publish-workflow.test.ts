@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeCycle, makeItem, makeMedia, NOW } from "./helpers.ts";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
+import type { PublishingAttemptRecord } from "../src/server/repository.ts";
 import { buildPreflightReport } from "../src/server/preflight-service.ts";
 import { setCycleRepeat } from "../src/server/handlers/cycles.ts";
 import type { RequestContext } from "../src/server/context.ts";
@@ -39,17 +40,17 @@ test("expired permissions and repeated failures pause; repeat mode never republi
   assert.equal(decideSettledCycle(cycle, [makeItem({ status: "upcoming" })], "automatic"), "keep_running");
 });
 
-test("preflight blocks a personal account, a non-video, and an expired token, and a missing token only recommends", () => {
+test("preflight blocks a personal account, a non-video, an expired token, and a missing token", () => {
   const items = [makeItem({ id: "a", captionText: "Hello" })];
   const base = (): PreflightInput => ({
     cycle: makeCycle({ status: "draft", finalReviewConfirmed: true }), items, socialAccountStatus: "connected",
     scheduledItemsPerMonthLimit: 100, scheduledItemsUsedThisMonth: 0, coverSupport: "supported",
     sourceAccessByItemId: { a: { allowed: true, reason: "ok" } },
-    instagram: { now: NOW, hasStoredToken: true, accountType: "BUSINESS", grantedScopes: ["instagram_business_basic", "instagram_business_content_publish"], tokenExpiresAt: new Date("2026-08-01T00:00:00Z"), mediaByItemId: { a: { kind: "video", mimeType: "video/mp4" } }, publicMediaUrlAvailable: true, consecutiveDefiniteFailures: 0, repeatBehavior: "never" },
+    instagram: { platform: "instagram", now: NOW, hasStoredToken: true, accountType: "BUSINESS", grantedScopes: ["instagram_business_basic", "instagram_business_content_publish"], tokenExpiresAt: new Date("2026-08-01T00:00:00Z"), mediaByItemId: { a: { kind: "video", mimeType: "video/mp4" } }, temporaryMediaAccessConfigured: true, temporaryMediaAccessByItemId: { a: { status: "temporary_media_access_ready", publiclyReachable: true } }, consecutiveDefiniteFailures: 0, repeatBehavior: "never" },
   });
   const level = (input: PreflightInput, id: string) => runPreflight(input).checks.find((check) => check.id === id)?.level;
-  assert.equal(level(base(), "instagram_public_url"), undefined);
-  assert.equal(runPreflight({ ...base(), instagram: { ...base().instagram!, publicMediaUrlAvailable: false } }).checks.find((check) => check.id === "instagram_public_url")?.level, "blocked");
+  assert.equal(level(base(), "instagram_public_url"), "ready");
+  assert.equal(runPreflight({ ...base(), instagram: { ...base().instagram!, temporaryMediaAccessByItemId: { a: { status: "temporary_media_access_ready", publiclyReachable: false } } } }).checks.find((check) => check.id === "instagram_public_url")?.level, "blocked");
   assert.equal(level({ ...base(), instagram: { ...base().instagram!, accountType: "PERSONAL" } }, "instagram_account_type"), "blocked");
   assert.equal(level({ ...base(), instagram: { ...base().instagram!, grantedScopes: ["instagram_business_basic"] } }, "instagram_permissions"), "blocked");
   assert.equal(level({ ...base(), instagram: { ...base().instagram!, tokenExpiresAt: new Date("2026-01-01T00:00:00Z") } }, "instagram_token_expiry"), "blocked");
@@ -57,8 +58,8 @@ test("preflight blocks a personal account, a non-video, and an expired token, an
   assert.equal(level({ ...base(), instagram: { ...base().instagram!, mediaByItemId: { a: { kind: "video", mimeType: "video/mp4", durationMs: 1000, sizeBytes: 10 } } } }, "instagram_duration"), "blocked");
   assert.match(runPreflight(base()).checks.find((check) => check.id === "instagram_failures")?.message ?? "", /pauses new claims after 3/);
   const local = runPreflight({ ...base(), instagram: { ...base().instagram!, hasStoredToken: false } });
-  assert.equal(level({ ...base(), instagram: { ...base().instagram!, hasStoredToken: false } }, "instagram_token"), "recommendation");
-  assert.equal(local.canStart, true);
+  assert.equal(level({ ...base(), instagram: { ...base().instagram!, hasStoredToken: false } }, "instagram_token"), "blocked");
+  assert.equal(local.canStart, false);
 });
 
 test("stored PublishingJob rows set the pause count, and repeat mode is owner-checked", async () => {
@@ -67,11 +68,12 @@ test("stored PublishingJob rows set the pause count, and repeat mode is owner-ch
   repo.media.set("media1", makeMedia({ ownerId: "bob" }));
   repo.items.set("item1", makeItem({ id: "item1", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "media1", captionText: "Hello" }));
   repo.socialAccounts.set("acct", { id: "acct", userId: "bob", status: "connected", hasToken: true, accountType: "BUSINESS", grantedScopes: ["instagram_business_basic", "instagram_business_content_publish"], tokenExpiresAt: new Date("2026-08-01T00:00:00Z") });
-  for (const n of [1, 2, 3]) repo.publishingJobs.set(`job-${n}`, { id: `job-${n}`, cycleItemId: "item1", outcome: "definite_failure", startedAt: new Date(NOW.getTime() - n * 1000) });
-  repo.publishingJobs.set("older-success", { id: "older-success", cycleItemId: "item1", outcome: "success", startedAt: new Date(NOW.getTime() - 60_000) });
+  const history = (id: string, cycleItemId: string, outcome: PublishingAttemptRecord["outcome"], startedAt: Date, ownerId = "bob"): PublishingAttemptRecord => ({ id, ownerId, cycleId: ownerId === "bob" ? "cycle1" : "other", cycleItemId, socialAccountId: "acct", attemptNumber: 1, idempotencyKey: id, stage: outcome === "success" ? "published" : "failed", outcome, workerId: null, lockToken: null, leaseExpiresAt: null, containerId: null, instagramMediaId: null, errorCategory: null, errorDetails: null, createdAt: startedAt, updatedAt: startedAt, startedAt, finishedAt: startedAt });
+  for (const n of [1, 2, 3]) repo.publishingJobs.set(`job-${n}`, history(`job-${n}`, "item1", "definite_failure", new Date(NOW.getTime() - n * 1000)));
+  repo.publishingJobs.set("older-success", history("older-success", "item1", "success", new Date(NOW.getTime() - 60_000)));
   await repo.createCycle({ id: "other", ownerId: "ada", status: "draft", finalReviewConfirmed: false, name: "Other", socialAccountId: "acct" });
   repo.items.set("other-item", makeItem({ id: "other-item", cycleId: "other", cycleOwnerId: "ada" }));
-  repo.publishingJobs.set("other-job", { id: "other-job", cycleItemId: "other-item", outcome: "definite_failure", startedAt: new Date(NOW.getTime() + 1000) });
+  repo.publishingJobs.set("other-job", history("other-job", "other-item", "definite_failure", new Date(NOW.getTime() + 1000), "ada"));
   const bobJobs = await repo.listPublishingJobsForAccount("bob", "acct");
   assert.equal(bobJobs.some((job) => job.id === "other-job"), false);
   assert.equal(consecutiveDefiniteFailures(bobJobs), 3);

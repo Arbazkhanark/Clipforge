@@ -31,10 +31,10 @@ export function seedDemoData(repo: MemoryRepository, now: Date): void {
   );
 
   repo.socialAccounts.set("demo-account", { id: "demo-account", userId: DEMO_USER_ID, status: "connected" });
-  repo.cycles.set(DEMO_CYCLE_ID, { id: DEMO_CYCLE_ID, ownerId: DEMO_USER_ID, status: "draft", finalReviewConfirmed: false, name: "Sample cycle (nothing is published)", socialAccountId: "demo-account" });
+  repo.cycles.set(DEMO_CYCLE_ID, { id: DEMO_CYCLE_ID, ownerId: DEMO_USER_ID, status: "draft", finalReviewConfirmed: false, name: "Sample cycle (nothing is published)", socialAccountId: "demo-account", createdAt: new Date(now.getTime() - 7 * day) });
 
   const item = (n: number, over: Partial<CycleItem>): CycleItem => ({
-    id: `demo-item-${n}`, cycleId: DEMO_CYCLE_ID, cycleOwnerId: DEMO_USER_ID, mediaAssetId: `demo-media-${n}`, sourceKind: "owned", sourceCollectionId: null,
+    id: `demo-item-${n}`, cycleId: DEMO_CYCLE_ID, cycleOwnerId: DEMO_USER_ID, mediaAssetId: `demo-media-${n}`, selectedRenderOutputId: null, sourceKind: "owned", sourceCollectionId: null,
     status: "upcoming", position: n, version: 1, scheduledFor: null, captionText: "", captionSource: "none", coverMediaId: null, coverIsCustom: false, coverState: "none",
     lockedBy: null, lockExpiresAt: null, reviewReason: null, ...over,
   });

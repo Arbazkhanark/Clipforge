@@ -1,44 +1,33 @@
-# Feature status
+# Feature status and project audit
 
-Checked on 2026-11-06 against commit `bcb4bb3`. Test command: `npm test` on Node 22.23.4. Result: 395 passed, 1 skipped, 0 failed. That suite does not start Next.js or PostgreSQL.
+Checked 2026-11-08 against working tree based on `562c63c` on `main`. There are extensive pre-existing uncommitted changes. Classification: **A** implemented and locally verified; **B** implemented but mock-only/unverified against its provider; **C** partially implemented; **D** missing. Tests and type checks do not prove PostgreSQL, provider, production or operational behavior.
 
-Labels used here:
+| Feature | Class | Evidence and limits |
+|---|---|---|
+| Local authentication and account security | **A** | Local register/login/logout, one-use verification/reset tokens, secure session cookies, CSRF checks and rate limits are covered by tests and prior local HTTP/browser verification. Local accounts and mail outbox are in memory and reset on restart. |
+| Google sign-in | **B** | OAuth/id-token verification paths and tests exist; no real Google credentials or OAuth exchange was exercised. |
+| Media library and private local storage | **A** | Upload validation, quotas, owner checks, private local-disk/memory storage, download/range serving and media UI have automated and prior local flow coverage. No cloud storage or database persistence was verified. |
+| Editor and FFmpeg rendering | **C** | Settings, separate source/render outputs, FFmpeg validation and local render workflow exist. Local scheduling is in-process and lost on restart; durable render queue migration and actual queue recovery have not been verified against PostgreSQL. |
+| Collections and sharing | **C** | Collection ownership, listing and permission checks are tested. Access-request decisions and some import/deletion workflows remain incomplete; database persistence and real multi-user concurrency are unverified. |
+| Publishing cycles, scheduling and controls | **C** | Cycle creation, scheduling preview/save, selected render output, status transitions and preflight exist in domain/repository code. Migration files are present, but database application status is unknown; actual external publishing does not occur through cycle controls. |
+| Instagram OAuth, token security and eligibility | **B** | OAuth routes, one-use state, encrypted token storage/decryption boundary, refresh coordination and fail-closed eligibility have fake/memory tests. Meta OAuth, refresh, permissions and account status have not been tested with Meta. The OAuth-state migration is present; its database application status is unknown. |
+| Publishing worker and Instagram adapter | **C** | Durable attempt/lease code, standalone opt-in worker and official Graph API adapter code exist. Mock workflow tests pass; real PostgreSQL concurrency, Meta API behavior, public media reachability and live publishing are unverified. The worker is not started by Next.js or a configured deployment scheduler. |
+| Plan catalog and entitlement rules | **A** | Free, Creator, Pro and Agency catalog prices and limits are centralized and locally tested. Paid-plan entitlement depends on provider-confirmed records and pending schema; no payment was performed. |
+| Manual and recurring Razorpay billing | **B** | Owner-bound checkout intents, one-time Payment Links, subscription checkout, signatures, webhook reconciliation, cancellation, and sandbox-only API transport are tested with fake providers/fake Prisma. No Razorpay call, payment, webhook delivery, database transaction or client checkout was tested. |
+| Recurring subscription continuation | **C** | Same-subscription `PATCH remaining_count` continuation, cycle-scoped durable attempt reservation, cancellation fencing, and a one-shot opt-in runner are implemented and mock-tested. It extends only to Razorpay's documented 100-year maximum; at that boundary it enters manual review. No mechanism can promise unbounded renewal beyond that provider limit. The continuation migration is present; its database application status is unknown. |
+| Database schema and migrations | **C** | Prisma schema validates locally and migration files exist in order. Project documentation previously described the newer migrations as unapplied, but no `_prisma_migrations` history has been checked for any database; actual status is unknown. No database was connected or migration executed in this review, and fake-Prisma behavior does not verify constraints or row locks. |
+| Deployment and operations | **D** | No deployment manifest, production infrastructure, configured recurring worker scheduler, public-media host or production email service is present. Existing publishing and continuation commands require explicit opt-in and external process scheduling/configuration. |
 
-- **Complete and verified** — the intended behaviour is in the product path and was exercised successfully.
-- **Implemented but not verified** — code exists for the real dependency, and this audit did not run that dependency.
-- **Partially implemented** — a real slice exists and its unit tests passed, and the user-facing or production path is still incomplete.
-- **Not implemented** — no working path in the app.
-- **Blocked** — a required check failed, or the work needs an owner decision before it can continue.
+## Billing continuation design
 
-## Product areas
+Razorpay documents a finite `total_count` or `end_at` for subscription creation, a maximum duration of 100 years, and `remaining_count` as an update parameter for changing the existing subscription's total cycles. ClipForge does not create a replacement subscription. A one-shot runner fetches provider state, only acts when no cancellation is requested and ten or fewer cycles remain, records one attempt for the current period end, and updates the same provider subscription. A timeout or mismatch is manual review; it is never blindly retried. Razorpay notes that subscription updates can be unsupported for some payment modes (including UPI in its update docs); such cases require review rather than a replacement charge.
 
-| Area | Status | What exists | What is still missing |
-|---|---|---|---|
-| Accounts and security | Partially implemented | Register, confirm, login, logout, forgot-password, reset. Scrypt hashes, hashed session and email tokens, HttpOnly cookies, rate limit, enumeration-safe errors. Pages and `/api/auth/*`. Memory repository. Tests passed. | Production mode, PostgreSQL sessions, real email, Auth.js/Supabase (not chosen). `next dev` was not run, so `next/headers` is unverified. Local mode is refused in production on purpose. |
-| Ownership and private media | Partially implemented | Handlers return 404 for someone else's objects. Media routes re-check grants, support ranges, and set nosniff, CSP sandbox, and CORP. Tests passed, including the older Chromium harness recorded in `docs/VERIFICATION.md`. | Not re-run in Next.js. Not backed by PostgreSQL. |
-| Media library | Partially implemented | Upload with signature sniffing, ffprobe, quota, thumbnails, memory and local-disk storage. Library and detail pages. Collections are readable. | Files and rows disappear on restart unless a local folder is set, and even then the file list is memory-only. No S3. No malware scan. |
-| Video editor | Partially implemented | Aspect ratios 9:16, 4:5, 1:1, 16:9, original. Solid, sampled, and blurred backgrounds. Zoom, position, border, logo. Templates saved apart from the media file. FFmpeg command builder and a worker-style runner. Geometry tests compared a real render with the preview. | The editor page does not call the renderer. Templates are not applied to a whole cycle. Logo dragging was not bundled by the old harness. No job queue. |
-| Publishing cycles | Partially implemented | Create cycle, mix, unmix, bulk captions, bulk covers, start with preflight. Upcoming items only. Version checks. Schedule calculator and queue ordering. Tests passed. | Pause, resume, and stop exist as pure functions only. No worker publishes anything. No duplicate-publish guard has run against Instagram. |
-| Sharing | Partially implemented | Permission rules, share-link hashing, grant create/revoke API, recipient caps, 90-day delegate limit, import and deletion rules, usage rules. Collection screens are read-only. | No access-request approve/reject UI. No import or owner-deletion workflow in the app. No public share page. Permissions are not re-checked by a publisher because publishing does not run. |
-| Smart Publishing Assistant | Partially implemented | `runPreflight` returns Ready, Recommendation, Action Required, and Blocked. Panel component and the start-cycle handler call it. Tests passed. | Checks use local records only. No live Instagram eligibility, no real token, no previous platform errors from a real publish. |
-| Billing | Partially implemented | Catalog, entitlements, Razorpay HMAC helpers, idempotent webhook interpretation, subscription states. Unit tests passed. | No checkout, no subscription API call, no webhook HTTP route, no test-mode payment. Razorpay docs were read on 2026-10-28 and were not called. |
-| Instagram | Not implemented | A facts module records official limits and container states. The schema has `SocialAccount`. | No OAuth, no token storage implementation, no container create, no publish call. Some Reels requirements are still listed as unverified inside `instagram-capabilities.ts`. |
-| Background jobs | Not implemented | Domain functions describe claim, stale-lock recovery, and render usage. | No BullMQ, no worker process, no durable job row written by a running worker. |
-| Object storage (S3) | Blocked | The storage type allows the label `s3` and describes it as not connected. | Building or creating a bucket needs explicit approval. Keep using memory or `.local-media/` until then. |
-| Database persistence | Implemented but not verified | Prisma 7.10.1 schema validates. Mappers, `PrismaRepository`, and `PrismaAuthRepository` exist. Contract tests pass against a fake client. `prisma generate` writes a gitignored client. | No migration and no connection from the app. Local PostgreSQL asked for a password; none was supplied and no database was created. |
+This gives one provider subscription and no overlapping subscription billing periods. It does **not** establish literal infinite renewal: a subscription reaching Razorpay's 100-year maximum is placed in manual review. The recurring `worker:subscription-continuation` command is opt-in and must be scheduled by an operator; no scheduler is configured. The continuation migration `20261107092000_subscription_continuation` is present in the working tree; its database application status is unknown until verified from each target's migration history.
 
-## Checks that are not features
+## Verification
 
-| Check | Status |
-|---|---|
-| Automated unit and route tests (`npm test`) | Complete and verified on 2026-11-06 after the stability fixes: 395 passed, 1 skipped, 0 failed. |
-| Full `tsc --noEmit` | Complete and verified. Exit 0 on Node 22.23.4 after `prisma generate`. |
-| Next.js production build | Complete and verified. `npm run build` (Next.js 16.4.5) finished, including static page generation. |
-| Prisma validate / migrate | Validate passed on Prisma 7.10.1. Migrate was not started. |
-| Dependency lockfile | Pinned in `package.json` and matched by `package-lock.json`. `npm ci` succeeded. The lockfile is not committed yet. |
-| Secret scan of all 19 commits | Complete and verified as a scan: no cloud keys, private keys, or live payment keys. Matches were placeholders in `.env.example`, test fixtures, and message labels. Values were not copied into this doc. |
-| End-to-end tests on Next.js plus PostgreSQL | Not implemented. |
+- `npm test` under Node 22: **607 total, 600 passed, 7 skipped, 0 failed**.
+- No database connection or migration execution was performed in this review. Migration application status remains unknown. No Meta or Razorpay API call, real payment, Instagram post, cloud resource, deployment, commit or push was performed.
+- Official Razorpay docs reviewed: [Create Subscription](https://razorpay.com/docs/api/payments/subscriptions/create-subscription/), [Update Subscription](https://razorpay.com/docs/api/payments/subscriptions/update-subscription/) and [Cancel Subscription](https://razorpay.com/docs/api/payments/subscriptions/cancel-subscription/).
 
-## Older browser report
-
-Commit `bcb4bb3` includes a report of 18/18 Chromium checks against `scripts/verify-harness.ts`. That harness is not Next.js. This audit did not re-run `npm run verify:browser`. Treat that report as historical until it is repeated.
+ClipForge remains an early MVP, not production-ready.

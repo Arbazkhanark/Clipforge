@@ -32,6 +32,13 @@ export function MediaDetailView({ detail, timeZone }: { detail: MediaDetail; tim
       </section>
       <p><a href={fileUrl(m.id, "download")} download>Download the original</a></p>
       {m.kind === "video" && <p><a href={`/editor?media=${encodeURIComponent(m.id)}`}>Edit</a> <span className="muted">(editing settings are saved separately and never change this original)</span></p>}
+      {detail.importedCopy && <p className="muted">This is an independently imported copy in your library.</p>}
+      {!detail.importedCopy && detail.status === "pending_deletion" && <p className="muted">This original is scheduled for removal after {detail.deleteAfter?.toISOString() ?? "an unavailable date"}. Physical deletion is not available yet.</p>}
+      {!detail.importedCopy && detail.status === "active" && <section aria-labelledby="remove-media-heading" className="card">
+        <h2 id="remove-media-heading">Schedule original removal</h2>
+        <p>The request starts a seven-day grace period. A recipient import in progress blocks scheduling. ClipForge will not physically remove the file in this release.</p>
+        <form method="post" action="/api/forms/media-delete"><input type="hidden" name="mediaId" value={m.id} /><p><label><input type="checkbox" name="confirm" value="yes" required /> Schedule this original for removal after the grace period</label></p><button type="submit">Schedule removal</button></form>
+      </section>}
     </>
   );
 }

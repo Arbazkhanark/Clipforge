@@ -10,6 +10,7 @@ import { DEFAULT_EDITING_SETTINGS } from "../src/lib/domain/editing-settings.ts"
 import { publicRenderFailure, renderDiagnostic } from "../src/lib/render/render-errors.ts";
 import { MediaTable } from "../src/components/MediaTable.tsx";
 import { MediaDetailView } from "../src/components/MediaDetailView.tsx";
+import { BulkConfirmation, BulkForm } from "../src/components/BulkViews.tsx";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
 import { applyBulkEdit, clearBulkStateForTests, reviewBulkEdit, startBulkRender } from "../src/server/bulk/bulk-service.ts";
@@ -44,6 +45,12 @@ test("library: every video has an Edit button and a checkbox; images have neithe
   assert.equal(image.includes("/editor?media=p1"), false);
 });
 
+test("bulk form offers saved styles and makes trim copying an explicit choice", () => {
+  const html = renderToStaticMarkup(<BulkForm videos={[card("v1", "video", "Clip")]} images={[card("logo", "image", "Brand")]} templates={[{ id: "style1", name: "Brand look", summary: "1:1, zoom 2, border" }]} batchSize={5} />);
+  assert.ok(html.includes('name="styleTemplateId"') && html.includes("Brand look") && html.includes('name="copyTemplateTrim"'));
+  assert.ok(html.includes("trim is preserved"));
+});
+
 test("patch: only ticked settings change, and a colour is not forced onto a blurred video", () => {
   const current = { ...DEFAULT_EDITING_SETTINGS, zoom: 1.4, offsetX: 0.2, border: { thicknessPx: 6, colorHex: "#112233" } };
   const aspectOnly = applySettingsPatch(current, { aspect: "1:1" });
@@ -63,6 +70,14 @@ test("patch: only ticked settings change, and a colour is not forced onto a blur
   const noLogo = applySettingsPatch(current, { logoPosition: { centerX: 0.2, centerY: 0.3 } });
   assert.equal(noLogo.settings.logo, null);
   assert.ok(noLogo.notes.some((note) => note.includes("no logo")));
+});
+
+test("bulk form accepts an owned saved style exclusively and makes trim copying explicit", () => {
+  const selectedStyle = parseBulkForm((key) => ({ styleTemplateId: "style1", copyTemplateTrim: "yes" }[key]), (key) => key === "media" ? ["v1"] : []);
+  assert.deepEqual(selectedStyle, { ok: true, mediaIds: ["v1"], patch: {}, lines: [], styleTemplateId: "style1", copyTemplateTrim: true });
+  assert.equal(parseBulkForm((key) => ({ styleTemplateId: "style1" }[key]), (key) => key === "media" ? ["v1"] : []).ok, true);
+  assert.equal(parseBulkForm((key) => ({ styleTemplateId: "style1" }[key]), (key) => key === "media" ? ["v1"] : ["zoom"]).ok, false);
+  assert.equal(parseBulkForm((key) => ({ copyTemplateTrim: "yes" }[key]), (key) => key === "media" ? ["v1"] : ["aspect"]).ok, false);
 });
 
 test("render failures shown to a user never include a path", () => {
@@ -109,18 +124,68 @@ test("bulk review does not save, cancel leaves every video untouched, and apply 
   assert.equal(JSON.stringify([...repo.media.values()]), bytesBefore);
 });
 
-test("bulk: someone else's video is listed as not available and is not changed; a bad id is rejected", async () => {
-  const reviewed = await reviewBulkEdit(ctxFor("bob"), fields({ media: ["v1", "evevid", "poster"] }));
-  const { getBulkDraft } = await import("../src/server/bulk/bulk-service.ts");
-  const draft = getBulkDraft(reviewed.draftId)!;
-  assert.deepEqual(draft.videos.map((video) => video.title), ["One"]);
-  assert.equal(draft.skipped.length, 2);
-  assert.equal(JSON.stringify(draft).includes("Eve clip"), false);
-  await applyBulkEdit(ctxFor("bob"), { draftId: reviewed.draftId });
+test("bulk rejects missing, mixed-owner, and non-video selections without changing any selected media", async () => {
+  for (const ids of [["v1", "evevid"], ["v1", "poster"], ["v1", "missing"]]) {
+    await assert.rejects(() => reviewBulkEdit(ctxFor("bob"), fields({ media: ids })), AppError);
+  }
   assert.equal((await repo.listTemplatesForOwner("eve")).length, 0);
   assert.equal((await errorOf(reviewBulkEdit(ctxFor("bob"), fields({ media: ["../x"], use: ["aspect"], aspect: "1:1" })))).status, 422);
-  assert.equal((await errorOf(reviewBulkEdit(ctxFor("eve"), { draftId: reviewed.draftId }))).status, 422);
-  assert.equal((await errorOf(applyBulkEdit(ctxFor("eve"), { draftId: reviewed.draftId }))).status, 404);
+  assert.equal((await repo.listTemplatesForOwner("bob")).length, 0);
+});
+
+test("bulk applies an owned reusable style, preserving each video's trim unless copying is explicitly selected", async () => {
+  const templateSettings = { ...DEFAULT_EDITING_SETTINGS, aspect: "1:1" as const, background: { kind: "solid" as const, colorHex: "#aa1122" }, zoom: 2.4, offsetX: 0.3, offsetY: -0.25, border: { thicknessPx: 12, colorHex: "#ffffff" }, trim: { startSeconds: 0.2, endSeconds: 0.8 }, logo: { mediaId: "poster", widthFraction: 0.3, centerX: 0.4, centerY: 0.6, opacity: 0.7 } };
+  const saved = await saveEditingTemplate(ctxFor("bob"), { name: "Reel style", settings: templateSettings });
+  await saveCurrentVideoSettings(ctxFor("bob"), { mediaId: "v1", settings: { ...DEFAULT_EDITING_SETTINGS, trim: { startSeconds: 0.05, endSeconds: 0.9 } } });
+  await saveCurrentVideoSettings(ctxFor("bob"), { mediaId: "v2", settings: { ...DEFAULT_EDITING_SETTINGS, trim: { startSeconds: 0.1, endSeconds: 0.7 } } });
+  const reviewed = await reviewBulkEdit(ctxFor("bob"), { media: ["v1", "v2"], styleTemplateId: saved.templateId });
+  const { getBulkDraft } = await import("../src/server/bulk/bulk-service.ts");
+  const draft = getBulkDraft(reviewed.draftId)!;
+  assert.equal(draft.styleName, "Reel style");
+  assert.deepEqual(draft.videos.map((video) => video.after.trim), [{ startSeconds: 0.05, endSeconds: 0.9 }, { startSeconds: 0.1, endSeconds: 0.7 }]);
+  assert.deepEqual([draft.videos[0]!.after.zoom, draft.videos[0]!.after.offsetX, draft.videos[0]!.after.offsetY], [2.4, 0.3, -0.25]);
+  assert.deepEqual(draft.videos[0]!.after.logo, templateSettings.logo);
+  const reviewedMarkup = renderToStaticMarkup(<BulkConfirmation draft={draft} />);
+  assert.ok(reviewedMarkup.includes("Reel style") && reviewedMarkup.includes("preserved for each video") && reviewedMarkup.includes("Layout sketch") && reviewedMarkup.includes("data-preview-border") && reviewedMarkup.includes("data-preview-logo"));
+  await applyBulkEdit(ctxFor("bob"), { draftId: reviewed.draftId });
+  const rows = await repo.listTemplatesForOwner("bob");
+  const v1 = rows.find((row) => row.name === "v:v1")!.settings; const v2 = rows.find((row) => row.name === "v:v2")!.settings;
+  for (const applied of [v1, v2]) assert.deepEqual([applied.zoom, applied.offsetX, applied.offsetY, applied.border, applied.background, applied.logo], [2.4, 0.3, -0.25, templateSettings.border, templateSettings.background, templateSettings.logo]);
+  assert.deepEqual([v1.trim, v2.trim], [{ startSeconds: 0.05, endSeconds: 0.9 }, { startSeconds: 0.1, endSeconds: 0.7 }]);
+
+  const copyReview = await reviewBulkEdit(ctxFor("bob"), { media: ["v1", "v2"], styleTemplateId: saved.templateId, copyTemplateTrim: "yes" });
+  await applyBulkEdit(ctxFor("bob"), { draftId: copyReview.draftId });
+  const copiedRows = await repo.listTemplatesForOwner("bob");
+  assert.deepEqual([copiedRows.find((row) => row.name === "v:v1")!.settings.trim, copiedRows.find((row) => row.name === "v:v2")!.settings.trim], [templateSettings.trim, templateSettings.trim]);
+});
+
+test("bulk apply is atomic, audit failure rolls back every video, and retries/concurrent duplicates are idempotent", async () => {
+  await saveCurrentVideoSettings(ctxFor("bob"), { mediaId: "v1", settings: { ...DEFAULT_EDITING_SETTINGS, zoom: 1.25, offsetX: 0.1 } });
+  await saveCurrentVideoSettings(ctxFor("bob"), { mediaId: "v2", settings: { ...DEFAULT_EDITING_SETTINGS, zoom: 1.5, offsetY: -0.1 } });
+  const before = await repo.listTemplatesForOwner("bob");
+  const auditBefore = structuredClone(repo.audit);
+  const reviewed = await reviewBulkEdit(ctxFor("bob"), fields({ use: ["zoom", "offsetX"], zoom: "2", offsetX: "0.4" }));
+  repo.beforeBulkSettingsAuditInsert = () => false;
+  await assert.rejects(() => applyBulkEdit(ctxFor("bob"), { draftId: reviewed.draftId }));
+  assert.deepEqual(await repo.listTemplatesForOwner("bob"), before);
+  assert.deepEqual(repo.audit, auditBefore);
+  assert.equal(repo.audit.some((entry) => entry.action === "editor.bulk_applied"), false);
+  const { getBulkDraft } = await import("../src/server/bulk/bulk-service.ts");
+  assert.equal(getBulkDraft(reviewed.draftId)?.videos.every((video) => video.applyStatus === "failed"), true);
+  repo.beforeBulkSettingsAuditInsert = null;
+  const [first, second] = await Promise.all([applyBulkEdit(ctxFor("bob"), { draftId: reviewed.draftId }), applyBulkEdit(ctxFor("bob"), { draftId: reviewed.draftId })]);
+  assert.deepEqual([first.updated, second.updated], [2, 2]);
+  assert.equal((await repo.listTemplatesForOwner("bob")).length, 2);
+  assert.equal(repo.audit.filter((entry) => entry.action === "editor.bulk_applied").length, 1);
+});
+
+test("bulk confirmation rejects stale per-video settings instead of overwriting a concurrent editor save", async () => {
+  const reviewed = await reviewBulkEdit(ctxFor("bob"), fields({ use: ["zoom"], zoom: "2" }));
+  await saveCurrentVideoSettings(ctxFor("bob"), { mediaId: "v1", settings: { ...DEFAULT_EDITING_SETTINGS, zoom: 1.4 } });
+  await assert.rejects(() => applyBulkEdit(ctxFor("bob"), { draftId: reviewed.draftId }), (error: unknown) => error instanceof AppError && error.code === "conflict");
+  assert.equal((await repo.listTemplatesForOwner("bob")).filter((row) => row.name === "v:v1")[0]!.settings.zoom, 1.4);
+  assert.equal((await repo.listTemplatesForOwner("bob")).some((row) => row.name === "v:v2"), false);
+  assert.equal(repo.audit.some((entry) => entry.action === "editor.bulk_applied"), false);
 });
 
 test("bulk: the plan's batch size is enforced and nothing is written", async () => {
@@ -128,6 +193,23 @@ test("bulk: the plan's batch size is enforced and nothing is written", async () 
   const denied = await errorOf(reviewBulkEdit(ctxFor("bob"), fields({ media: ["v1", "v2", "v3", "v4", "v5", "v6"] })));
   assert.equal(denied.code, "plan_limit");
   assert.match(denied.message, /5 videos/);
+  assert.equal((await repo.listTemplatesForOwner("bob")).length, 0);
+});
+
+test("bulk apply rechecks entitlement after a reviewed promotional batch expires", async () => {
+  for (let i = 3; i <= 6; i++) repo.media.set(`v${i}`, makeMedia({ id: `v${i}`, ownerId: "bob", kind: "video", title: `V${i}`, width: 10, height: 10, durationMs: 1000, validation: "verified" }));
+  const promo = {
+    id: "promo-bulk", promotionId: "promotion-bulk", userId: "bob", redemptionId: null, kind: "tier_access" as const, activationPolicy: "immediate" as const, status: "active" as const, planId: "pro" as const,
+    durationDays: 3, queueSequence: 1n, startsAt: new Date(NOW.getTime() - 1), expiresAt: new Date(NOW.getTime() + 60_000), activatedAt: new Date(NOW.getTime() - 1), revokedAt: null,
+    grantedByAdminId: "admin", reason: null, createdAt: NOW, updatedAt: NOW,
+  };
+  repo.promotionalAccessGrants.set(promo.id, promo);
+  const reviewed = await reviewBulkEdit(ctxFor("bob"), fields({ media: ["v1", "v2", "v3", "v4", "v5", "v6"] }));
+  assert.equal(repo.promotionalAccessGrants.get(promo.id)?.status, "active");
+  repo.promotionalAccessGrants.set(promo.id, { ...promo, status: "revoked", revokedAt: NOW, expiresAt: NOW });
+  const denied = await errorOf(applyBulkEdit(ctxFor("bob"), { draftId: reviewed.draftId }));
+  assert.equal(denied.code, "plan_limit");
+  assert.match(denied.message, /current plan can edit 5 videos/);
   assert.equal((await repo.listTemplatesForOwner("bob")).length, 0);
 });
 
@@ -152,9 +234,9 @@ test("editor page keeps saved settings, and Reset returns to them", async () => 
   assert.equal(saved.settings.aspect, "16:9"); assert.equal(saved.settings.zoom, 1.25); assert.equal(saved.settingsSource, "saved");
   const preview = await getEditorPageData(ctxFor("bob"), { mediaId: "v1", search: { aspect: "1:1", zoom: "2" } });
   assert.equal(preview.settings.aspect, "1:1"); assert.equal(preview.settingsSource, "preview");
-  const page = renderToStaticMarkup(await EditorPage({ searchParams: { media: "v1" } }));
+  const page = renderToStaticMarkup(await EditorPage({ searchParams: Promise.resolve({ media: "v1" }) }));
   assert.ok(page.includes(">Undo</button>") && page.includes('href="/editor?media=v1"') && page.includes('href="/media/v1"') && page.includes("Save settings"));
-  assert.ok(page.includes("not a rendered video"));
+  assert.ok(page.includes("not pixel-identical"));
   setRuntimeForTests(null);
 });
 

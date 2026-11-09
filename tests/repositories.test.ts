@@ -2,13 +2,62 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
+import type { RenderJobRecord, Repository } from "../src/server/repository.ts";
 import { PrismaAuthRepository } from "../src/server/prisma/prisma-auth-repository.ts";
 import { cycleToRow, grantToRow, itemToMutableData, itemToRow, mediaToRow, rowToCollection, rowToGrant, rowToItem, rowToMedia } from "../src/server/prisma/mappers.ts";
 import { FakePrismaClient } from "./helpers/fake-prisma.ts";
 import { runRepositoryContract, type RepoHarness } from "./contracts/repository.contract.ts";
 import { runAuthRepositoryContract } from "./contracts/auth-repository.contract.ts";
 import { DEFAULT_EDITING_SETTINGS } from "../src/lib/domain/editing-settings.ts";
+import { resolveEffectiveEntitlement } from "../src/lib/billing/entitlement-resolver.ts";
 import { makeItem, makeMedia } from "./helpers.ts";
+
+test("fake Prisma bulk settings operation validates ownership and atomically writes video rows with its idempotent audit", async () => {
+  const client = new FakePrismaClient(); const repo = new PrismaRepository(client);
+  await client.user.create({ data: { id: "bob", email: "bob@example.test" } });
+  await client.user.create({ data: { id: "eve", email: "eve@example.test" } });
+  await client.mediaAsset.create({ data: mediaToRow(makeMedia({ id: "v1", ownerId: "bob", kind: "video" }), { storageKey: "key-v1", thumbnailKey: null }) });
+  await client.mediaAsset.create({ data: mediaToRow(makeMedia({ id: "v2", ownerId: "eve", kind: "video" }), { storageKey: "key-v2", thumbnailKey: null }) });
+  const input = {
+    ownerId: "bob", operationId: "draft1", operationFingerprint: "a".repeat(64),
+    templates: [{ id: "setting1", ownerId: "bob", name: "v:v1", settings: { ...DEFAULT_EDITING_SETTINGS, zoom: 2 }, createdAt: new Date("2026-11-09T00:00:00Z") }], expectedSettings: [{ name: "v:v1", settings: null }], requiredImageIds: [],
+    audit: { actorId: "bob", action: "editor.bulk_applied", entityType: "BulkEditDraft", entityId: "draft1", metadata: { operationFingerprint: "a".repeat(64), updated: 1 } },
+  };
+  assert.equal(await repo.applyVideoSettingsBatch(input), "applied");
+  assert.equal(await repo.applyVideoSettingsBatch(input), "existing");
+  assert.equal(client.editingTemplate.rows.length, 1);
+  assert.equal(client.auditLog.rows.length, 1);
+  const changed = { ...input, operationFingerprint: "b".repeat(64), audit: { ...input.audit, metadata: { operationFingerprint: "b".repeat(64) } } };
+  assert.equal(await repo.applyVideoSettingsBatch(changed), "conflict");
+  const stale = { ...input, operationId: "draft-stale", operationFingerprint: "d".repeat(64), templates: [{ ...input.templates[0]!, id: "setting-stale", settings: { ...DEFAULT_EDITING_SETTINGS, zoom: 3 } }], expectedSettings: [{ name: "v:v1", settings: DEFAULT_EDITING_SETTINGS }], audit: { ...input.audit, entityId: "draft-stale", metadata: { operationFingerprint: "d".repeat(64) } } };
+  assert.equal(await repo.applyVideoSettingsBatch(stale), "conflict");
+  assert.equal(client.editingTemplate.rows[0]?.["settings"] && (client.editingTemplate.rows[0]!["settings"] as typeof DEFAULT_EDITING_SETTINGS).zoom, 2);
+  const foreign = { ...input, operationId: "draft2", audit: { ...input.audit, entityId: "draft2" }, templates: [{ ...input.templates[0]!, id: "setting2", name: "v:v2" }], expectedSettings: [{ name: "v:v2", settings: null }] };
+  assert.equal(await repo.applyVideoSettingsBatch(foreign), "not_owned");
+  assert.equal(client.editingTemplate.rows.length, 1);
+  assert.deepEqual(client.lockLog.filter((entry) => entry === "user:bob").length, 5);
+});
+
+test("fake Prisma bulk settings transaction rolls back on audit failure and serializes concurrent retries", async () => {
+  const client = new FakePrismaClient(); const repo = new PrismaRepository(client);
+  await client.user.create({ data: { id: "bob", email: "bob@example.test" } });
+  await client.mediaAsset.create({ data: mediaToRow(makeMedia({ id: "v1", ownerId: "bob", kind: "video" }), { storageKey: "key-v1", thumbnailKey: null }) });
+  await client.mediaAsset.create({ data: mediaToRow(makeMedia({ id: "v2", ownerId: "bob", kind: "video" }), { storageKey: "key-v2", thumbnailKey: null }) });
+  const fingerprint = "c".repeat(64);
+  const input = {
+    ownerId: "bob", operationId: "draft-atomic", operationFingerprint: fingerprint,
+    templates: [{ id: "setting-atomic", ownerId: "bob", name: "v:v1", settings: { ...DEFAULT_EDITING_SETTINGS, zoom: 2 }, createdAt: new Date("2026-11-09T00:00:00Z") }, { id: "setting-atomic-2", ownerId: "bob", name: "v:v2", settings: { ...DEFAULT_EDITING_SETTINGS, zoom: 2 }, createdAt: new Date("2026-11-09T00:00:00Z") }], expectedSettings: [{ name: "v:v1", settings: null }, { name: "v:v2", settings: null }], requiredImageIds: [],
+    audit: { actorId: "bob", action: "editor.bulk_applied", entityType: "BulkEditDraft", entityId: "draft-atomic", metadata: { operationFingerprint: fingerprint, updated: 1 } },
+  };
+  client.auditLog.beforeCreate = () => { throw new Error("simulated audit failure"); };
+  await assert.rejects(() => repo.applyVideoSettingsBatch(input));
+  assert.equal(client.editingTemplate.rows.length, 0); assert.equal(client.auditLog.rows.length, 0);
+  client.auditLog.beforeCreate = null;
+  const results = await Promise.all([repo.applyVideoSettingsBatch(input), repo.applyVideoSettingsBatch(input)]);
+  assert.deepEqual(results.sort(), ["applied", "existing"]);
+  assert.equal(client.editingTemplate.rows.length, 2); assert.equal(client.auditLog.rows.length, 1);
+  assert.deepEqual(client.lockLog.filter((entry) => entry === "user:bob").length, 3);
+});
 
 function memoryHarness(): RepoHarness {
   const repo = new MemoryRepository();
@@ -31,7 +80,7 @@ function prismaHarness(): RepoHarness {
   const repo = new PrismaRepository(client, () => new Date("2026-06-01T12:00:00Z"));
   return {
     repo,
-    seedPlan: async (userId, planId) => { await client.subscription.create({ data: { userId, planId, interval: "monthly", status: "active", lastEventAt: 0n, trialEndsAt: null } }); },
+    seedPlan: async (userId, planId) => { const providerSubscriptionId = `sub_${userId}`; await client.subscription.create({ data: { userId, planId, interval: "monthly", status: "active", razorpaySubscriptionId: providerSubscriptionId, currentPeriodEnd: new Date("2026-07-01T12:00:00Z"), lastEventAt: 0n, trialEndsAt: null } }); await client.paymentRecord.create({ data: { userId, providerPaymentId: `pay_${userId}`, providerSubscriptionId, amountPaise: 1, currency: "INR", status: "captured" } }); },
     seedMedia: async (m, keys) => { await client.mediaAsset.create({ data: mediaToRow(m, keys ?? { storageKey: `k/${m.id}`, thumbnailKey: null }) }); },
     seedCollection: async (c) => {
       await client.videoCollection.create({ data: { id: c.id, ownerId: c.ownerId, name: c.name ?? c.id, description: c.description ?? null, visibility: c.visibility, archived: c.archived } });
@@ -48,19 +97,165 @@ function prismaHarness(): RepoHarness {
   };
 }
 
+const renderJob = (overrides: Partial<RenderJobRecord> = {}): RenderJobRecord => ({
+  id: "r1", ownerId: "alice", kind: "render", status: "queued", cycleItemId: null, mediaAssetId: "m1", progressPercent: 0, attempts: 0,
+  idempotencyKey: "render:alice:one", lockedBy: null, lockExpiresAt: null, errorMessage: null, createdAt: new Date("2026-11-07T00:00:00Z"),
+  finishedAt: null, settingsHash: "hash", payload: { aspect: "9:16" }, pendingOutputId: "out1", outputDerivativeId: null,
+  lockToken: null, ffmpegPid: null, ffmpegStartedAt: null, ...overrides,
+});
+
+async function verifyRenderJobRepository(label: string, repo: Repository, seedOwner: (ownerId: string) => Promise<void>): Promise<void> {
+  test(`${label}: durable render job create, lookup, owner isolation, idempotency and lock-checked updates`, async () => {
+    const first = renderJob();
+    assert.equal((await repo.createRenderJob(first)).status, "created");
+    assert.deepEqual(await repo.getRenderJobForOwner("r1", "alice"), first);
+    assert.equal(await repo.getRenderJobForOwner("r1", "mallory"), null);
+    assert.deepEqual(await repo.getRenderJobByIdempotencyKey(first.idempotencyKey, "alice"), first);
+    assert.equal(await repo.getRenderJobByIdempotencyKey(first.idempotencyKey, "mallory"), null);
+    assert.deepEqual(await repo.createRenderJob(renderJob({ id: "r2" })), { status: "existing", job: first });
+    assert.deepEqual(await repo.createRenderJob(renderJob({ id: "r3", ownerId: "mallory" })), { status: "conflict" });
+    await repo.createRenderJob(renderJob({ id: "r4", ownerId: "bob", idempotencyKey: "render:bob:one", createdAt: new Date("2026-11-07T00:02:00Z") }));
+    await repo.createRenderJob(renderJob({ id: "r5", ownerId: "alice", idempotencyKey: "render:alice:two", createdAt: new Date("2026-11-07T00:01:00Z") }));
+    assert.deepEqual((await repo.listRenderJobsForOwner("alice")).map((job) => job.id), ["r5", "r1"]);
+    assert.deepEqual((await repo.listRenderJobsForOwner("bob")).map((job) => job.id), ["r4"]);
+    await seedOwner("alice"); await seedOwner("bob");
+    const claimed = await repo.claimNextRenderJob({ workerId: "worker-a", now: new Date("2026-11-07T01:00:00Z"), leaseSeconds: 60 });
+    assert.ok(claimed); assert.equal(claimed.id, "r1"); assert.equal(claimed.status, "running"); assert.equal(claimed.attempts, 1);
+    assert.ok(claimed.lockToken); assert.equal(claimed.lockedBy, "worker-a"); assert.equal(claimed.lockExpiresAt?.toISOString(), "2026-11-07T01:01:00.000Z");
+    const token = claimed.lockToken!;
+    assert.equal(await repo.heartbeatRenderJob("r1", "alice", "wrong", new Date("2026-11-07T01:00:30Z"), 60), false);
+    assert.equal(await repo.heartbeatRenderJob("r1", "alice", token, new Date("2026-11-07T01:00:30Z"), 90), true);
+    assert.equal((await repo.getRenderJobForOwner("r1", "alice"))?.lockExpiresAt?.toISOString(), "2026-11-07T01:02:00.000Z");
+    assert.equal(await repo.updateRenderJobProgress("r1", "alice", "stale", 45), false);
+    assert.equal(await repo.updateRenderJobProgress("r1", "alice", token, 45), true);
+    assert.equal(await repo.updateRenderJobProgress("r1", "alice", token, 101), false);
+    assert.equal(await repo.completeRenderJob("r1", "alice", "stale", new Date(), "derivative-1"), false);
+    assert.equal(await repo.completeRenderJob("r1", "alice", token, new Date("2026-11-07T01:03:00Z"), "derivative-1"), true);
+    assert.equal((await repo.getRenderJobForOwner("r1", "alice"))?.status, "succeeded");
+    assert.equal(await repo.heartbeatRenderJob("r1", "alice", token, new Date(), 60), false);
+    const second = await repo.claimNextRenderJob({ workerId: "worker-b", now: new Date("2026-11-07T01:04:00Z"), leaseSeconds: 60 });
+    assert.ok(second); assert.equal(second.id, "r5");
+    assert.equal(await repo.failRenderJob(second.id, "alice", second.lockToken!, new Date("2026-11-07T01:05:00Z"), "safe failure"), true);
+    const bobJob = await repo.claimNextRenderJob({ workerId: "worker-c", now: new Date("2026-11-07T01:06:00Z"), leaseSeconds: 60 });
+    assert.ok(bobJob); assert.equal(bobJob.ownerId, "bob");
+    assert.equal(await repo.cancelRenderJob(bobJob.id, "bob", bobJob.lockToken!, new Date("2026-11-07T01:07:00Z")), true);
+  });
+}
+
+verifyRenderJobRepository("MemoryRepository", new MemoryRepository(), async () => {});
+const renderClient = new FakePrismaClient();
+verifyRenderJobRepository("PrismaRepository over FAKE client", new PrismaRepository(renderClient), async (ownerId) => {
+  await renderClient.user.create({ data: { id: ownerId, email: `${ownerId}@example.test` } });
+});
+
+const renderConcurrencyCases: { label: string; setup: () => { repo: Repository; seedOwner(ownerId: string): Promise<void> } }[] = [
+  { label: "MemoryRepository (simulated concurrency)", setup: () => { const repo = new MemoryRepository(); return { repo, seedOwner: async () => {} }; } },
+  { label: "PrismaRepository over FAKE client (simulated transaction serialization)", setup: () => {
+    const client = new FakePrismaClient(); const repo = new PrismaRepository(client);
+    return { repo, seedOwner: async (ownerId: string) => { await client.user.create({ data: { id: ownerId, email: `${ownerId}@example.test` } }); } };
+  } },
+];
+for (const { label, setup } of renderConcurrencyCases) {
+  test(`${label}: two workers cannot claim the same queued job`, async () => {
+    const { repo, seedOwner } = setup(); await seedOwner("alice");
+    await repo.createRenderJob(renderJob({ id: `${label}-single`, ownerId: "alice", idempotencyKey: `${label}:single` }));
+    const outcomes = await Promise.all(["worker-one", "worker-two"].map((workerId) => repo.claimNextRenderJob({ workerId, now: new Date("2026-11-07T02:30:00Z"), leaseSeconds: 45 })));
+    assert.equal(outcomes.filter((job) => job !== null).length, 1);
+    const stored = await repo.getRenderJobForOwner(`${label}-single`, "alice");
+    assert.equal(stored?.status, "running"); assert.equal(stored?.attempts, 1);
+  });
+  test(`${label}: claims are exclusive and plan concurrency limits are enforced per user`, async () => {
+    const { repo, seedOwner } = setup();
+    await seedOwner("alice"); await seedOwner("bob");
+    await repo.createRenderJob(renderJob({ id: `${label}-a1`, ownerId: "alice", idempotencyKey: `${label}:a1` }));
+    await repo.createRenderJob(renderJob({ id: `${label}-a2`, ownerId: "alice", idempotencyKey: `${label}:a2`, createdAt: new Date("2026-11-07T00:01:00Z") }));
+    await repo.createRenderJob(renderJob({ id: `${label}-b1`, ownerId: "bob", idempotencyKey: `${label}:b1`, createdAt: new Date("2026-11-07T00:02:00Z") }));
+    const claims = await Promise.all(["w1", "w2", "w3"].map((workerId) => repo.claimNextRenderJob({ workerId, now: new Date("2026-11-07T02:00:00Z"), leaseSeconds: 60 })));
+    const claimed = claims.filter((job): job is NonNullable<typeof job> => job !== null);
+    assert.equal(claimed.filter((job) => job.ownerId === "alice").length, 1, "free plan permits one running render");
+    assert.equal(claimed.filter((job) => job.ownerId === "bob").length, 1, "another account can claim independently");
+    assert.equal(claimed.length, 2);
+    assert.equal(new Set(claimed.map((job) => job.id)).size, claimed.length);
+    assert.equal(new Set(claimed.map((job) => job.lockToken)).size, claimed.length);
+    assert.equal(await repo.claimNextRenderJob({ workerId: "w4", now: new Date("2026-11-07T02:00:59Z"), leaseSeconds: 60 }), null);
+  });
+  test(`${label}: abandoned running jobs are reclaimed after lease expiry with a new fencing token`, async () => {
+    const { repo, seedOwner } = setup(); await seedOwner("alice");
+    await repo.createRenderJob(renderJob({ id: `${label}-stuck`, ownerId: "alice", status: "running", lockToken: "old-token", lockedBy: "lost-worker", lockExpiresAt: new Date("2020-01-01T00:00:00Z"), idempotencyKey: `${label}:stuck` }));
+    const recovered = await repo.claimNextRenderJob({ workerId: "new-worker", now: new Date("2026-11-07T02:00:00Z"), leaseSeconds: 60 });
+    assert.equal(recovered?.id, `${label}-stuck`);
+    assert.equal(recovered?.status, "running");
+    assert.notEqual(recovered?.lockToken, "old-token");
+    assert.equal(recovered?.attempts, 1);
+    assert.ok(recovered?.pendingOutputId);
+  });
+}
+
+test("Prisma claim locks the owner before counting and uses a conditional queued-to-running increment", async () => {
+  const client = new FakePrismaClient(); const calls: string[] = [];
+  const originalRaw = client.$queryRaw.bind(client);
+  client.$queryRaw = async (strings, ...values) => { calls.push(`lock:${strings.join("?").includes("FOR UPDATE")}`); return originalRaw(strings, ...values); };
+  const originalCount = client.processingJob.count.bind(client.processingJob);
+  client.processingJob.count = async (args) => { calls.push("count-running"); return originalCount(args); };
+  const seenUpdates: { where: unknown; data: unknown }[] = [];
+  const originalUpdateMany = client.processingJob.updateMany.bind(client.processingJob);
+  client.processingJob.updateMany = async (args) => { calls.push("claim-update"); seenUpdates.push({ where: args.where, data: args.data }); return originalUpdateMany(args); };
+  await client.user.create({ data: { id: "alice", email: "alice@example.test" } });
+  const repo = new PrismaRepository(client);
+  await repo.createRenderJob(renderJob());
+  assert.ok(await repo.claimNextRenderJob({ workerId: "worker", now: new Date("2026-11-07T03:00:00Z"), leaseSeconds: 30 }));
+  assert.deepEqual(calls, ["lock:true", "lock:true", "count-running", "claim-update"]);
+  assert.deepEqual(seenUpdates[0]?.where, { id: "r1", ownerId: "alice", kind: "render", status: "queued" });
+  assert.deepEqual(seenUpdates[0]?.data && (seenUpdates[0].data as Record<string, unknown>)["attempts"], { increment: 1 });
+});
+
 runRepositoryContract("MemoryRepository", memoryHarness);
 runRepositoryContract("PrismaRepository over FAKE client", prismaHarness);
 runAuthRepositoryContract("PrismaAuthRepository over FAKE client", () => new PrismaAuthRepository(new FakePrismaClient()));
 
 // ---------- behaviours specific to the Prisma implementation ----------
-test("subscription entitlement is computed from the stored state: trial counts only until it ends; halted/cancelled fall back to free", async () => {
+test("subscription entitlement preserves the original effectivePlanId status rules for legacy and current rows", async () => {
   const client = new FakePrismaClient(); const T = Math.floor(new Date("2026-06-01T12:00:00Z").getTime() / 1000);
   const repo = new PrismaRepository(client, () => new Date("2026-06-01T12:00:00Z"));
-  const sub = (userId: string, status: string, trialEndsAt: number | null) => client.subscription.create({ data: { userId, planId: "pro", interval: "weekly", status, lastEventAt: 0n, trialEndsAt: trialEndsAt === null ? null : BigInt(trialEndsAt) } });
-  await sub("trial", "authenticated", T + 100); await sub("trialOver", "authenticated", T - 1); await sub("active", "active", null); await sub("pending", "pending", null);
-  await sub("halted", "halted", null); await sub("cancelled", "cancelled", null); await sub("created", "created", T + 100);
-  const plans = Object.fromEntries(await Promise.all(["trial", "trialOver", "active", "pending", "halted", "cancelled", "created", "none"].map(async (u) => [u, await repo.getPlanIdForUser(u)])));
-  assert.deepEqual(plans, { trial: "pro", trialOver: "free", active: "pro", pending: "pro", halted: "free", cancelled: "free", created: "free", none: "free" });
+  const sub = (userId: string, status: string, trialEndsAt: number | null, providerSubscriptionId?: string) => client.subscription.create({ data: { userId, planId: "pro", interval: "weekly", status, ...(providerSubscriptionId ? { razorpaySubscriptionId: providerSubscriptionId, currentPeriodEnd: new Date((T + 100) * 1000) } : {}), lastEventAt: 0n, trialEndsAt: trialEndsAt === null ? null : BigInt(trialEndsAt) } });
+  await sub("trial", "authenticated", T + 100); await sub("trialOver", "authenticated", T - 1);
+  // Previous effectivePlanId only inspected status/trial expiry: these legacy rows have no
+  // PaymentRecord and no currentPeriodEnd, but active/pending have always been entitled.
+  await sub("activeLegacy", "active", null); await sub("pendingLegacy", "pending", null);
+  await sub("activeNoPayment", "active", null, "sub_no_payment");
+  await sub("halted", "halted", null); await sub("cancelled", "cancelled", null, "sub_cancelled"); await sub("expired", "expired", null, "sub_expired"); await sub("created", "created", T + 100);
+  await client.paymentRecord.create({ data: { userId: "cancelled", providerPaymentId: "pay_cancelled", providerSubscriptionId: "sub_cancelled", amountPaise: 1, currency: "INR", status: "captured" } });
+  const plans = Object.fromEntries(await Promise.all(["trial", "trialOver", "activeLegacy", "pendingLegacy", "activeNoPayment", "halted", "cancelled", "expired", "created", "none"].map(async (u) => [u, await repo.getPlanIdForUser(u)])));
+  assert.deepEqual(plans, { trial: "pro", trialOver: "free", activeLegacy: "pro", pendingLegacy: "pro", activeNoPayment: "pro", halted: "free", cancelled: "free", expired: "free", created: "free", none: "free" });
+});
+
+test("fake-Prisma plan lookup preserves active and pending entitlements with failed payment and no captured payment", async () => {
+  const client = new FakePrismaClient();
+  const now = new Date("2026-06-01T12:00:00Z");
+  const repo = new PrismaRepository(client, () => now);
+
+  for (const status of ["active", "pending"] as const) {
+    const userId = `failed-${status}`;
+    const providerSubscriptionId = `sub-failed-${status}`;
+    await client.subscription.create({ data: {
+      userId, planId: "pro", interval: "weekly", status, razorpaySubscriptionId: providerSubscriptionId,
+      lastEventAt: 0n, trialEndsAt: null, currentPeriodEnd: null,
+    } });
+    await client.paymentRecord.create({ data: {
+      userId, providerSubscriptionId, providerPaymentId: `pay-failed-${status}`, amountPaise: 1,
+      currency: "INR", status: "failed",
+    } });
+
+    const expected = resolveEffectiveEntitlement({
+      now,
+      subscription: {
+        planId: "pro", status, trialEndsAt: null, currentPeriodEnd: null, cancelAtPeriodEnd: false,
+        hasCapturedPayment: false, hasFailedPayment: true,
+      },
+    }).planId;
+    assert.equal(expected, "pro");
+    assert.equal(await repo.getPlanIdForUser(userId, now), expected, `${status} must retain the central resolver's legacy entitlement`);
+  }
 });
 
 test("the quota insert takes a lock inside ONE transaction before it counts (so concurrent uploads are serialised)", async () => {
@@ -111,4 +306,17 @@ test("a UNIQUE violation is reported as 'email taken', but unrelated database er
   assert.equal(await repo.createUser(u), true); assert.equal(await repo.createUser({ ...u, id: "u2" }), false);
   client.user.create = async () => { throw new Error("connection lost"); };
   await assert.rejects(() => repo.createUser({ ...u, id: "u3", email: "z@example.com" }), /connection lost/);
+});
+
+test("password reset rolls back the new password and the used token when session revocation fails", async () => {
+  const client = new FakePrismaClient(); const repo = new PrismaAuthRepository(client);
+  const now = new Date("2026-06-01T12:00:00Z");
+  await repo.createUser({ id: "u1", email: "a@example.com", emailVerifiedAt: now, passwordHash: "old", name: null, role: "user", createdAt: now });
+  await repo.createSession({ id: "s1", userId: "u1", tokenHash: "th", createdAt: now, lastUsedAt: now, expiresAt: new Date(now.getTime() + 60_000), revokedAt: null });
+  await repo.createAuthToken({ id: "t1", userId: "u1", kind: "password_reset", tokenHash: "reset", expiresAt: new Date(now.getTime() + 60_000), usedAt: null, createdAt: now });
+  client.session.updateMany = async () => { throw new Error("revocation failed"); };
+  await assert.rejects(() => repo.completePasswordReset({ tokenHash: "reset", now, passwordHash: "new", passwordProblems: () => [] }), /revocation failed/);
+  assert.equal((await repo.getUserById("u1"))!.passwordHash, "old");
+  assert.equal((await repo.getSessionByTokenHash("th"))!.revokedAt, null);
+  assert.equal((await client.authToken.findUnique({ where: { tokenHash: "reset" } }))!["usedAt"], null);
 });

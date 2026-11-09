@@ -4,8 +4,9 @@ import { MediaSelection } from "./MediaSelection.tsx";
 
 /** Small preview image. The browser asks our server for it; the server re-checks access on every request. */
 export function Thumbnail({ media }: { media: { id: string; hasThumbnail: boolean; kind?: "video" | "image" } }) {
-  if (media.hasThumbnail) return <img src={`/api/media/file?id=${encodeURIComponent(media.id)}&variant=thumbnail`} alt="" width={80} loading="lazy" />;
-  return <span className="muted">{media.kind === "video" ? "No preview image. The original video is unchanged." : "No preview image."}</span>;
+  const variant = media.hasThumbnail ? "thumbnail" : media.kind === "image" ? "preview" : null;
+  if (variant) return <img src={`/api/media/file?id=${encodeURIComponent(media.id)}&variant=${variant}`} alt="" width={80} loading="lazy" />;
+  return <span className="muted">No preview image. The original video is unchanged.</span>;
 }
 
 function mediaHref(library: MediaLibraryData, page: number): string {

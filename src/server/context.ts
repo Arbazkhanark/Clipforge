@@ -1,6 +1,7 @@
 import type { CoverSupport } from "../lib/domain/caption-cover-updates.ts";
 import type { MediaProbe, ThumbnailMaker } from "./storage/media-inspection.ts";
 import type { MediaStorage } from "./storage/media-storage.ts";
+import type { TemporaryMediaAccessAdapter } from "./storage/temporary-media-access.ts";
 import { notAuthenticated } from "./errors.ts";
 import type { RenderScheduler } from "./render/export-service.ts";
 import type { Repository } from "./repository.ts";
@@ -26,8 +27,12 @@ export interface RequestContext {
   config: { coverSupport: CoverSupport };
   /** Missing when no storage is configured: upload handlers then answer 503. */
   media?: MediaServices;
-  /** Present when this process can queue renders. The queue itself does not survive a restart. */
+  /** Optional trusted server adapter. Missing in current runtimes; never sent to browser code. */
+  publishingMediaAccess?: TemporaryMediaAccessAdapter;
+  /** Present when this process can execute renders; durable job state is stored through repo. */
   renders?: RenderScheduler;
+  /** Durable import requests are enabled only when both persistence and private storage are configured. */
+  durableMediaImports?: boolean;
 }
 
 export function requireUser(ctx: RequestContext): string {

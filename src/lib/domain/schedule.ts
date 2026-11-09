@@ -8,8 +8,8 @@ import { isEditableItem } from "./cycle-state.ts";
 import type { CycleItem } from "./types.ts";
 
 export const PLATFORM_LIMITS_NOTE =
-  "ClipForge checks Instagram's documented limit of 100 API-published posts per rolling 24 hours when you start a cycle. " +
-  "Other Instagram restrictions (such as video requirements) are not checked here and could still make a post fail.";
+  "This schedule check is an estimate, not an account quota check. The publishing worker verifies Instagram's live content_publishing_limit before each publish and blocks if unavailable or full. " +
+  "Published limit figures differ, so a schedule accepted here is not a guarantee that Instagram will accept it.";
 
 export interface ScheduleSettings {
   /** IANA name, e.g. "Asia/Kolkata". */
@@ -183,7 +183,10 @@ export function assignSlotsToItems(items: CycleItem[], slots: Date[]): ScheduleA
     unscheduledItemIds,
     items: items.map((item) => {
       const slot = newTimeById.get(item.id);
-      if (!slot) return item;
+      if (!slot) {
+        if (item.status !== "scheduled" || item.scheduledFor === null) return item;
+        return { ...item, status: "upcoming", scheduledFor: null, version: item.version + 1 };
+      }
       if (item.status === "scheduled" && item.scheduledFor?.getTime() === slot.getTime()) return item; // unchanged
       return { ...item, status: "scheduled", scheduledFor: slot, version: item.version + 1 };
     }),

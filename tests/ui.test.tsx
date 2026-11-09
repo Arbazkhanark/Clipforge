@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { PricingTable } from "../src/components/PricingTable.tsx";
 import { UsageMeter } from "../src/components/UsageMeter.tsx";
 import { CycleItemsTable } from "../src/components/CycleItemsTable.tsx";
+import { CycleScheduleForm } from "../src/components/CycleScheduleForm.tsx";
 import { PreflightPanel } from "../src/components/PreflightPanel.tsx";
 import { SchedulePreview } from "../src/components/SchedulePreview.tsx";
 import { ImportWarning } from "../src/components/ImportWarning.tsx";
@@ -18,6 +19,12 @@ import { describeUsageReset } from "../src/lib/domain/usage-accounting.ts";
 import { generateSlots } from "../src/lib/domain/schedule.ts";
 import { CYCLE_ITEM_STATUSES } from "../src/lib/domain/types.ts";
 import { makeItem, makeCycle, NOW } from "./helpers.ts";
+import { AuthForm } from "../src/components/AuthForm.tsx";
+import { FLASH_ERRORS, FLASH_NOTICES } from "../src/server/flash.ts";
+import { setRuntimeForTests, type Runtime } from "../src/server/runtime.ts";
+import LoginPage from "../app/login/page.tsx";
+import RegisterPage from "../app/register/page.tsx";
+import { withoutDatabaseEnv } from "./helpers/isolated-database.ts";
 import HomePage from "../app/page.tsx";
 import PricingPage from "../app/pricing/page.tsx";
 import RootLayout from "../app/layout.tsx";
@@ -33,12 +40,16 @@ test("pricing table shows the exact agreed prices for every plan, weekly and mon
   assert.match(out, /data-plan="pro"[\s\S]*Advanced sharing/);
 });
 
-test("pricing: no working buy button until billing is real; early-development notice is shown", () => {
+test("pricing: separate renewal choices are disabled until sandbox configuration is ready", () => {
   const out = html(<PricingTable />);
-  assert.ok(out.includes("cannot be purchased yet"));
-  assert.equal((out.match(/disabled/g) ?? []).length, 4);
+  assert.ok(out.includes("payment option stays unavailable"));
+  assert.equal((out.match(/disabled/g) ?? []).length, 12);
+  assert.ok(out.includes("type=\"checkbox\""));
+  assert.ok(out.includes("No automatic deductions"));
   assert.ok(!out.includes("Choose Pro"));
-  assert.ok(html(<PricingTable purchasable />).includes("Choose Pro"));
+  const enabled = html(<PricingTable subscriptionPurchasable={true} manualPurchasable={true} />);
+  assert.ok(enabled.includes("Subscribe monthly"));
+  assert.ok(enabled.includes("Pay once monthly"));
 });
 
 test("usage meter: ok / warning / over states, formatted storage, and the monthly reset notice", () => {
@@ -84,6 +95,17 @@ test("cycle table shows scheduled time in the user's time zone, and missing medi
   assert.ok(out.includes("9:00 am") || out.includes("9:00 AM")); assert.ok(out.includes("Unavailable video"));
 });
 
+test("cycle schedule UI shows editable settings, a planned preview, and validation state", () => {
+  const todayParts = new Intl.DateTimeFormat("en", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+  const today = `${todayParts.find((part) => part.type === "year")!.value}-${todayParts.find((part) => part.type === "month")!.value}-${todayParts.find((part) => part.type === "day")!.value}`;
+  const out = html(<CycleScheduleForm cycleId="cycle1" items={[{ id: "i1", position: 1, title: "First Reel.mp4" }]} initialSchedule={null} initialStartDate={today} timeZone="Asia/Kolkata" editable />);
+  for (const label of ["Start date", "Time zone", "Preferred publishing time", "Interval between publishing times (minutes)", "Publishing days", "Maximum per day (optional)", "Save Schedule", "Preview schedule", "Upcoming Reels preview", "First Reel.mp4", "planned dates in ClipForge only"]) assert.ok(out.includes(label), `missing ${label}`);
+  assert.ok(out.includes("name=\"timeZone\"")); assert.ok(out.includes("name=\"daysOfWeek\""));
+  const invalid = html(<CycleScheduleForm cycleId="cycle1" items={[]} initialSchedule={{ timeZone: "Asia/Kolkata", intervalMinutes: 0, postsPerInterval: 1, daysOfWeek: [], windowStart: "09:00", windowEnd: "09:00", dailyMax: null, endDate: null, startDate: today }} initialStartDate={today} timeZone="Asia/Kolkata" editable />);
+  assert.match(invalid, /disabled=""/);
+  assert.ok(invalid.includes("no editable videos to schedule yet"));
+});
+
 test("preflight panel shows level text, counts, and the unverified-limits note", () => {
   const items = [makeItem({ id: "a", captionText: "" })];
   const report = runPreflight({ cycle: makeCycle({ status: "draft" }), items, socialAccountStatus: "token_expired", scheduledItemsPerMonthLimit: 100, scheduledItemsUsedThisMonth: 0, coverSupport: "unknown", sourceAccessByItemId: { a: { allowed: true, reason: "ok" } } });
@@ -107,8 +129,8 @@ test("import warning shows every required warning and a required checkbox", () =
 });
 
 test("Instagram page shows connect and disconnect without a password or token", () => {
-  const out = html(<InstagramAccountsView configured={false} accounts={[{ id: "acct-1", username: "ada.clips", status: "connected", accountType: "BUSINESS", grantedScopes: ["instagram_business_content_publish"], tokenExpiresAt: "2026-08-01", hasToken: true }]} />);
-  for (const text of ["Connect Instagram", "not configured", "@ada.clips", "Disconnect", "required"]) assert.ok(out.includes(text), text);
+  const out = html(<InstagramAccountsView configured={false} accounts={[{ id: "acct-1", username: "ada.clips", status: "connected", accountType: "BUSINESS", grantedScopes: ["instagram_business_content_publish"], tokenExpiresAt: "2026-08-01", hasToken: true, eligibilityStatus: "missing_permissions" }]} />);
+  for (const text of ["Connect Instagram", "not configured", "@ada.clips", "Disconnect", "required", "missing required permissions"]) assert.ok(out.includes(text), text);
   assert.equal(out.includes("type=\"password\""), false);
 });
 
@@ -116,16 +138,54 @@ test("pages render: home is honest, pricing uses the catalog, layout is accessib
   const home = html(<HomePage />);
   assert.ok(home.includes("Early development")); assert.ok(!/testimonial|trusted by|\d+\+ (creators|users)/i.test(home));
   assert.ok(html(<PricingPage />).includes("₹3,999"));
-  const layout = html(await RootLayout({ children: <p>child</p> }));
-  assert.ok(layout.includes('<html lang="en">')); assert.ok(layout.includes("Skip to main content")); assert.ok(layout.includes('aria-label="Main"')); assert.ok(layout.includes("<p>child</p>"));
-  assert.ok(layout.includes('href="/login"')); assert.ok(layout.includes("Sign in")); assert.ok(!layout.includes("Signed in"));
+  await withoutDatabaseEnv(async () => {
+    setRuntimeForTests(null);
+    const layout = html(await RootLayout({ children: <p>child</p> }));
+    assert.ok(layout.includes('<html lang="en">')); assert.ok(layout.includes("Skip to main content")); assert.ok(layout.includes('aria-label="Main"')); assert.ok(layout.includes("<p>child</p>"));
+    assert.ok(layout.includes('href="/login"')); assert.ok(layout.includes("Sign in")); assert.ok(!layout.includes("Signed in"));
+  });
+});
+
+test("registration and sign-in copy matches database, local outbox, and unconfigured modes", async () => {
+  const outbox = html(<AuthForm mode="register" demoMode={false} available persistence="database" emailDelivery="outbox" />);
+  assert.ok(outbox.includes('data-auth-mode="database-outbox"'));
+  assert.ok(outbox.includes("local outbox"));
+  assert.ok(outbox.includes("No email is sent"));
+  assert.ok(outbox.includes("must be confirmed"));
+  assert.ok(!outbox.includes("stays unverified"));
+  assert.ok(!/we sent/i.test(outbox));
+  const unavailable = html(<AuthForm mode="login" demoMode={false} available persistence="database" emailDelivery="unavailable" />);
+  assert.ok(unavailable.includes('data-auth-mode="database"'));
+  assert.ok(unavailable.includes("no message is sent"));
+  assert.ok(unavailable.includes("stays unverified"));
+  const local = html(<AuthForm mode="login" demoMode={false} available persistence="memory" />);
+  assert.ok(local.includes('data-auth-mode="local"'));
+  assert.ok(local.includes("local outbox"));
+  assert.ok(local.includes("No email is sent"));
+  const off = html(<AuthForm mode="register" demoMode={false} available={false} />);
+  assert.ok(off.includes("not available yet"));
+  assert.ok(/<button type="submit" disabled/.test(off));
+  assert.ok(FLASH_NOTICES.registered.includes("No email was sent"));
+  assert.ok(!/we sent/i.test(FLASH_NOTICES.registered));
+  assert.ok(FLASH_ERRORS.email_not_verified.includes("No email was sent"));
+  const runtime = { mode: "database", emailDelivery: "outbox", auth: {}, currentUserId: async () => null, repo: {}, newId: () => "x", now: () => new Date(0) } as Runtime;
+  await withoutDatabaseEnv(async () => {
+    setRuntimeForTests(runtime);
+    try {
+      assert.ok(html(await LoginPage({})).includes('data-auth-mode="database-outbox"'));
+      assert.ok(html(await RegisterPage({})).includes('data-auth-mode="database-outbox"'));
+      setRuntimeForTests({ ...runtime, emailDelivery: "unavailable" });
+      assert.ok(html(await LoginPage({})).includes('data-auth-mode="database"'));
+      assert.ok(html(await LoginPage({})).includes("stays unverified"));
+    } finally { setRuntimeForTests(null); }
+  });
 });
 
 test("counts use the singular when there is one", () => {
   assert.equal(countNoun(1, "collection"), "collection");
   assert.equal(countNoun(0, "collection"), "collections");
   assert.equal(countNoun(2, "media file", "media files"), "media files");
-  const one = html(<DashboardView data={{ planId: "free", planName: "Free", timeZone: "UTC", resetNotice: "Resets monthly.", usage: { storage: { used: 0, limit: 1 }, processingMinutes: { used: 0, limit: 1 }, exports: { used: 0, limit: 1 }, scheduledItems: { used: 0, limit: 1 } }, counts: { media: 1, collections: 1, cycles: 1, runningCycles: 0 } }} />);
+  const one = html(<DashboardView data={{ planId: "free", planName: "Free", timeZone: "UTC", resetNotice: "Resets monthly.", usage: { storage: { used: 0, limit: 1 }, processingMinutes: { used: 0, limit: 1 }, exports: { used: 0, limit: 1 }, scheduledItems: { used: 0, limit: 1 } }, counts: { media: 1, collections: 1, cycles: 1, runningCycles: 0 }, campaigns: [], statusFilter: "all" }} />);
   assert.ok(one.includes("<strong>1</strong> media file")); assert.ok(!one.includes("media files"));
   assert.ok(one.includes("<strong>1</strong> collection")); assert.ok(!one.includes("collections"));
   assert.ok(one.includes("<strong>1</strong> publishing cycle")); assert.ok(!one.includes("publishing cycles"));

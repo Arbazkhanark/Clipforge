@@ -21,6 +21,7 @@ import { MemoryAuthRepository } from "./auth/memory-auth-repository.ts";
 import { MemoryEmailOutbox, createEmailSetup } from "./auth/email.ts";
 import { createRenderScheduler, type RenderScheduler } from "./render/export-service.ts";
 import type { AuthRepository } from "./auth/auth-repository.ts";
+import type { UserRole } from "./auth/auth-repository.ts";
 import { InMemoryRateLimiter } from "./auth/rate-limiter.ts";
 import { readSessionToken } from "./auth/tokens.ts";
 import { readPageCookieHeader } from "./auth/page-cookies.ts";
@@ -32,6 +33,10 @@ import { createPrismaClient } from "./prisma/create-client.ts";
 import { PrismaAuthRepository } from "./prisma/prisma-auth-repository.ts";
 import { PrismaRepository } from "./prisma/prisma-repository.ts";
 import type { PrismaClientLike } from "./prisma/prisma-client-like.ts";
+import { AuthTokenInstagramOAuthStateStore, type InstagramOAuthStateStore } from "./instagram/oauth-state-store.ts";
+import { createConfiguredTemporaryMediaAccessAdapter } from "./storage/temporary-media-access.ts";
+import { AdminDataService } from "./admin/data-service.ts";
+import { PrismaAdminDataRepository } from "./admin/data-repository.ts";
 
 export type RuntimeMode = "demo" | "unconfigured" | "local" | "database";
 export type EmailDelivery = "outbox" | "unavailable";
@@ -42,6 +47,8 @@ export interface Runtime {
   repo: Repository;
   /** Returns the signed-in user's id, or null. Demo mode has one fixed sample user. */
   currentUserId: (request?: Request) => Promise<string | null>;
+  /** Fresh session validation plus persisted role lookup. Missing in custom runtimes fails admin checks closed. */
+  currentPrincipal?: (request?: Request) => Promise<{ userId: string; role: UserRole } | null>;
   newId: () => string;
   now: () => Date;
   /** Upload services, or missing when uploads are unavailable (unconfigured mode). */
@@ -52,8 +59,13 @@ export interface Runtime {
   outbox?: MemoryEmailOutbox;
   /** "unavailable" means no email is sent and none is pretended. */
   emailDelivery?: EmailDelivery;
-  /** In-process render queue. Completed files stay in storage; this queue does not survive a restart. */
+  /** In-process execution queue. Render job records are persisted by the repository in database mode. */
   renders?: RenderScheduler;
+  /** One-use OAuth state backed by AuthToken (database mode) or memory (local mode). */
+  instagramOAuthStates?: InstagramOAuthStateStore;
+  publishingMediaAccess?: import("./storage/temporary-media-access.ts").TemporaryMediaAccessAdapter;
+  /** Database-backed, read-only cross-user Admin data. Absent in memory/demo modes by design. */
+  adminData?: () => Promise<AdminDataService>;
 }
 
 /** Default technical cap for one upload while files are buffered in memory (development only). */
@@ -125,6 +137,7 @@ function guardAuthRepository(inner: AuthRepository): AuthRepository {
     revokeAllSessionsForUser: (userId, at) => run(() => inner.revokeAllSessionsForUser(userId, at)),
     createAuthToken: (token) => run(() => inner.createAuthToken(token)),
     consumeAuthToken: (kind, tokenHash, now) => run(() => inner.consumeAuthToken(kind, tokenHash, now)),
+    completePasswordReset: (input) => run(() => inner.completePasswordReset(input)),
     invalidateAuthTokens: (userId, kind, now) => run(() => inner.invalidateAuthTokens(userId, kind, now)),
     getGoogleIdentityBySub: (googleSub) => run(() => inner.getGoogleIdentityBySub(googleSub)),
     getGoogleIdentityByUserId: (userId) => run(() => inner.getGoogleIdentityByUserId(userId)),
@@ -142,7 +155,7 @@ function guardAuthRepository(inner: AuthRepository): AuthRepository {
  */
 export function createDatabaseRuntime(connectionString: string, connect: DatabaseConnector = createPrismaClient, opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; mediaDir?: string | null; email?: ReturnType<typeof createEmailSetup> } = {}): Runtime {
   const now = opts.now ?? (() => new Date());
-  const ready = connect(connectionString).then((db) => ({ auth: new PrismaAuthRepository(db), content: new PrismaRepository(db, now) }));
+  const ready = connect(connectionString).then((db) => ({ auth: new PrismaAuthRepository(db), content: new PrismaRepository(db, now), adminData: new AdminDataService(new PrismaAdminDataRepository(db), now) }));
   void ready.catch(() => undefined);
   const authRepo: AuthRepository = guardAuthRepository({
     createUser: async (user) => (await ready).auth.createUser(user),
@@ -157,6 +170,7 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
     revokeAllSessionsForUser: async (userId, at) => (await ready).auth.revokeAllSessionsForUser(userId, at),
     createAuthToken: async (token) => (await ready).auth.createAuthToken(token),
     consumeAuthToken: async (kind, tokenHash, now) => (await ready).auth.consumeAuthToken(kind, tokenHash, now),
+    completePasswordReset: async (input) => (await ready).auth.completePasswordReset(input),
     invalidateAuthTokens: async (userId, kind, now) => (await ready).auth.invalidateAuthTokens(userId, kind, now),
     getGoogleIdentityBySub: async (googleSub) => (await ready).auth.getGoogleIdentityBySub(googleSub),
     getGoogleIdentityByUserId: async (userId) => (await ready).auth.getGoogleIdentityByUserId(userId),
@@ -166,11 +180,14 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
   const email = opts.email ?? createEmailSetup();
   const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? process.env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000"), requireVerifiedEmail: email.requireVerifiedEmail, ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };
   const auth = new AuthService({ repo: authRepo, email: email.sender, limiter: new InMemoryRateLimiter(), now, newId: () => randomUUID(), config });
+  const instagramOAuthStates = new AuthTokenInstagramOAuthStateStore(authRepo, () => randomUUID());
   const content = guardRepository(delegateRepository(async () => (await ready).content));
+  const publishingMediaAccess = createConfiguredTemporaryMediaAccessAdapter();
   return {
-    mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, renders: createRenderScheduler(), now, newId: () => randomUUID(),
+    mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => (await ready).adminData, now, newId: () => randomUUID(),
     media: databaseMediaServices(opts.mediaDir === undefined ? process.env["CLIPFORGE_LOCAL_MEDIA_DIR"] : opts.mediaDir),
     currentUserId: async (request) => auth.getSessionUserId(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
+    currentPrincipal: async (request) => auth.getSessionPrincipal(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
   };
 }
 
@@ -221,12 +238,14 @@ function demoMediaServices(): Promise<MediaServices> {
  */
 export function createLocalRuntime(opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; media?: () => Promise<MediaServices | null> } = {}): Runtime {
   const repo = new MemoryRepository(); const outbox = new MemoryEmailOutbox(); const now = opts.now ?? (() => new Date());
+  const authRepository = new MemoryAuthRepository();
   const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? "http://localhost:3000"), ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };
-  const auth = new AuthService({ repo: new MemoryAuthRepository(), email: outbox, limiter: new InMemoryRateLimiter(), now, newId: () => randomUUID(), config });
+  const auth = new AuthService({ repo: authRepository, email: outbox, limiter: new InMemoryRateLimiter(), now, newId: () => randomUUID(), config });
   return {
-    mode: "local", repo, auth, outbox, emailDelivery: "outbox", renders: createRenderScheduler(), now, newId: () => randomUUID(), media: opts.media ?? demoMediaServices,
+    mode: "local", repo, auth, outbox, emailDelivery: "outbox", renders: createRenderScheduler(), instagramOAuthStates: new AuthTokenInstagramOAuthStateStore(authRepository, () => randomUUID()), now, newId: () => randomUUID(), media: opts.media ?? demoMediaServices,
     // The cookie comes from the request when we have one (API routes); pages read it from Next.js's request headers.
     currentUserId: async (request) => auth.getSessionUserId(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
+    currentPrincipal: async (request) => auth.getSessionPrincipal(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
   };
 }
 
@@ -243,21 +262,23 @@ export function getRuntime(): Runtime {
     holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient);
     return holder.__clipforgeDatabaseRuntime;
   }
-  if (process.env["CLIPFORGE_DEMO_MODE"] === "true") {
+  if (process.env["CLIPFORGE_DEMO_MODE"] === "true" && process.env["NODE_ENV"] !== "production") {
     // Kept on globalThis so dev-server reloads do not recreate the sample data on every edit.
     const holder = globalThis as GlobalWithDemo;
     if (!holder.__clipforgeDemoRepo) { holder.__clipforgeDemoRepo = new MemoryRepository(); seedDemoData(holder.__clipforgeDemoRepo, new Date()); }
     let counter = 0;
-    return { mode: "demo", repo: holder.__clipforgeDemoRepo, currentUserId: async () => DEMO_USER_ID, media: demoMediaServices, renders: holder.__clipforgeDemoRenders ??= createRenderScheduler(), newId: () => `demo-${Date.now().toString(36)}-${++counter}`, now: () => new Date() };
+    return { mode: "demo", repo: holder.__clipforgeDemoRepo, currentUserId: async () => DEMO_USER_ID, currentPrincipal: async () => ({ userId: DEMO_USER_ID, role: "user" }), media: demoMediaServices, renders: holder.__clipforgeDemoRenders ??= createRenderScheduler(), newId: () => `demo-${Date.now().toString(36)}-${++counter}`, now: () => new Date() };
   }
-  return { mode: "unconfigured", repo: unavailableRepository(), currentUserId: async () => null, newId: () => { throw new AppError(503, "not_configured", "Not configured."); }, now: () => new Date() };
+  return { mode: "unconfigured", repo: unavailableRepository(), currentUserId: async () => null, currentPrincipal: async () => null, newId: () => { throw new AppError(503, "not_configured", "Not configured."); }, now: () => new Date() };
 }
 
 export async function buildContext(runtime: Runtime = getRuntime(), request?: Request): Promise<RequestContext> {
+  const media = runtime.media ? await runtime.media() : null;
   return {
-    userId: await runtime.currentUserId(request), now: runtime.now(), repo: runtime.repo, newId: runtime.newId, ...(runtime.renders ? { renders: runtime.renders } : {}),
-    // Whether Instagram accepts the cover is unverified in detail, so we say "unknown" until the publisher confirms.
-    config: { coverSupport: "unknown" },
-    ...(runtime.media ? await (async () => { const media = await runtime.media!(); return media ? { media } : {}; })() : {}),
+    userId: await runtime.currentUserId(request), now: runtime.now(), repo: runtime.repo, newId: runtime.newId, ...(runtime.renders ? { renders: runtime.renders } : {}), ...(runtime.publishingMediaAccess ? { publishingMediaAccess: runtime.publishingMediaAccess } : {}),
+    // Meta's maintained Reels publishing sample documents cover_url; real account delivery is not live-verified.
+    config: { coverSupport: "supported" },
+    ...(media ? { media } : {}),
+    ...(runtime.mode === "database" && media && !media.unavailable && media.storage.kind !== "memory" ? { durableMediaImports: true } : {}),
   };
 }

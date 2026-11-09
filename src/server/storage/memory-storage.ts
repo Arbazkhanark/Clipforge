@@ -35,7 +35,8 @@ export class MemoryMediaStorage implements MediaStorage {
 
   async discardStaged(stagingKey: string): Promise<void> { parseStorageKey(stagingKey); this.staged.delete(stagingKey); }
   async exists(key: string): Promise<boolean> { parseStorageKey(key); return this.objects.has(key); }
-  async statSize(key: string): Promise<number | null> { parseStorageKey(key); return this.objects.get(key)?.length ?? null; }
+  async statSize(key: string): Promise<number | null> { parseStorageKey(key); return this.objects.get(key)?.length ?? this.staged.get(key)?.length ?? null; }
+  async getPrivateMetadata(key: string) { const sizeBytes = await this.statSize(key); return sizeBytes === null ? null : { sizeBytes, storageKind: this.kind }; }
   async openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>> {
     parseStorageKey(key);
     const bytes = this.objects.get(key);
@@ -58,5 +59,14 @@ export class MemoryMediaStorage implements MediaStorage {
     const bytes = await readFile(sourcePath);
     this.objects.set(finalKey, bytes);
     return bytes.length;
+  }
+  async copyCommittedToStaging(sourceKey: string, stagingKey: string, assertLease?: () => void): Promise<number> {
+    assertLease?.();
+    parseStorageKey(sourceKey); parseStorageKey(stagingKey);
+    const bytes = this.objects.get(sourceKey);
+    if (!bytes) throw new Error("No such object.");
+    if (this.staged.has(stagingKey)) throw new Error("An object already exists under that key.");
+    this.staged.set(stagingKey, bytes.slice());
+    return bytes.byteLength;
   }
 }

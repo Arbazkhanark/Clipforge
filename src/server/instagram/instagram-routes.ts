@@ -7,6 +7,7 @@ import { readUrlEncoded, redirectResponse } from "../form-routes.ts";
 import { getRuntime, type Runtime } from "../runtime.ts";
 import { useSecureCookies } from "../auth/auth-routes.ts";
 import { encryptToken } from "./token-cipher.ts";
+import { isValidInstagramConnectionProfile } from "../../lib/integrations/instagram-eligibility.ts";
 import {
   buildInstagramAuthorizationUrl, buildInstagramStateCookie, clearInstagramStateCookie, exchangeInstagramCode,
   instagramSafeEqual, readInstagramOAuthConfig, readInstagramStateCookie, createInstagramState,
@@ -45,8 +46,10 @@ export const instagramStartRoute = (options: InstagramRouteOptions = {}) => asyn
   const userId = await runtime.currentUserId(request);
   if (!userId) return finish(secure, "not_authenticated");
   const config = options.config === undefined ? readInstagramOAuthConfig() : options.config;
-  if (!config) return finish(secure, "instagram_not_configured");
+  if (!config || !runtime.instagramOAuthStates) return finish(secure, "instagram_not_configured");
   const state = createInstagramState();
+  try { await runtime.instagramOAuthStates.issue(state, userId, (options.now ?? (() => new Date()))()); }
+  catch { return finish(secure, "instagram_callback_error"); }
   return withCookies(buildInstagramAuthorizationUrl(config, state), [buildInstagramStateCookie(state, secure)]);
 };
 
@@ -55,19 +58,21 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
   const runtime = (options.runtime ?? getRuntime)();
   const secure = useSecureCookies(request);
   const config = options.config === undefined ? readInstagramOAuthConfig() : options.config;
-  if (!config) return finish(secure, "instagram_not_configured");
   const url = new URL(request.url);
+  const state = url.searchParams.get("state") ?? "";
+  const cookieState = readInstagramStateCookie(request.headers.get("cookie"), secure);
+  if (!cookieState || !STATE_PATTERN.test(state) || !instagramSafeEqual(cookieState, state)) return finish(secure, "instagram_invalid_state");
+  const now = (options.now ?? (() => new Date()))();
+  const stateOwnerId = await runtime.instagramOAuthStates?.consume(state, now) ?? null;
+  if (!stateOwnerId) return finish(secure, "instagram_invalid_state");
+  const userId = await runtime.currentUserId(request);
+  if (!userId || userId !== stateOwnerId) return finish(secure, "not_authenticated");
   const providerError = url.searchParams.get("error");
   if (providerError === "access_denied") return finish(secure, "instagram_cancelled");
   if (providerError) return finish(secure, "instagram_callback_error");
-  const state = url.searchParams.get("state") ?? "";
+  if (!config) return finish(secure, "instagram_not_configured");
   const code = url.searchParams.get("code") ?? "";
-  const cookieState = readInstagramStateCookie(request.headers.get("cookie"), secure);
-  if (!cookieState || !STATE_PATTERN.test(state) || !instagramSafeEqual(cookieState, state)) return finish(secure, "instagram_invalid_state");
   if (!CODE_PATTERN.test(code)) return finish(secure, "instagram_callback_error");
-  const userId = await runtime.currentUserId(request);
-  if (!userId) return finish(secure, "not_authenticated");
-  const now = (options.now ?? (() => new Date()))();
   let exchanged: InstagramExchangeResult;
   try {
     exchanged = options.exchange ? await options.exchange({ code, now }) : await exchangeInstagramCode({ config, code, now });
@@ -78,13 +83,17 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
     const codeByReason = { expired_code: "instagram_expired_code", callback_error: "instagram_callback_error", missing_permission: "instagram_missing_permission", unsupported_account: "instagram_unsupported_account" } as const;
     return finish(secure, codeByReason[exchanged.reason]);
   }
+  if (!isValidInstagramConnectionProfile(exchanged.profile, now)) return finish(secure, "instagram_unsupported_account");
   try {
-    await runtime.repo.saveInstagramConnection({
+    const connection = {
       id: runtime.newId(), userId, externalAccountId: exchanged.profile.externalAccountId, username: exchanged.profile.username,
       accountType: exchanged.profile.accountType, grantedScopes: exchanged.profile.grantedScopes, tokenExpiresAt: exchanged.profile.tokenExpiresAt,
       encryptedAccessToken: encryptToken(config.tokenKey, exchanged.profile.accessToken),
-    });
-    await runtime.repo.appendAudit({ actorId: userId, action: "instagram.connected", entityType: "SocialAccount", entityId: exchanged.profile.externalAccountId });
+    };
+    await runtime.repo.getPlanIdForUser(userId, now); // activates any now-eligible queued grant before the locked account-cap check
+    const saved = await runtime.repo.saveInstagramConnectionWithinLimit(connection, now);
+    if (saved.status === "limit") return finish(secure, "plan_limit");
+    await runtime.repo.appendAudit({ actorId: userId, action: "instagram.connected", entityType: "SocialAccount", entityId: saved.accountId });
   } catch (error) {
     if (error instanceof AppError && error.code === "database_unavailable") return finish(secure, "database_unavailable");
     return finish(secure, "instagram_callback_error");

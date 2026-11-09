@@ -8,6 +8,7 @@
 //    that was written a moment earlier and never got a database record (see `deleteUnreferencedUpload`).
 
 export type StorageKind = "memory" | "local-disk" | "s3";
+export interface PrivateStorageMetadata { sizeBytes: number; storageKind: StorageKind; }
 
 export interface MediaStorage {
   readonly kind: StorageKind;
@@ -25,6 +26,8 @@ export interface MediaStorage {
   exists(key: string): Promise<boolean>;
   /** Size in bytes of a committed object, or null if it does not exist. */
   statSize(key: string): Promise<number | null>;
+  /** Private object facts only. Never includes a path, storage key, URL, or bucket name. */
+  getPrivateMetadata(key: string): Promise<PrivateStorageMetadata | null>;
   /** Streams a committed object (optionally just bytes start..end inclusive). For server use only: never hand a path or key to a browser. */
   openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>>;
   /**
@@ -42,6 +45,8 @@ export interface MediaStorage {
    * Returns the stored size. The source file is left in place for the caller to delete.
    */
   importLocalFile(finalKey: string, sourcePath: string): Promise<number>;
+  /** Copies an existing private object to a fresh key without exposing its storage path. */
+  copyCommittedToStaging(sourceKey: string, stagingKey: string, assertLease?: () => void): Promise<number>;
 }
 
 export class InvalidStorageKeyError extends Error {

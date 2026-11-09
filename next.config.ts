@@ -2,6 +2,17 @@
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // These URLs contain one-use credentials in their query strings. Next.js dev request logging
+  // prints full URLs, so suppress only these sensitive routes in development logs.
+  logging: {
+    incomingRequests: {
+      ignore: [
+        /\/(?:verify-email|reset-password)(?:\?|$)/,
+        /\/api\/(?:instagram|auth\/google)\/callback(?:\?|$)/,
+        /\/api\/publishing-media\//,
+      ],
+    },
+  },
   // The dev server is opened at 127.0.0.1 as well as localhost. Pages still render if this socket is down.
   allowedDevOrigins: ["127.0.0.1"],
 };

@@ -5,13 +5,15 @@ import { batchJobs, getRenderBatch } from "../../../../src/server/bulk/bulk-serv
 import { notFound } from "../../../../src/server/errors.ts";
 import { parseFlash } from "../../../../src/server/flash.ts";
 import { loadPageData } from "../../../../src/server/page-data.ts";
+import { requireCustomerPage } from "../../../../src/server/auth/customer-page.ts";
 
 export const metadata = { title: "Render batch" };
 export const dynamic = "force-dynamic";
 
 type Search = Record<string, string | string[] | undefined>;
 
-export default async function BatchPage(props: { searchParams?: Promise<Search> | Search } = {}) {
+export default async function BatchPage(props: { searchParams?: Promise<Search> }) {
+  await requireCustomerPage("/editor/batch");
   const search = await props.searchParams;
   const batchId = typeof search?.["batch"] === "string" ? search["batch"] : "";
   const result = await loadPageData(async (ctx) => {

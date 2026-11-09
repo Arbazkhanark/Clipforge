@@ -1,5 +1,5 @@
 // Export pipeline. Real FFmpeg cases are skipped when ffmpeg or ffprobe is missing.
-// The database case runs only when DATABASE_URL was set at process start.
+// The database case runs only when DATABASE_URL is the isolated local database at process start.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -9,6 +9,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { getPlan } from "../src/lib/billing/catalog.ts";
+import { toRenderSettings, type EditingSettings } from "../src/lib/domain/editing-settings.ts";
+import { hashExportSettings } from "../src/lib/render/render-limits.ts";
 import { probeVideo, readPixel } from "../src/lib/render/render-runner.ts";
 import { AppError } from "../src/server/errors.ts";
 import { serveRender } from "../src/server/handlers/render-serve.ts";
@@ -16,17 +18,19 @@ import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { createPrismaClient } from "../src/server/prisma/create-client.ts";
 import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
 import type { PrismaClientLike } from "../src/server/prisma/prisma-client-like.ts";
-import { createRenderScheduler, startExport, type ExportRunner } from "../src/server/render/export-service.ts";
+import { createRenderScheduler, runNextPersistedRenderJob, startExport, type ExportRunner } from "../src/server/render/export-service.ts";
+import type { RenderJobRecord } from "../src/server/repository.ts";
 import type { RequestContext } from "../src/server/context.ts";
 import { LocalDiskMediaStorage } from "../src/server/storage/local-disk-storage.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
 import { mediaKeyFor } from "../src/server/storage/media-storage.ts";
 import { makeCollection, makeGrant, makeMedia, NOW } from "./helpers.ts";
+import { isolatedDatabaseUrl } from "./helpers/isolated-database.ts";
 
 const ffmpegAvailable = spawnSync("ffmpeg", ["-version"]).status === 0 && spawnSync("ffprobe", ["-version"]).status === 0;
-const databaseUrlAtStart = process.env["DATABASE_URL"];
+const databaseUrlAtStart = isolatedDatabaseUrl();
 const hasDatabase = Boolean(databaseUrlAtStart);
-const until = async (ready: () => boolean) => { for (let i = 0; i < 200; i++) { if (ready()) return; await new Promise((resolve) => setTimeout(resolve, 50)); } assert.fail("timed out waiting for a render"); };
+const until = async (ready: () => boolean | Promise<boolean>) => { for (let i = 0; i < 200; i++) { if (await ready()) return; await new Promise((resolve) => setTimeout(resolve, 50)); } assert.fail("timed out waiting for a render"); };
 
 function context(repo: MemoryRepository, storage: MemoryMediaStorage, userId: string, renders = createRenderScheduler(1)): RequestContext {
   return { userId, now: NOW, repo, newId: () => `job${++counter}`, config: { coverSupport: "unknown" }, media: { storage, probe: null, maxUploadBytes: 200 * 1024 * 1024 }, renders };
@@ -56,6 +60,47 @@ test("invalid settings and someone else's video are refused before a render star
   await assert.rejects(() => startExport(ctx, { mediaId: "evevid", settings }), (error: unknown) => error instanceof AppError && error.status === 404);
   assert.equal(renders.jobs.size, 0);
   assert.deepEqual([...storage.objects.keys()], [mediaKeyFor("bob", "v1")]);
+});
+
+test("export validates trim against the server-side source duration and passes the normalized range to FFmpeg", async () => {
+  const { repo, storage } = library();
+  const renders = createRenderScheduler(1);
+  const ctx = context(repo, storage, "bob", renders);
+  const invalid = await assert.rejects(() => startExport(ctx, { mediaId: "v1", settings: { ...settings, trim: { startSeconds: 0.2, endSeconds: 1.001 } } }), (error: unknown) => error instanceof AppError && error.status === 422);
+  assert.equal(invalid, undefined);
+  assert.equal((await repo.listRenderJobsForOwner("bob")).length, 0);
+  let seenTrim: unknown;
+  const runner: ExportRunner = { async render(args) { seenTrim = args.settings.trim; return { succeeded: false, outputValidated: false, problems: ["stopped"], processingSeconds: 0, outputProbe: null }; } };
+  const job = await startExport(ctx, { mediaId: "v1", settings: { ...settings, trim: { startSeconds: 0.2, endSeconds: 0.8 } } }, runner);
+  await until(() => renders.jobs.get(job.jobId)?.status === "failed");
+  assert.deepEqual(seenTrim, { startSeconds: 0.2, endSeconds: 0.8 });
+});
+
+test("trim choices participate in normalized render-job idempotency without changing full-video compatibility", async () => {
+  const { repo, storage } = library();
+  const renders = createRenderScheduler(0);
+  const ctx = context(repo, storage, "bob", renders);
+  const full = await startExport(ctx, { mediaId: "v1", settings });
+  const legacyFull = await startExport(ctx, { mediaId: "v1", settings: { ...settings, trim: { startSeconds: 0, endSeconds: null } } });
+  assert.equal(legacyFull.jobId, full.jobId, "legacy settings and normalized no-trim settings reuse the same export job");
+  const trimmed = await startExport(ctx, { mediaId: "v1", settings: { ...settings, trim: { startSeconds: 0, endSeconds: 0.75 } } });
+  assert.notEqual(trimmed.jobId, full.jobId);
+  assert.equal((await repo.listRenderJobsForOwner("bob")).length, 2);
+});
+
+test("active promotional Creator tier supplies the catalog processing allowance to exports", async () => {
+  const { repo, storage } = library();
+  repo.promotionalAccessGrants.set("promo-bob", {
+    id: "promo-bob", promotionId: "promotion-bob", userId: "bob", redemptionId: null, kind: "tier_access", activationPolicy: "immediate", status: "active", planId: "creator",
+    durationDays: 3, queueSequence: 1n, startsAt: new Date(NOW.getTime() - 1), expiresAt: new Date(NOW.getTime() + 3 * 86_400_000), activatedAt: new Date(NOW.getTime() - 1), revokedAt: null,
+    grantedByAdminId: "admin", reason: null, createdAt: NOW, updatedAt: NOW,
+  });
+  repo.setUsage("bob", new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth(), 1)), { processingSeconds: getPlan("free").limits.processingMinutesPerMonth * 60, exports: 0, scheduledItems: 0 });
+  const renders = createRenderScheduler(1);
+  const runner: ExportRunner = { async render() { return { succeeded: false, outputValidated: false, problems: ["stopped"], processingSeconds: 0, outputProbe: null }; } };
+  const job = await startExport(context(repo, storage, "bob", renders), { mediaId: "v1", settings }, runner);
+  assert.ok(job.jobId, "Creator processing allowance permits a request beyond the Free monthly limit");
+  await until(() => renders.jobs.get(job.jobId)?.status === "failed");
 });
 
 test("a granted video can be rendered and an unknown email-style path is never used", async () => {
@@ -112,6 +157,64 @@ test("only one render runs at a time when the process limit is one", async () =>
   release();
   await until(() => renders.jobs.get(first.jobId)?.status === "failed" && renders.jobs.get(second.jobId)?.status === "failed");
   assert.equal(started, 2);
+});
+
+test("export requests are persisted before execution and duplicate active requests reuse one durable job", async () => {
+  const { repo, storage } = library();
+  const renders = createRenderScheduler(1);
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started = 0;
+  const runner: ExportRunner = { async render() { started++; await gate; return { succeeded: false, outputValidated: false, problems: ["stopped"], processingSeconds: 0, outputProbe: null }; } };
+  const ctx = context(repo, storage, "bob", renders);
+  const first = await startExport(ctx, { mediaId: "v1", settings }, runner);
+  await until(() => started === 1);
+  const duplicate = await startExport(ctx, { mediaId: "v1", settings }, runner);
+  assert.equal(duplicate.jobId, first.jobId);
+  assert.equal((await repo.listRenderJobsForOwner("bob")).length, 1);
+  const persistedWhileRunning = await repo.getRenderJobForOwner(first.jobId, "bob");
+  assert.equal(persistedWhileRunning?.status, "running");
+  release();
+  await until(async () => (await repo.getRenderJobForOwner(first.jobId, "bob"))?.status === "failed");
+  assert.equal((await repo.getRenderJobForOwner(first.jobId, "bob"))?.errorMessage, "Rendering failed before a finished file was saved. The original video was not changed.");
+});
+
+test("a queued render resumes from its durable record after a new scheduler is created", async () => {
+  const { repo, storage } = library();
+  const firstProcessQueue = createRenderScheduler(0); // simulate process exit before a worker claims the persisted row
+  const first = await startExport(context(repo, storage, "bob", firstProcessQueue), { mediaId: "v1", settings });
+  assert.equal((await repo.getRenderJobForOwner(first.jobId, "bob"))?.status, "queued");
+
+  let executions = 0;
+  const runner: ExportRunner = { async render() { executions++; return { succeeded: false, outputValidated: false, problems: ["stopped"], processingSeconds: 0, outputProbe: null }; } };
+  const restarted = createRenderScheduler(1);
+  const replay = await startExport(context(repo, storage, "bob", restarted), { mediaId: "v1", settings }, runner);
+  assert.equal(replay.jobId, first.jobId);
+  await until(async () => (await repo.getRenderJobForOwner(first.jobId, "bob"))?.status === "failed");
+  assert.equal(executions, 1);
+  const recovered = await repo.getRenderJobForOwner(first.jobId, "bob");
+  assert.equal(recovered?.attempts, 1);
+  assert.equal(recovered?.status, "failed");
+});
+
+test("the standalone worker reconstructs a persisted queued job and stores its failure state", async () => {
+  const { repo, storage } = library();
+  const plan = getPlan("free");
+  const renderSettings = toRenderSettings(settings as EditingSettings, plan.features.maxResolution);
+  const settingsHash = hashExportSettings("v1", renderSettings, null, null);
+  const record: RenderJobRecord = {
+    id: "restart-job", ownerId: "bob", kind: "render", status: "queued", cycleItemId: null, mediaAssetId: "v1", progressPercent: 0,
+    attempts: 0, idempotencyKey: `render:bob:v1:${settingsHash}`, lockedBy: null, lockExpiresAt: null, errorMessage: null,
+    createdAt: NOW, finishedAt: null, settingsHash, payload: { version: 1, editingSettings: settings as EditingSettings, maxResolution: plan.features.maxResolution },
+    pendingOutputId: null, outputDerivativeId: null, lockToken: null, ffmpegPid: null, ffmpegStartedAt: null,
+  };
+  assert.equal((await repo.createRenderJob(record)).status, "created");
+  const runner: ExportRunner = { async render() { return { succeeded: false, outputValidated: false, problems: ["controlled failure"], processingSeconds: 0.2, outputProbe: null }; } };
+  assert.equal(await runNextPersistedRenderJob(context(repo, storage, "bob", createRenderScheduler(0)), "restart-worker", runner), "processed");
+  const recovered = await repo.getRenderJobForOwner(record.id, "bob");
+  assert.equal(recovered?.status, "failed");
+  assert.equal(recovered?.attempts, 1);
+  assert.match(recovered?.errorMessage ?? "", /rendering failed/i);
 });
 
 test("REAL FFMPEG: a short export is playable, keeps the original, and can be downloaded by its owner", { skip: !ffmpegAvailable && "ffmpeg/ffprobe not installed" }, async () => {

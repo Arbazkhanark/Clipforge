@@ -5,12 +5,14 @@ import type { RequestContext } from "../src/server/context.ts";
 import { AppError, toHttpResult } from "../src/server/errors.ts";
 import { readVersionMap, Problems } from "../src/server/validation.ts";
 import { bulkUpdateCaptions, bulkUpdateCovers } from "../src/server/handlers/captions-covers.ts";
-import { createGrant, revokeGrant } from "../src/server/handlers/sharing.ts";
-import { createCycle, mixIntoCycle, unmixFromCycle, startPublishingCycle } from "../src/server/handlers/cycles.ts";
+import { createGrant, decideCollectionAccessRequest, requestCollectionAccess, revokeGrant } from "../src/server/handlers/sharing.ts";
+import { changeCycleStatus, createCycle, mixIntoCycle, unmixFromCycle, startPublishingCycle, saveCycleSchedule } from "../src/server/handlers/cycles.ts";
 import { getCollectionCapabilities } from "../src/lib/domain/sharing-permissions.ts";
 import { monthStartUtc } from "../src/lib/domain/usage-accounting.ts";
+import { buildPreflightReport } from "../src/server/preflight-service.ts";
 import { NOW, inDays, makeCollection, makeGrant, makeItem, makeMedia } from "./helpers.ts";
 import type { PlanId } from "../src/lib/billing/catalog.ts";
+import { getPlan } from "../src/lib/billing/catalog.ts";
 
 // ---------- helpers ----------
 let idCounter = 0;
@@ -18,7 +20,7 @@ function setup(plans: Record<string, PlanId> = { bob: "pro", owner: "pro" }) {
   const repo = new MemoryRepository();
   for (const [user, plan] of Object.entries(plans)) repo.plans.set(user, plan);
   repo.cycles.set("cycle1", { id: "cycle1", ownerId: "bob", status: "draft", finalReviewConfirmed: false, name: "June", socialAccountId: "acct1" });
-  repo.socialAccounts.set("acct1", { id: "acct1", userId: "bob", status: "connected" });
+  repo.socialAccounts.set("acct1", { id: "acct1", userId: "bob", platform: "instagram", status: "connected", hasToken: true, accountType: "BUSINESS", grantedScopes: ["instagram_business_basic", "instagram_business_content_publish"], tokenExpiresAt: new Date("2026-08-01T00:00:00Z") });
   repo.socialAccounts.set("acctEve", { id: "acctEve", userId: "eve", status: "connected" });
   const ctxFor = (userId: string | null, over: Partial<RequestContext> = {}): RequestContext =>
     ({ userId, now: NOW, repo, newId: () => `new${++idCounter}`, config: { coverSupport: "supported" }, ...over });
@@ -28,16 +30,37 @@ const addItems = (repo: MemoryRepository, items: ReturnType<typeof makeItem>[]) 
 const own = (id: string, extra = {}) => makeItem({ id, cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: `m-${id}`, sourceKind: "owned", sourceCollectionId: null, ...extra });
 const errorOf = async (promise: Promise<unknown>): Promise<AppError> => { try { await promise; } catch (e) { assert.ok(e instanceof AppError, `expected AppError, got ${e}`); return e as AppError; } assert.fail("expected an error"); };
 const versionsOf = (repo: MemoryRepository, ids: string[]) => Object.fromEntries(ids.map((id) => [id, repo.items.get(id)!.version]));
+const grantActivePlan = (repo: MemoryRepository, userId: string, planId: "creator" | "pro" | "agency") => {
+  repo.promotionalAccessGrants.set(`promo-${userId}`, {
+    id: `promo-${userId}`, promotionId: `promotion-${userId}`, userId, redemptionId: null, kind: "tier_access", activationPolicy: "immediate", status: "active", planId,
+    durationDays: 3, queueSequence: 1n, startsAt: new Date(NOW.getTime() - 1), expiresAt: inDays(3), activatedAt: new Date(NOW.getTime() - 1), revokedAt: null,
+    grantedByAdminId: "admin", reason: null, createdAt: NOW, updatedAt: NOW,
+  });
+  repo.setUserRole(userId, "user");
+};
 
 // ---------- authentication & error shapes ----------
 test("every handler requires a signed-in user (401) before doing anything", async () => {
   const { repo, ctxFor } = setup();
   const anon = ctxFor(null);
-  for (const call of [bulkUpdateCaptions, bulkUpdateCovers, createGrant, revokeGrant, createCycle, mixIntoCycle, unmixFromCycle, startPublishingCycle]) {
+  for (const call of [bulkUpdateCaptions, bulkUpdateCovers, createGrant, revokeGrant, requestCollectionAccess, decideCollectionAccessRequest, createCycle, mixIntoCycle, unmixFromCycle, startPublishingCycle, saveCycleSchedule, changeCycleStatus]) {
     const error = await errorOf(call(anon, {}));
     assert.equal(error.status, 401); assert.equal(error.code, "not_authenticated");
   }
   assert.equal(repo.audit.length, 0);
+});
+
+test("access-request handlers derive requester and decision owner from the authenticated principal", async () => {
+  const { repo, ctxFor } = setup();
+  repo.collections.set("private-col", { id: "private-col", ownerId: "owner", name: "Secret name", visibility: "private", archived: false, mediaIds: [] });
+  const created = await requestCollectionAccess(ctxFor("bob"), { collectionId: "private-col", requestedCapabilities: ["view"], requesterId: "owner", ownerId: "owner" });
+  assert.match(created.requestId, /^new/);
+  assert.equal(repo.collectionAccessRequests.get(created.requestId)?.requesterId, "bob");
+  const deniedDecision = await errorOf(decideCollectionAccessRequest(ctxFor("bob"), { collectionId: "private-col", requestId: created.requestId, decision: "approved", ownerId: "owner", requestedCapabilities: ["manage"] }));
+  assert.equal(deniedDecision.status, 404);
+  const approved = await decideCollectionAccessRequest(ctxFor("owner"), { collectionId: "private-col", requestId: created.requestId, decision: "approved", ownerId: "bob", requestedCapabilities: ["manage"] });
+  assert.equal(approved.status, "approved");
+  assert.deepEqual(repo.grants.find((grant) => grant.collectionId === "private-col")?.capabilities, ["view"]);
 });
 
 test("errors become safe HTTP results; unknown errors never leak internals", () => {
@@ -78,6 +101,77 @@ test("a __proto__ key in expectedVersions is plain data and pollutes nothing", (
   const parsed = readVersionMap(body, "expectedVersions", new Problems(), 10);
   assert.equal(parsed["i1"], 2); assert.equal(Object.keys(parsed).length, 2);
   assert.equal(({} as { polluted?: number }).polluted, undefined);
+});
+
+const scheduleInput = (over: Record<string, unknown> = {}) => ({
+  cycleId: "cycle1", startDate: "2026-06-02", timeZone: "Asia/Kolkata", intervalMinutes: 60, postsPerInterval: 1,
+  daysOfWeek: [0, 1, 2, 3, 4, 5, 6], windowStart: "09:00", windowEnd: "11:00", dailyMax: null, endDate: null, ...over,
+});
+
+test("cycle schedule validates settings, assigns timezone-aware times, persists them, and reassigns after edits", async () => {
+  const { repo, ctxFor } = setup();
+  addItems(repo, [own("s1", { position: 1 }), own("s2", { position: 2 }), own("s3", { position: 3 })]);
+  const first = await saveCycleSchedule(ctxFor("bob"), scheduleInput());
+  assert.deepEqual(first, { scheduled: 3, unscheduled: 0 });
+  const initial = await repo.getCycleItems("cycle1");
+  assert.equal(initial[0]!.scheduledFor!.toISOString(), "2026-06-02T03:30:00.000Z");
+  assert.equal((await repo.getCycle("cycle1"))!.scheduleSettings!.timeZone, "Asia/Kolkata");
+  const second = await saveCycleSchedule(ctxFor("bob"), scheduleInput({ intervalMinutes: 120, endDate: "2026-06-02" }));
+  assert.deepEqual(second, { scheduled: 2, unscheduled: 1 });
+  const rescheduled = await repo.getCycleItems("cycle1");
+  assert.deepEqual(rescheduled.map((item) => [item.status, item.scheduledFor?.toISOString() ?? null]), [
+    ["scheduled", "2026-06-02T03:30:00.000Z"], ["scheduled", "2026-06-02T05:30:00.000Z"], ["upcoming", null],
+  ]);
+  const noSlots = await saveCycleSchedule(ctxFor("bob"), scheduleInput({ daysOfWeek: [1], endDate: "2026-06-02" }));
+  assert.deepEqual(noSlots, { scheduled: 0, unscheduled: 3 });
+  assert.ok((await repo.getCycleItems("cycle1")).every((item) => item.status === "upcoming" && item.scheduledFor === null));
+});
+
+test("cycle schedule rejects invalid settings, non-owners and non-draft cycles; empty cycles can save", async () => {
+  const { repo, ctxFor } = setup();
+  assert.equal((await errorOf(saveCycleSchedule(ctxFor("bob"), scheduleInput({ intervalMinutes: 0 })))).status, 422);
+  assert.equal((await errorOf(saveCycleSchedule(ctxFor("bob"), scheduleInput({ timeZone: "Mars/Base" })))).status, 422);
+  assert.equal((await errorOf(saveCycleSchedule(ctxFor("bob"), scheduleInput({ daysOfWeek: [] })))).status, 422);
+  assert.equal((await errorOf(saveCycleSchedule(ctxFor("bob"), scheduleInput({ endDate: "2026-06-01" })))).status, 422);
+  assert.equal((await errorOf(saveCycleSchedule(ctxFor("eve"), scheduleInput()))).status, 404);
+  repo.cycles.set("cycle1", { ...repo.cycles.get("cycle1")!, status: "paused" });
+  assert.equal((await errorOf(saveCycleSchedule(ctxFor("bob"), scheduleInput()))).status, 403);
+  repo.cycles.set("cycle1", { ...repo.cycles.get("cycle1")!, status: "draft" });
+  assert.deepEqual(await saveCycleSchedule(ctxFor("bob"), scheduleInput()), { scheduled: 0, unscheduled: 0 });
+  assert.ok(repo.cycles.get("cycle1")!.scheduleSettings);
+});
+
+test("cycle schedule save checks the current plan allowance while preflight remains the start gate", async () => {
+  const { repo, ctxFor } = setup({ bob: "free" });
+  const limit = getPlan("free").limits.scheduledItemsPerMonth;
+  addItems(repo, Array.from({ length: limit + 1 }, (_, index) => own(`over-${index + 1}`, { position: index + 1 })));
+  const error = await errorOf(saveCycleSchedule(ctxFor("bob"), scheduleInput()));
+  assert.equal(error.code, "plan_limit");
+  assert.equal((await repo.getCycleItems("cycle1")).every((item) => item.scheduledFor === null), true);
+});
+
+test("cycle controls enforce ownership and valid transitions; stop cancels editable items atomically", async () => {
+  const { repo, ctxFor } = setup({ bob: "pro", eve: "pro" });
+  addItems(repo, [own("stop1", { status: "scheduled", scheduledFor: new Date(NOW.getTime() + 60_000) }), own("stop2", { status: "publishing" })]);
+  assert.equal((await errorOf(changeCycleStatus(ctxFor("eve"), { cycleId: "cycle1", action: "pause" }))).status, 404);
+  assert.equal((await errorOf(changeCycleStatus(ctxFor("bob"), { cycleId: "cycle1", action: "resume" }))).status, 409);
+  assert.equal((await errorOf(changeCycleStatus(ctxFor("bob"), { cycleId: "cycle1", action: "stop" }))).status, 422);
+  await changeCycleStatus(ctxFor("bob"), { cycleId: "cycle1", action: "stop", confirmStop: true });
+  assert.equal(repo.cycles.get("cycle1")!.status, "stopped");
+  assert.deepEqual([repo.items.get("stop1")!.status, repo.items.get("stop1")!.scheduledFor, repo.items.get("stop1")!.version], ["cancelled", null, 2]);
+  assert.equal(repo.items.get("stop2")!.status, "publishing");
+  assert.equal(repo.audit.filter((entry) => entry.action === "cycle.stopped").length, 1);
+  assert.equal((await errorOf(changeCycleStatus(ctxFor("bob"), { cycleId: "cycle1", action: "stop", confirmStop: true }))).status, 409);
+});
+
+test("pause and resume use compare-and-set transitions and record audit entries", async () => {
+  const { repo, ctxFor } = setup();
+  repo.cycles.set("cycle1", { ...repo.cycles.get("cycle1")!, status: "running" });
+  await changeCycleStatus(ctxFor("bob"), { cycleId: "cycle1", action: "pause" });
+  assert.equal(repo.cycles.get("cycle1")!.status, "paused");
+  await changeCycleStatus(ctxFor("bob"), { cycleId: "cycle1", action: "resume" });
+  assert.equal(repo.cycles.get("cycle1")!.status, "running");
+  assert.deepEqual(repo.audit.map((entry) => entry.action), ["cycle.paused", "cycle.resumed"]);
 });
 
 // ---------- ownership ----------
@@ -151,17 +245,19 @@ test("RACE: two simultaneous bulk updates - exactly one wins every item, never a
   assert.deepEqual(["a", "b", "c"].map((id) => repo.items.get(id)!.version), [2, 2, 2]);
 });
 
-test("RACE: two simultaneous starts of one cycle - one wins, the other gets 409", async () => {
+test("RACE: simultaneous cycle starts cannot bypass a blocked publishing preflight", async () => {
   const { repo, ctxFor } = setup();
   addItems(repo, [own("a", { captionText: "hi", mediaAssetId: "m1" })]);
   repo.media.set("m1", makeMedia({ id: "m1", ownerId: "bob" }));
   const start = () => startPublishingCycle(ctxFor("bob"), { cycleId: "cycle1", confirmFinalReview: true });
   const results = await Promise.allSettled([start(), start()]);
-  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
-  const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
-  assert.equal((rejected.reason as AppError).status, 409);
-  assert.equal(repo.cycles.get("cycle1")!.status, "running");
-  assert.equal(repo.audit.filter((a) => a.action === "cycle.started").length, 1);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 0);
+  for (const rejected of results.filter((r): r is PromiseRejectedResult => r.status === "rejected")) {
+    assert.equal((rejected.reason as AppError).status, 409);
+    assert.equal((rejected.reason as AppError).code, "preflight_failed");
+  }
+  assert.equal(repo.cycles.get("cycle1")!.status, "draft");
+  assert.equal(repo.audit.filter((a) => a.action === "cycle.started").length, 0);
 });
 
 // ---------- covers ----------
@@ -224,6 +320,63 @@ test("plan limits for sharing use the OWNER's plan: Free can't share, Creator ca
   const pro = sharedSetup("pro");
   await createGrant(pro.ctxFor("owner"), { collectionId: "col1", granteeId: "carol", capabilities: ["view"], expiresAt: inDays(3).toISOString() });
   assert.equal(pro.repo.grants[0]!.expiresAt?.toISOString(), inDays(3).toISOString());
+});
+
+test("concurrent sharing grants are serialized at the owner cap and identical retries do not duplicate audits", async () => {
+  const { repo, ctxFor } = sharedSetup("creator");
+  const requests = Array.from({ length: 8 }, (_, index) => createGrant(ctxFor("owner"), { collectionId: "col1", granteeId: `recipient-${index}`, capabilities: ["view"] }));
+  const results = await Promise.allSettled(requests);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 5);
+  assert.equal(repo.grants.filter((grant) => grant.status === "active").length, 5);
+  assert.equal(repo.audit.filter((entry) => entry.action === "sharing.grant_created").length, 5);
+  const created = repo.grants[0]!;
+  const auditsBeforeRetry = repo.audit.length;
+  await createGrant(ctxFor("owner"), { collectionId: "col1", granteeId: created.granteeId, capabilities: created.capabilities });
+  assert.equal(repo.audit.length, auditsBeforeRetry);
+  assert.equal(repo.grants.length, 5);
+});
+
+test("sharing grant audit failure rolls back the grant and repeated revocation has no duplicate audit", async () => {
+  const { repo, ctxFor } = sharedSetup("pro");
+  repo.beforeSharingAuditInsert = (entry) => entry.action !== "sharing.grant_created";
+  await assert.rejects(() => createGrant(ctxFor("owner"), { collectionId: "col1", granteeId: "carol", capabilities: ["view"] }));
+  assert.equal(repo.grants.length, 0);
+  assert.equal(repo.audit.length, 0);
+  repo.beforeSharingAuditInsert = null;
+  await createGrant(ctxFor("owner"), { collectionId: "col1", granteeId: "carol", capabilities: ["view"] });
+  const beforeFailedRevoke = repo.audit.length;
+  repo.beforeSharingAuditInsert = (entry) => entry.action !== "sharing.grant_revoked";
+  await assert.rejects(() => revokeGrant(ctxFor("owner"), { collectionId: "col1", granteeId: "carol" }));
+  assert.equal(repo.grants[0]?.status, "active");
+  assert.equal(repo.audit.length, beforeFailedRevoke);
+  repo.beforeSharingAuditInsert = null;
+  await revokeGrant(ctxFor("owner"), { collectionId: "col1", granteeId: "carol" });
+  const auditsAfterRevoke = repo.audit.length;
+  assert.equal((await errorOf(revokeGrant(ctxFor("owner"), { collectionId: "col1", granteeId: "carol" }))).status, 404);
+  assert.equal(repo.audit.length, auditsAfterRevoke);
+  assert.equal(repo.grants[0]?.status, "revoked");
+});
+
+test("promotional owner tier is used for collection-sharing policy; recipient tier does not replace owner tier", async () => {
+  const ownerPromo = sharedSetup("free");
+  grantActivePlan(ownerPromo.repo, "owner", "creator");
+  await createGrant(ownerPromo.ctxFor("owner"), { collectionId: "col1", granteeId: "carol", capabilities: ["view", "use_in_cycle"] });
+  assert.equal(ownerPromo.repo.grants[0]?.granteeId, "carol");
+
+  const recipientPromo = sharedSetup("free");
+  grantActivePlan(recipientPromo.repo, "carol", "agency");
+  const denied = await errorOf(createGrant(recipientPromo.ctxFor("owner"), { collectionId: "col1", granteeId: "carol", capabilities: ["view"] }));
+  assert.equal(denied.code, "plan_limit", "the recipient's promotional plan cannot change collection owner policy");
+});
+
+test("promotional Creator limits apply to campaign mixing through the existing catalog", async () => {
+  const { repo, ctxFor } = setup({ bob: "free", owner: "pro" });
+  grantActivePlan(repo, "bob", "creator");
+  const mediaIds = Array.from({ length: 6 }, (_, index) => `promo-media-${index}`);
+  mediaIds.forEach((id) => repo.media.set(id, makeMedia({ id, ownerId: "bob" })));
+  repo.collections.set("bob-collection", makeCollection({ id: "bob-collection", ownerId: "bob", mediaIds }));
+  const added = await mixIntoCycle(ctxFor("bob"), { cycleId: "cycle1", videos: mediaIds.map((mediaAssetId) => ({ mediaAssetId, collectionId: "bob-collection" })) });
+  assert.equal(added.added, 6, "Creator's catalog batch limit is used instead of Free's limit of five");
 });
 
 test("delegated manager limits hold through the handler; revoking works and takes effect immediately", async () => {
@@ -335,19 +488,28 @@ test("start: preflight failures return 409 with the full report and leave the cy
   assert.equal(repo.audit.some((a) => a.action === "cycle.started"), false);
 });
 
-test("start: a shared video whose permission was revoked after it was added blocks the start", async () => {
+test("publishing preflight: a shared video's revoked permission blocks it", async () => {
   const { repo, ctxFor } = setup();
   repo.media.set("shared1", makeMedia({ id: "shared1", ownerId: "owner" }));
   repo.collections.set("col1", makeCollection({ mediaIds: ["shared1"] }));
   addItems(repo, [makeItem({ id: "s", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "shared1", sourceKind: "shared_reference", sourceCollectionId: "col1", captionText: "hi" })]);
   repo.grants.push(makeGrant({ granteeId: "bob" }));
-  const ok = await startPublishingCycle(ctxFor("bob"), { cycleId: "cycle1", confirmFinalReview: true });
-  assert.equal(ok.status, "running");
-  repo.cycles.set("cycle1", { ...repo.cycles.get("cycle1")!, status: "draft" });
   repo.grants[0] = { ...repo.grants[0]!, status: "revoked" };
-  const error = await errorOf(startPublishingCycle(ctxFor("bob"), { cycleId: "cycle1", confirmFinalReview: true }));
-  const report = (error.details as { report: { checks: { id: string; level: string }[] } }).report;
+  const report = await buildPreflightReport(ctxFor("bob"), "bob", repo.cycles.get("cycle1")!, await repo.getCycleItems("cycle1"), true);
   assert.equal(report.checks.find((c) => c.id === "source_access")!.level, "blocked");
+});
+
+test("publishing preflight reads promotional scheduling limits from the central plan resolver", async () => {
+  const { repo, ctxFor } = setup({ bob: "free", owner: "pro" });
+  const item = own("scheduled-item", { scheduledFor: inDays(1) });
+  repo.media.set(item.mediaAssetId, makeMedia({ id: item.mediaAssetId, ownerId: "bob" }));
+  repo.setUsage("bob", monthStartUtc(NOW), { processingSeconds: 0, exports: 0, scheduledItems: 10 });
+  const cycle = { ...repo.cycles.get("cycle1")!, finalReviewConfirmed: true };
+  const freeReport = await buildPreflightReport(ctxFor("bob"), "bob", cycle, [item], true);
+  assert.ok(freeReport.checks.some((check) => check.id === "plan_limit"));
+  grantActivePlan(repo, "bob", "creator");
+  const promoReport = await buildPreflightReport(ctxFor("bob"), "bob", cycle, [item], true);
+  assert.equal(promoReport.checks.some((check) => check.id === "plan_limit"), false);
 });
 
 test("start: plan allowance and Instagram's documented 24h quota are enforced on the server", async () => {

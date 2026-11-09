@@ -64,35 +64,72 @@ export function CycleEditor({ detail, timeZone }: { detail: CycleDetail; timeZon
   const cycleEnded = detail.cycle.status === "stopped" || detail.cycle.status === "completed";
   if (cycleEnded || detail.items.length === 0) return <CycleItemsTable items={detail.items} mediaTitles={detail.mediaTitles} timeZone={timeZone} />;
   return (
-    <form id="cycle-items-form" method="post" action="/api/forms/captions">
-      <input type="hidden" name="cycleId" value={detail.cycle.id} />
-      {editableItems.map((item) => <input key={item.id} type="hidden" name={`version.${item.id}`} value={item.version} />)}
-      <CycleItemsTable items={detail.items} mediaTitles={detail.mediaTitles} timeZone={timeZone} />
-      <fieldset>
-        <legend>Apply to</legend>
-        <label><input type="radio" name="scope" value="selected" defaultChecked /> Only the videos I ticked</label>{" "}
-        <label><input type="radio" name="scope" value="all" /> All upcoming videos</label>
-        <p className="muted">Published, publishing and processing videos are never changed.</p>
-      </fieldset>
-      <fieldset>
-        <legend>Caption</legend>
-        <p><label>New caption<br /><textarea name="caption" rows={4} cols={50} /></label></p>
-        <p><label><input type="checkbox" name="overwriteCustomConfirmed" value="yes" /> Replace captions I wrote for individual videos</label></p>
-        <button type="submit" formAction="/api/forms/captions">Apply caption</button>
-      </fieldset>
-      <fieldset>
-        <legend>Cover image</legend>
-        {detail.coverChoices.length === 0 ? <p>Upload an image in the <a href="/media">media library</a> to use it as a cover.</p> : (
-          <p><label>Cover<br /><select name="coverMediaId">{detail.coverChoices.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}</select></label></p>
-        )}
-        <p className="muted">Covers are saved in ClipForge only. Instagram has not received them, and a saved cover is never shown as applied on Instagram.</p>
-        <button type="submit" formAction="/api/forms/covers" disabled={detail.coverChoices.length === 0}>Save cover</button>
-      </fieldset>
-      <fieldset>
-        <legend>Remove videos</legend>
-        <p className="muted">Removing a video from the cycle never deletes the video or unpublishes anything.</p>
-        <button type="submit" formAction="/api/forms/cycle-unmix">Remove ticked videos from this cycle</button>
-      </fieldset>
-    </form>
+    <>
+      <form id="cycle-items-form" method="post" action="/api/forms/captions">
+        <input type="hidden" name="cycleId" value={detail.cycle.id} />
+        {editableItems.map((item) => <input key={item.id} type="hidden" name={`version.${item.id}`} value={item.version} />)}
+        <CycleItemsTable items={detail.items} mediaTitles={detail.mediaTitles} timeZone={timeZone} />
+        <fieldset>
+          <legend>Apply to</legend>
+          <label><input type="radio" name="scope" value="selected" defaultChecked /> Only the videos I ticked</label>{" "}
+          <label><input type="radio" name="scope" value="all" /> All upcoming videos</label>
+          <p className="muted">Published, publishing and processing videos are never changed.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Caption</legend>
+          <p><label>New caption<br /><textarea name="caption" rows={4} cols={50} /></label></p>
+          <p><label><input type="checkbox" name="overwriteCustomConfirmed" value="yes" /> Replace captions I wrote for individual videos</label></p>
+          <button type="submit" formAction="/api/forms/captions">Apply caption</button>
+        </fieldset>
+        <fieldset>
+          <legend>Cover image</legend>
+          {detail.coverChoices.length === 0 ? <p>Upload an image in the <a href="/media">media library</a> to use it as a cover.</p> : (
+            <p><label>Cover<br /><select name="coverMediaId">{detail.coverChoices.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}</select></label></p>
+          )}
+          <p className="muted">Covers are saved in ClipForge only. Instagram has not received them, and a saved cover is never shown as applied on Instagram.</p>
+          <button type="submit" formAction="/api/forms/covers" disabled={detail.coverChoices.length === 0}>Save cover</button>
+        </fieldset>
+        <fieldset>
+          <legend>Remove videos</legend>
+          <p className="muted">Removing a video from the cycle never deletes the video or unpublishes anything.</p>
+          <button type="submit" formAction="/api/forms/cycle-unmix">Remove ticked videos from this cycle</button>
+        </fieldset>
+      </form>
+      {detail.cycle.status === "draft" && <CycleRenderSelectionForms detail={detail} />}
+    </>
+  );
+}
+
+function CycleRenderSelectionForms({ detail }: { detail: CycleDetail }) {
+  const items = detail.items.filter(isEditableItem);
+  return (
+    <section className="card" aria-labelledby="render-selection-heading">
+      <h2 id="render-selection-heading">Rendered outputs for publishing</h2>
+      <p>Choose the exact completed render for each video. Originals stay unchanged, and a newer render never replaces your selection automatically.</p>
+      {items.map((item) => {
+        const outputs = detail.renderOutputsByItemId[item.id] ?? [];
+        const selectedAvailable = detail.selectedRenderOutputAvailableByItemId[item.id] === true;
+        const selectedIsListed = outputs.some((output) => output.id === item.selectedRenderOutputId);
+        const status = item.selectedRenderOutputId
+          ? selectedAvailable && selectedIsListed ? "Selected render is available." : "The selected render is missing or stale. Choose an available render again."
+          : outputs.length ? "No render selected yet; publishing preflight remains blocked." : "No successful render is available for this source yet.";
+        return (
+          <form key={item.id} method="post" action="/api/forms/cycle-render-output" className="card">
+            <input type="hidden" name="cycleId" value={detail.cycle.id} />
+            <input type="hidden" name="itemId" value={item.id} />
+            <input type="hidden" name="expectedVersion" value={item.version} />
+            <p><strong>Original source:</strong> {detail.mediaTitles[item.mediaAssetId] ?? "Unavailable video"}</p>
+            <p role="status">{status}</p>
+            <label>Rendered output<br />
+              <select name="renderOutputId" defaultValue={selectedAvailable && selectedIsListed ? item.selectedRenderOutputId ?? "" : ""}>
+                <option value="">No rendered output selected</option>
+                {outputs.map((output) => <option key={output.id} value={output.id}>{new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(output.createdAt)} — {(output.sizeBytes / (1024 * 1024)).toFixed(1)} MB</option>)}
+              </select>
+            </label>{" "}
+            <button type="submit">Save rendered output</button>
+          </form>
+        );
+      })}
+    </section>
   );
 }

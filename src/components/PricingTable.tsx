@@ -1,5 +1,6 @@
 import { BILLING_INTERVALS, PLAN_CATALOG, PLAN_IDS, formatPaiseAsRupees, type PlanDefinition } from "../lib/billing/catalog.ts";
 import { formatCount, formatStorage } from "./format.ts";
+import { SubscriptionCheckoutButtons } from "./SubscriptionCheckoutButtons.tsx";
 
 const SHARING_TEXT = { none: "No collection sharing", basic: "Basic sharing, direct use of shared videos, Mix/Unmix", advanced: "Advanced sharing: expiring access, delegated managers, higher recipient caps" } as const;
 
@@ -17,7 +18,7 @@ function limitRows(plan: PlanDefinition): [string, string][] {
     ["Scheduled items / month", formatCount(l.scheduledItemsPerMonth)],
     ["Maximum resolution", plan.features.maxResolution === "original" ? "Original (1080p and above)" : plan.features.maxResolution],
     ["Collection sharing", SHARING_TEXT[plan.features.collectionSharing]],
-    ["Dashboard ads", plan.features.showDashboardAds ? "Yes" : "No"],
+    ["Dashboard ads", plan.features.showDashboardAds ? "Reserved for future placement; ads are not configured here" : "Not included"],
   ];
 }
 
@@ -25,16 +26,18 @@ function limitRows(plan: PlanDefinition): [string, string][] {
  * Reads prices and limits ONLY from the central catalog. Weekly and monthly are separate choices.
  * `purchasable` is false until Razorpay is really connected - we never show a working Buy button early.
  */
-export function PricingTable({ purchasable = false }: { purchasable?: boolean }) {
+export function PricingTable({ purchasable, subscriptionPurchasable, manualPurchasable }: { purchasable?: boolean; subscriptionPurchasable?: boolean; manualPurchasable?: boolean }) {
+  const subscriptionsReady = subscriptionPurchasable ?? purchasable ?? false;
+  const manualReady = manualPurchasable ?? purchasable ?? false;
   return (
     <section aria-labelledby="pricing-heading">
       <h2 id="pricing-heading">Plans</h2>
-      {!purchasable && <p role="note" className="notice">ClipForge is in early development. Plans cannot be purchased yet, and not every feature listed is available yet.</p>}
+      {(!subscriptionsReady || !manualReady) && <p role="note" className="notice">ClipForge is in development. Checkout stays unavailable until the relevant payment configuration is complete.</p>}
       <div className="plan-grid">
         {PLAN_IDS.map((id) => {
           const plan = PLAN_CATALOG[id];
           return (
-            <article key={id} className="plan-card" data-plan={id}>
+            <article key={id} className={`plan-card pricing-card${id === "pro" ? " pricing-card-featured" : ""}`} data-plan={id}>
               <h3>{plan.name}</h3>
               <dl className="prices">
                 {BILLING_INTERVALS.map((interval) => (
@@ -45,7 +48,7 @@ export function PricingTable({ purchasable = false }: { purchasable?: boolean })
                 ))}
               </dl>
               <ul>{limitRows(plan).map(([name, value]) => <li key={name}><strong>{name}:</strong> {value}</li>)}</ul>
-              <button type="button" disabled={!purchasable}>{purchasable ? (id === "free" ? "Start free" : `Choose ${plan.name}`) : "Not available yet"}</button>
+              <SubscriptionCheckoutButtons planId={id} subscriptionEnabled={subscriptionsReady} manualEnabled={manualReady} />
             </article>
           );
         })}

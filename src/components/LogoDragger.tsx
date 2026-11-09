@@ -1,7 +1,5 @@
 "use client";
-// OPTIONAL ENHANCEMENT, UNVERIFIED: lets the user drag the logo rectangle in the preview sketch with a mouse or finger.
-// It only writes the new position into the form's "logoX" and "logoY" fields; the user then presses "Update preview".
-// It has NEVER run in a browser (none is available here) - the sliders in the form do the same job without JavaScript.
+// Lets the user drag the logo handle over the editor's video preview with a mouse or finger.
 import { useEffect } from "react";
 
 export function LogoDragger({ svgId, formId }: { svgId: string; formId: string }) {
@@ -19,6 +17,7 @@ export function LogoDragger({ svgId, formId }: { svgId: string; formId: string }
       const box = svg.getBoundingClientRect();
       const x = clamp((event.clientX - box.left) / box.width), y = clamp((event.clientY - box.top) / box.height);
       xField.value = x.toFixed(3); yField.value = y.toFixed(3);
+      xField.dispatchEvent(new Event("input", { bubbles: true }));
       const canvas = svg.viewBox.baseVal;
       handle.setAttribute("transform", `translate(${(x - Number(handle.dataset["x"])) * canvas.width} ${(y - Number(handle.dataset["y"])) * canvas.height})`);
     };
