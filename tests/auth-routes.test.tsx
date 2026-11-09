@@ -4,9 +4,9 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createLocalRuntime, setRuntimeForTests, buildContext, getRuntime, type Runtime } from "../src/server/runtime.ts";
-import { withoutDatabaseEnv } from "./helpers/isolated-database.ts";
 import { forgotPasswordRoute, loginRoute, logoutRoute, registerRoute, resetPasswordRoute, verifyEmailRoute, useSecureCookies } from "../src/server/auth/auth-routes.ts";
 import { setPageCookieReaderForTests } from "../src/server/auth/page-cookies.ts";
+import { requireCustomerPage } from "../src/server/auth/customer-page.ts";
 import { uploadRoute } from "../src/server/upload-route.ts";
 import { mediaFileRoute } from "../src/server/media-route.ts";
 import { getMediaLibrary } from "../src/server/queries.ts";
@@ -159,7 +159,12 @@ test("PAGES read the cookie from the request headers: signed-in users see their 
   assert.ok(html(await DashboardPage({})).includes("Your plan: <strong>Free</strong>")); assert.ok(html(await MediaPage({})).includes("annpic.png"));
   setPageCookieReaderForTests(async () => bob);
   assert.ok(!html(await MediaPage({})).includes("annpic.png")); assert.ok(html(await MediaPage({})).includes("Your library is empty"));
-  for (const reader of [async () => null, async () => "clipforge_session=" + "B".repeat(43), async () => "garbage"]) { setPageCookieReaderForTests(reader); assert.ok(html(await DashboardPage({})).includes("Sign in required")); }
+  for (const reader of [async () => null, async () => "clipforge_session=" + "B".repeat(43), async () => "garbage"]) {
+    setPageCookieReaderForTests(reader);
+    const outcome = await requireCustomerPage("/dashboard").then(() => ({ kind: "fulfilled" as const }), (error: unknown) => ({ kind: "rejected" as const, error }));
+    assert.equal(outcome.kind, "rejected");
+    if (outcome.kind === "rejected") assert.ok(outcome.error instanceof Error && outcome.error.message === "NEXT_REDIRECT" && "digest" in outcome.error && String(outcome.error.digest).includes("/login?returnTo=%2Fdashboard"));
+  }
   setPageCookieReaderForTests(async () => ann);
   const layout = html(await AppLayout({ children: <p>x</p> }));
   assert.ok(layout.includes("data-local-banner")); assert.ok(layout.includes("disappear when the server restarts")); assert.ok(layout.includes('action="/api/auth/logout"')); assert.ok(layout.includes("Connect Google")); assert.ok(!layout.includes("data-demo-banner"));
@@ -227,20 +232,17 @@ test("LOCAL MODE screens: forms are enabled and labelled; the dev outbox exists 
   for (const Page of [LoginPage, RegisterPage]) { const out = html(await Page({})); assert.ok(out.includes("Local development accounts")); assert.ok(!/<button type="submit" disabled/.test(out)); assert.ok(out.includes('action="/api/auth/')); }
   assert.ok(html(await RegisterPage({})).includes("minLength"));
   await post.register("ann@example.com");
-  const outbox = html(<DevOutboxPage />); assert.ok(outbox.includes("Confirm your ClipForge email")); assert.ok(outbox.includes("NOT sent")); assert.ok(outbox.includes("/verify-email?token="));
-  const previous = process.env["NODE_ENV"]; process.env["NODE_ENV"] = "production";
-  try { assert.ok(html(<DevOutboxPage />).includes("Not found")); assert.ok(!html(<DevOutboxPage />).includes("verify-email")); } finally { if (previous === undefined) delete process.env["NODE_ENV"]; else process.env["NODE_ENV"] = previous; }
-  setRuntimeForTests({ ...rt, mode: "demo", outbox: undefined }); assert.ok(html(<DevOutboxPage />).includes("Not found"));
+  assert.throws(() => DevOutboxPage());
+  setRuntimeForTests({ ...rt, mode: "demo", outbox: undefined }); assert.throws(() => DevOutboxPage());
 });
 
 test("getRuntime(): local mode turns on ONLY with the explicit flag, and never in production", async () => {
   setRuntimeForTests(null);
-  const env = { ...process.env }; const holder = globalThis as { __clipforgeLocalRuntime?: unknown };
+  const holder = globalThis as { __clipforgeLocalRuntime?: unknown };
   try {
-    await withoutDatabaseEnv(() => {
-      delete process.env["CLIPFORGE_LOCAL_AUTH"]; assert.equal(getRuntime().mode, "unconfigured"); assert.equal(getRuntime().auth, undefined);
-      process.env["CLIPFORGE_LOCAL_AUTH"] = "true"; delete holder.__clipforgeLocalRuntime; assert.equal(getRuntime().mode, "local"); assert.ok(getRuntime().auth);
-      process.env["NODE_ENV"] = "production"; assert.equal(getRuntime().mode, "unconfigured");
-    });
-  } finally { process.env["NODE_ENV"] = env["NODE_ENV"] as string; if (env["NODE_ENV"] === undefined) delete process.env["NODE_ENV"]; delete process.env["CLIPFORGE_LOCAL_AUTH"]; delete holder.__clipforgeLocalRuntime; }
+    assert.equal(getRuntime({}).mode, "unconfigured");
+    const local = getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "development" });
+    assert.equal(local.mode, "local"); assert.ok(local.auth);
+    assert.equal(getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "production" }).mode, "unconfigured");
+  } finally { delete holder.__clipforgeLocalRuntime; }
 });

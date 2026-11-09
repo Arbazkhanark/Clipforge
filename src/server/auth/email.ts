@@ -1,6 +1,7 @@
 // Email goes through an interface. No provider is configured, so nothing is ever really sent: the dev adapter
 // keeps messages in a memory "outbox". Do not claim email delivery works until a provider is configured and tested.
 import { AppError } from "../errors.ts";
+import type { Environment } from "../environment.ts";
 
 export interface EmailMessage { to: string; subject: string; text: string; }
 export interface EmailSender { send(message: EmailMessage): Promise<void>; }
@@ -31,7 +32,7 @@ export interface EmailSetup {
 }
 
 /** Reads placeholders from the environment. Never reads or returns a secret in an error. */
-export function createEmailSetup(env: NodeJS.ProcessEnv = process.env): EmailSetup {
+export function createEmailSetup(env: Environment = process.env): EmailSetup {
   const choice = (env["CLIPFORGE_EMAIL_PROVIDER"] ?? "").trim().toLowerCase();
   if (choice === "outbox" && env["NODE_ENV"] !== "production") {
     const outbox = new MemoryEmailOutbox();

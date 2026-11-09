@@ -3,8 +3,9 @@
 // The v1 prefix is the only key version. Replacing INSTAGRAM_TOKEN_KEY does not decrypt old rows.
 // There is no second key and no re-encrypt job. A lost or rotated key means the user reconnects.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import type { Environment } from "../environment.ts";
 
-export function readInstagramTokenKey(env: NodeJS.ProcessEnv = process.env): Buffer | null {
+export function readInstagramTokenKey(env: Environment = process.env): Buffer | null {
   const raw = env["INSTAGRAM_TOKEN_KEY"]?.trim() ?? "";
   if (!raw || raw === "replace-me") return null;
   const key = Buffer.from(raw, "base64url");

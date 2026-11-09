@@ -8,6 +8,7 @@
 // This file follows the Business Login host. It does not add PKCE, because neither page documents it.
 // This file does not run unless a test or a configured server calls exchangeInstagramCode.
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import type { Environment } from "../environment.ts";
 import { INSTAGRAM_REQUIRED_SCOPES } from "../../lib/integrations/instagram-capabilities.ts";
 import { isSupportedInstagramAccountType, missingInstagramScopes, normalizeInstagramScopes } from "../../lib/integrations/instagram-eligibility.ts";
 import type { InstagramAccountType } from "../repository.ts";
@@ -31,7 +32,7 @@ export interface InstagramConnectedProfile {
 }
 export type InstagramExchangeResult = { ok: true; profile: InstagramConnectedProfile } | { ok: false; reason: "expired_code" | "callback_error" | "missing_permission" | "unsupported_account" };
 
-export function readInstagramOAuthConfig(env: NodeJS.ProcessEnv = process.env): InstagramOAuthConfig | null {
+export function readInstagramOAuthConfig(env: Environment = process.env): InstagramOAuthConfig | null {
   const clientId = env["INSTAGRAM_APP_ID"]?.trim() ?? "";
   const clientSecret = env["INSTAGRAM_APP_SECRET"]?.trim() ?? "";
   const redirectUri = env["INSTAGRAM_OAUTH_REDIRECT_URI"]?.trim() ?? "";

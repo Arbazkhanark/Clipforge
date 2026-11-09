@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { MediaServices, RequestContext } from "./context.ts";
 import { AppError } from "./errors.ts";
+import type { Environment } from "./environment.ts";
 import { MemoryRepository } from "./memory-repository.ts";
 import type { Repository } from "./repository.ts";
 import { DEMO_USER_ID, seedDemoData } from "./demo-data.ts";
@@ -249,20 +250,20 @@ export function createLocalRuntime(opts: { baseUrl?: string; scrypt?: ScryptPara
   };
 }
 
-export function getRuntime(): Runtime {
+export function getRuntime(env: Environment = process.env): Runtime {
   if (testOverride) return testOverride;
-  if (process.env["CLIPFORGE_LOCAL_AUTH"] === "true" && process.env["NODE_ENV"] !== "production") {
+  if (env["CLIPFORGE_LOCAL_AUTH"] === "true" && env["NODE_ENV"] !== "production") {
     const holder = globalThis as GlobalWithDemo;
-    holder.__clipforgeLocalRuntime ??= createLocalRuntime({ baseUrl: process.env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000" });
+    holder.__clipforgeLocalRuntime ??= createLocalRuntime({ baseUrl: env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000" });
     return holder.__clipforgeLocalRuntime;
   }
-  const databaseUrl = process.env["DATABASE_URL"];
+  const databaseUrl = env["DATABASE_URL"];
   if (databaseUrl) {
     const holder = globalThis as GlobalWithDemo;
     holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient);
     return holder.__clipforgeDatabaseRuntime;
   }
-  if (process.env["CLIPFORGE_DEMO_MODE"] === "true" && process.env["NODE_ENV"] !== "production") {
+  if (env["CLIPFORGE_DEMO_MODE"] === "true" && env["NODE_ENV"] !== "production") {
     // Kept on globalThis so dev-server reloads do not recreate the sample data on every edit.
     const holder = globalThis as GlobalWithDemo;
     if (!holder.__clipforgeDemoRepo) { holder.__clipforgeDemoRepo = new MemoryRepository(); seedDemoData(holder.__clipforgeDemoRepo, new Date()); }

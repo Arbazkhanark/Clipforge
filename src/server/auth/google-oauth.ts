@@ -2,6 +2,7 @@
 // The browser is sent to Google. The callback checks a short HttpOnly state cookie before any code is exchanged.
 // Access tokens are read only to reach the ID token and are then discarded.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { Environment } from "../environment.ts";
 import type { GoogleProfile } from "./auth-service.ts";
 import { verifyGoogleIdToken, type RsaJwk } from "./google-id-token.ts";
 
@@ -14,7 +15,7 @@ export interface GoogleOAuthConfig { clientId: string; clientSecret: string; red
 export type GoogleExchangeFailure = "expired_code" | "callback_error";
 export type GoogleExchangeResult = { ok: true; profile: GoogleProfile } | { ok: false; reason: GoogleExchangeFailure };
 
-export function readGoogleOAuthConfig(env: NodeJS.ProcessEnv = process.env): GoogleOAuthConfig | null {
+export function readGoogleOAuthConfig(env: Environment = process.env): GoogleOAuthConfig | null {
   const clientId = env["GOOGLE_CLIENT_ID"]?.trim() ?? "";
   const clientSecret = env["GOOGLE_CLIENT_SECRET"]?.trim() ?? "";
   const redirectUri = env["GOOGLE_OAUTH_REDIRECT_URI"]?.trim() ?? "";

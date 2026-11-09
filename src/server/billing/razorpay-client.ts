@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Environment } from "../environment.ts";
 import { getPricePaise, isBillingInterval, isPlanId, type BillingInterval, type PlanId } from "../../lib/billing/catalog.ts";
 import { verifyOrderPaymentSignature, verifySubscriptionPaymentSignature } from "../../lib/billing/razorpay-signature.ts";
 
@@ -14,7 +15,7 @@ export interface RazorpayTestConfig {
   cancellationAtCycleEnd?: boolean;
 }
 
-export function readRazorpayTestConfig(env: NodeJS.ProcessEnv = process.env): RazorpayTestConfig | null {
+export function readRazorpayTestConfig(env: Environment = process.env): RazorpayTestConfig | null {
   const keyId = env["RAZORPAY_KEY_ID"]?.trim() ?? "";
   const keySecret = env["RAZORPAY_KEY_SECRET"]?.trim() ?? "";
   // Live credentials are categorically rejected in this implementation sprint.

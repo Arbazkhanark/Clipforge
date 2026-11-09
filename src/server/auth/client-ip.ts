@@ -3,6 +3,7 @@
 // Those proxies must APPEND the peer address. The client is the entry immediately before them.
 // A short or malformed header does not choose a bucket, so a caller cannot invent a fresh address.
 import { isIP } from "node:net";
+import type { Environment } from "../environment.ts";
 
 function normalizeIp(raw: string): string | null {
   const value = raw.trim().toLowerCase();
@@ -14,7 +15,7 @@ function normalizeIp(raw: string): string | null {
 }
 
 /** Null when no trusted proxy count is configured, or the header cannot name the client safely. */
-export function clientIpForRateLimit(request: Request, env: NodeJS.ProcessEnv = process.env): string | null {
+export function clientIpForRateLimit(request: Request, env: Environment = process.env): string | null {
   const raw = env["CLIPFORGE_TRUSTED_PROXY_HOPS"]?.trim() ?? "";
   if (!/^[1-9]\d{0,2}$/.test(raw)) return null;
   const header = request.headers.get("x-forwarded-for");

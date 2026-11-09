@@ -3,6 +3,7 @@ import { readGoogleOAuthConfig } from "../auth/google-oauth.ts";
 import { readInstagramOAuthConfig } from "../instagram/instagram-oauth.ts";
 import { readRazorpayTestConfig } from "../billing/razorpay-client.ts";
 import { createConfiguredTemporaryMediaAccessAdapter } from "../storage/temporary-media-access.ts";
+import type { Environment } from "../environment.ts";
 
 export type PlatformSettingState = "configured" | "incomplete" | "missing" | "application_default" | "not_implemented";
 export interface PlatformSetting {
@@ -20,11 +21,11 @@ export interface AdminPlatformSettings {
   plans: Array<{ id: string; name: string; weekly: string; monthly: string; connectedAccounts: number; storageGiB: number; activeCampaigns: number }>;
 }
 
-const present = (env: NodeJS.ProcessEnv, keys: string[]): number => keys.filter((key) => (env[key] ?? "").trim().length > 0).length;
+const present = (env: Environment, keys: string[]): number => keys.filter((key) => (env[key] ?? "").trim().length > 0).length;
 const stateForPresence = (count: number, required: number): PlatformSettingState => count === 0 ? "missing" : count === required ? "configured" : "incomplete";
 const item = (label: string, state: PlatformSettingState, summary: string, details: string[] = []): PlatformSetting => ({ label, state, summary, details, liveVerified: false });
 
-function runtimeMode(env: NodeJS.ProcessEnv): string {
+function runtimeMode(env: Environment): string {
   if (env["CLIPFORGE_LOCAL_AUTH"] === "true" && env["NODE_ENV"] !== "production") return "Local in-memory authentication";
   if ((env["DATABASE_URL"] ?? "").trim()) return "Database mode configured (connection not checked)";
   if (env["CLIPFORGE_DEMO_MODE"] === "true") return "Demo mode";
@@ -32,7 +33,7 @@ function runtimeMode(env: NodeJS.ProcessEnv): string {
 }
 
 /** Builds a redacted, read-only snapshot. Environment values are only tested for presence/validity and never returned. */
-export function buildAdminPlatformSettings(env: NodeJS.ProcessEnv = process.env): AdminPlatformSettings {
+export function buildAdminPlatformSettings(env: Environment = process.env): AdminPlatformSettings {
   const googleKeys = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_REDIRECT_URI"];
   const instagramKeys = ["INSTAGRAM_APP_ID", "INSTAGRAM_APP_SECRET", "INSTAGRAM_OAUTH_REDIRECT_URI", "INSTAGRAM_TOKEN_KEY"];
   const razorpayKeys = ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET"];

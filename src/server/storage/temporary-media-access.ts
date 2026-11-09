@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import type { Environment } from "../environment.ts";
 import { canKeepUsingSourceForCycleItem } from "../../lib/domain/sharing-permissions.ts";
 import type { CycleItem } from "../../lib/domain/types.ts";
 import type { Repository } from "../repository.ts";
@@ -217,7 +218,7 @@ export class HmacTemporaryMediaAccessAdapter implements TemporaryMediaAccessAdap
   }
 }
 
-export function createConfiguredTemporaryMediaAccessAdapter(env: NodeJS.ProcessEnv = process.env): HmacTemporaryMediaAccessAdapter | null {
+export function createConfiguredTemporaryMediaAccessAdapter(env: Environment = process.env): HmacTemporaryMediaAccessAdapter | null {
   const origin = env["CLIPFORGE_PUBLIC_MEDIA_ORIGIN"]?.trim() ?? "";
   const rawKey = env["CLIPFORGE_TEMP_MEDIA_SIGNING_KEY"]?.trim() ?? "";
   if (!origin || !rawKey) return null;
