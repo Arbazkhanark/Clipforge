@@ -40,7 +40,8 @@ export function readInstagramOAuthConfig(env: Environment = process.env): Instag
   if (!clientId || !clientSecret || !redirectUri || !tokenKey || clientId === "replace-me" || clientSecret === "replace-me") return null;
   let url: URL;
   try { url = new URL(redirectUri); } catch { return null; }
-  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  // const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  const local = env["APP_ENDPOINT"]?.trim() === "https://clipforge-liard-eta.vercel.app/";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) return null;
   if (!url.pathname.endsWith("/api/instagram/callback")) return null;
   return { clientId, clientSecret, redirectUri, tokenKey };
