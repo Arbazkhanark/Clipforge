@@ -3,6 +3,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
+import { AuthForm } from "../src/components/AuthForm.tsx";
 import { createLocalRuntime, setRuntimeForTests, buildContext, getRuntime, type Runtime } from "../src/server/runtime.ts";
 import { forgotPasswordRoute, loginRoute, logoutRoute, registerRoute, resetPasswordRoute, verifyEmailRoute, useSecureCookies } from "../src/server/auth/auth-routes.ts";
 import { setPageCookieReaderForTests } from "../src/server/auth/page-cookies.ts";
@@ -245,4 +246,11 @@ test("getRuntime(): local mode turns on ONLY with the explicit flag, and never i
     assert.equal(local.mode, "local"); assert.ok(local.auth);
     assert.equal(getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "production" }).mode, "unconfigured");
   } finally { delete holder.__clipforgeLocalRuntime; }
+});
+
+test("database-mode auth notice describes configured persistence without claiming a successful save", () => {
+  const markup = html(<AuthForm mode="register" demoMode={false} available persistence="database" emailDelivery="unavailable" />);
+  assert.match(markup, /configured to store accounts and sessions in PostgreSQL/);
+  assert.match(markup, /operation was not confirmed as saved/);
+  assert.doesNotMatch(markup, /stored in the database and remain after a restart/);
 });

@@ -31,7 +31,10 @@ const withCustomerReturnPath = (location: string, returnTo: string): string => r
 async function authRoute(request: Request, runtime: RuntimeProvider, work: (auth: NonNullable<Runtime["auth"]>, fields: FormFields, rt: Runtime) => Promise<Response>, failurePath: string): Promise<Response> {
   if (checkSameOrigin(request)) return new Response("Cross-site requests are not allowed.", { status: 403, headers: { "Cache-Control": "no-store" } });
   const rt = runtime();
-  if (!rt.auth) return respond(buildFlashLocation(failurePath, "error", "auth_not_available"));
+  if (!rt.auth) {
+    const code: FlashErrorCode = rt.mode === "unconfigured" && process.env["NODE_ENV"] === "production" ? "database_unavailable" : "auth_not_available";
+    return respond(buildFlashLocation(failurePath, "error", code));
+  }
   try { return await work(rt.auth, await readUrlEncoded(request), rt); }
   catch (error) {
     const code: FlashErrorCode = error instanceof AppError && error.code === "database_unavailable" ? "database_unavailable"

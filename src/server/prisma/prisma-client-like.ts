@@ -31,6 +31,8 @@ export interface PrismaClientLike {
   $transaction<T>(work: (tx: PrismaClientLike) => Promise<T>): Promise<T>;
   /** Tagged-template raw query (used only to lock a user row: SELECT ... FOR UPDATE). */
   $queryRaw(strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown>;
+  /** Prisma Client exposes this; optional for focused repository fakes. */
+  $disconnect?(): Promise<void>;
 }
 
 /** Prisma reports a violated UNIQUE constraint with this error code. */

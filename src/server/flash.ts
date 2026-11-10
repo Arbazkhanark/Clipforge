@@ -64,7 +64,7 @@ export const FLASH_ERRORS = {
   auth_not_available: "Sign-in is not available in this build.",
   validation_failed: "Some of the fields are not valid. Check them and try again.",
   not_authenticated: "Please sign in first.",
-  database_unavailable: "The database could not complete that request. Nothing was saved in memory.",
+  database_unavailable: "The database could not confirm that operation. It may not have been saved; check again before retrying.",
   not_found: "We could not find that, or you do not have access to it.",
   forbidden: "You are not allowed to do that.",
   plan_limit: "Your plan does not allow that many at once. Nothing was changed.",

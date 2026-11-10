@@ -5,5 +5,5 @@ import type { PrismaClientLike } from "./prisma-client-like.ts";
 export async function createPrismaClient(connectionString: string): Promise<PrismaClientLike> {
   const { PrismaPg } = await import("@prisma/adapter-pg");
   const { PrismaClient } = await import("../../generated/prisma/client.ts");
-  return new PrismaClient({ adapter: new PrismaPg({ connectionString }) }) as unknown as PrismaClientLike;
+  return new PrismaClient({ adapter: new PrismaPg({ connectionString, connectionTimeoutMillis: 5_000 }) }) as unknown as PrismaClientLike;
 }

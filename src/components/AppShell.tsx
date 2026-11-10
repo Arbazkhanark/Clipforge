@@ -31,7 +31,7 @@ export function AppShell({ mode, emailDelivery, signedIn, googleConfigured, chil
         )}
         {mode === "database" && (
           <div role="note" className="notice" data-database-banner>
-            <p>Accounts, media details, collections, and publishing cycles are stored in the database. Uploaded files are saved in a private folder on this computer when that folder is configured, and they are not stored in the database or in memory. {emailDelivery === "outbox" ? "A real email provider is not connected, so confirmation messages are unavailable to account holders." : "Email is not sent, so new accounts stay unverified and can still sign in."} Instagram publishing and payment availability are shown on their respective pages. Cloud S3 storage is not connected.</p>
+            <p>This deployment is configured to store accounts, media details, collections, and publishing cycles in PostgreSQL when each operation succeeds. Uploaded files use the configured private storage adapter; they are not stored in PostgreSQL or in memory. If a request reports that the database is unavailable, that operation was not confirmed as saved. {emailDelivery === "outbox" ? "A real email provider is not connected, so confirmation messages are unavailable to account holders." : "Email is not sent, so new accounts stay unverified and can still sign in."} Instagram publishing and payment availability are shown on their respective pages. Cloud S3 storage is not connected.</p>
             <SessionActions signedIn={signedIn} googleConfigured={googleConfigured} />
           </div>
         )}

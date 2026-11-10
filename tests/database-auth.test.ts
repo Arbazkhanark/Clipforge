@@ -14,6 +14,7 @@ import type { PrismaClientLike } from "../src/server/prisma/prisma-client-like.t
 import { createDatabaseRuntime, getRuntime, setDatabaseConnectorForTests, setRuntimeForTests } from "../src/server/runtime.ts";
 import { registerRoute } from "../src/server/auth/auth-routes.ts";
 import { isolatedDatabaseUrl } from "./helpers/isolated-database.ts";
+import { FakePrismaClient } from "./helpers/fake-prisma.ts";
 
 const FAST = { logN: 10, r: 8, p: 1 };
 const PASSWORD = "a real database password";
@@ -56,12 +57,126 @@ test("a database connection failure is reported and does not fall back to memory
   }
 }));
 
+test("production selects the PostgreSQL runtime from DATABASE_URL, never DIRECT_URL or memory flags", async () => serial(async () => {
+  const client = new FakePrismaClient();
+  let receivedConnectionString: string | undefined;
+  const logs: string[] = [];
+  const previousInfo = console.info;
+  const previousError = console.error;
+  console.info = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+  console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+  setRuntimeForTests(null);
+  setDatabaseConnectorForTests(async (connectionString) => { receivedConnectionString = connectionString; return client; });
+  try {
+    const runtime = getRuntime({
+      NODE_ENV: "production",
+      DATABASE_URL: "postgresql://database.example/clipforge",
+      DIRECT_URL: "postgresql://direct.example/clipforge",
+      CLIPFORGE_LOCAL_AUTH: "true",
+      CLIPFORGE_DEMO_MODE: "true",
+    });
+    assert.equal(runtime.mode, "database");
+    assert.deepEqual(await runtime.auth!.login({ email: "nobody@example.test", password: PASSWORD }), { ok: false, code: "invalid_credentials" });
+    assert.equal(receivedConnectionString, "postgresql://database.example/clipforge");
+
+    setDatabaseConnectorForTests(async () => client);
+    const noRuntimeUrl = getRuntime({ NODE_ENV: "production", DIRECT_URL: "postgresql://direct.example/clipforge" });
+    assert.equal(noRuntimeUrl.mode, "unconfigured");
+    assert.equal(noRuntimeUrl.auth, undefined);
+    assert.match(logs.join("\n"), /database_runtime_unconfigured/);
+    assert.match(logs.join("\n"), /"errorCategory":"missing_configuration"/);
+    assert.doesNotMatch(logs.join("\n"), /database\.example|direct\.example|postgresql:\/\//);
+  } finally {
+    setDatabaseConnectorForTests(null);
+    setRuntimeForTests(null);
+    console.info = previousInfo;
+    console.error = previousError;
+  }
+}));
+
+test("failed database ping is logged without secrets and the same runtime can retry", async () => serial(async () => {
+  const client = new FakePrismaClient();
+  const originalQuery = client.$queryRaw.bind(client);
+  let attempts = 0;
+  const lines: string[] = [];
+  const oldInfo = console.info;
+  const oldError = console.error;
+  const oldDateNow = Date.now;
+  let fakeTime = 100_000;
+  Date.now = () => fakeTime;
+  console.info = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  const runtime = createDatabaseRuntime("postgresql://do-not-log:private-marker@db.example/clipforge", async () => {
+    attempts += 1;
+    if (attempts === 1) client.$queryRaw = async () => { throw Object.assign(new Error("private-marker"), { code: "P1001" }); };
+    else client.$queryRaw = originalQuery;
+    return client;
+  }, { scrypt: FAST });
+  try {
+    await assert.rejects(() => runtime.auth!.register({ email: "nobody@example.test", password: PASSWORD }), (error: unknown) => error instanceof AppError && error.code === "database_unavailable");
+    await assert.rejects(() => runtime.auth!.register({ email: "nobody@example.test", password: PASSWORD }), (error: unknown) => error instanceof AppError && error.code === "database_unavailable");
+    assert.equal(attempts, 1); // A brief outage does not trigger a connection attempt and log on every request.
+    fakeTime += 5_000;
+    assert.deepEqual(await runtime.auth!.register({ email: "nobody@example.test", password: PASSWORD }), { ok: true });
+    assert.equal(attempts, 2);
+    const logs = lines.join("\n");
+    assert.match(logs, /database_connection_check_started/);
+    assert.match(logs, /database_connection_failed/);
+    assert.match(logs, /database_connection_success/);
+    assert.match(logs, /"errorCode":"P1001"/);
+    assert.doesNotMatch(logs, /private-marker|do-not-log|db\.example|clipforge/);
+  } finally {
+    console.info = oldInfo;
+    console.error = oldError;
+    Date.now = oldDateNow;
+  }
+}));
+
+test("database auth query failures are logged with a safe category, not their message", async () => serial(async () => {
+  const client = new FakePrismaClient();
+  const lines: string[] = [];
+  const oldInfo = console.info;
+  const oldError = console.error;
+  console.info = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  client.user.create = async () => { throw Object.assign(new Error("email-and-password-must-not-be-logged"), { code: "P2022" }); };
+  const runtime = createDatabaseRuntime("postgresql://private-marker@db.example/clipforge", async () => client);
+  try {
+    await assert.rejects(() => runtime.auth!.register({ email: "private-email@example.test", password: PASSWORD }), (error: unknown) => error instanceof AppError && error.code === "database_unavailable");
+    const logs = lines.join("\n");
+    assert.match(logs, /database_connection_success/);
+    assert.match(logs, /database_query_failed/);
+    assert.match(logs, /"operation":"auth.createUser"/);
+    assert.match(logs, /"errorCategory":"schema"/);
+    assert.match(logs, /"errorCode":"P2022"/);
+    assert.doesNotMatch(logs, /email-and-password|private-email|private-marker|db\.example/);
+  } finally {
+    console.info = oldInfo;
+    console.error = oldError;
+  }
+}));
+
+test("signup and login persist users and sessions through the PostgreSQL auth repository", async () => {
+  const client = new FakePrismaClient();
+  const runtime = createDatabaseRuntime("postgresql://private-marker@db.example/clipforge", async () => client, { scrypt: FAST });
+  const email = `persist-${randomUUID()}@example.test`;
+  assert.deepEqual(await runtime.auth!.register({ email, password: PASSWORD }), { ok: true });
+  assert.equal(await client.user.count(), 1);
+  const login = await runtime.auth!.login({ email, password: PASSWORD });
+  assert.equal(login.ok, true);
+  assert.equal(await client.session.count(), 1);
+  const google = await runtime.auth!.completeGoogleSignIn({ sub: `google-${randomUUID()}`, email: `google-${randomUUID()}@example.test`, emailVerified: true, name: "Google User" }, null);
+  assert.equal(google.ok && google.created, true);
+  assert.equal(await client.googleIdentity.count(), 1);
+  assert.equal(await client.session.count(), 2);
+});
+
 test("database mode does not send or store a verification message", async () => {
   const email = new UnavailableEmailSender();
   let calls = 0;
   const runtime = createDatabaseRuntime("postgresql://127.0.0.1:9/clipforge", async () => {
     calls += 1;
-    return { user: { async create() { return {}; }, async findUnique() { return null; } } } as unknown as PrismaClientLike;
+    return { $queryRaw: async () => [], user: { async create() { return {}; }, async findUnique() { return null; } } } as unknown as PrismaClientLike;
   }, { scrypt: FAST });
   assert.deepEqual(await runtime.auth!.register({ email: "Ann@Example.com", password: PASSWORD }), { ok: true });
   assert.equal(calls, 1);

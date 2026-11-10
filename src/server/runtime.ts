@@ -42,6 +42,7 @@ import { PrismaAdminDataRepository } from "./admin/data-repository.ts";
 export type RuntimeMode = "demo" | "unconfigured" | "local" | "database";
 export type EmailDelivery = "outbox" | "unavailable";
 type DatabaseConnector = (connectionString: string) => Promise<PrismaClientLike>;
+type DatabaseServices = { auth: PrismaAuthRepository; content: PrismaRepository; adminData: AdminDataService };
 
 export interface Runtime {
   mode: RuntimeMode;
@@ -82,7 +83,7 @@ function unavailableRepository(): Repository {
 let testOverride: Runtime | null = null;
 export const setRuntimeForTests = (runtime: Runtime | null): void => { testOverride = runtime; };
 
-type GlobalWithDemo = typeof globalThis & { __clipforgeDemoRepo?: MemoryRepository; __clipforgeDemoMedia?: Promise<MediaServices>; __clipforgeDemoRenders?: RenderScheduler; __clipforgeLocalRuntime?: Runtime; __clipforgeDatabaseRuntime?: Runtime };
+type GlobalWithDemo = typeof globalThis & { __clipforgeDemoRepo?: MemoryRepository; __clipforgeDemoMedia?: Promise<MediaServices>; __clipforgeDemoRenders?: RenderScheduler; __clipforgeLocalRuntime?: Runtime; __clipforgeDatabaseRuntime?: Runtime; __clipforgeMissingDatabaseLogged?: boolean };
 let databaseConnectorForTests: DatabaseConnector | null = null;
 /** Tests use this to simulate a database that refuses the connection. It never selects the memory auth repository. */
 export function setDatabaseConnectorForTests(connector: DatabaseConnector | null): void {
@@ -90,10 +91,35 @@ export function setDatabaseConnectorForTests(connector: DatabaseConnector | null
   delete (globalThis as GlobalWithDemo).__clipforgeDatabaseRuntime;
 }
 
-const databaseUnavailable = (): AppError => new AppError(503, "database_unavailable", "The database could not complete that request. Nothing was saved in memory.");
+const databaseUnavailable = (): AppError => new AppError(503, "database_unavailable", "The database could not confirm that operation. It may not have been saved; check again before retrying.");
+const DATABASE_RETRY_DELAY_MS = 5_000;
 
-function guardCall<T>(work: () => Promise<T>): Promise<T> {
-  return work().catch((error: unknown) => { if (error instanceof AppError) throw error; throw databaseUnavailable(); });
+function sanitizedDatabaseCategory(error: unknown): string {
+  const value = error as { code?: unknown; name?: unknown } | null;
+  const code = typeof value?.code === "string" ? value.code : "";
+  const name = typeof value?.name === "string" ? value.name : "";
+  if (/^P100\d{1,2}$/.test(code) || /^(ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENOTFOUND|57P01)$/.test(code)) return "connection";
+  if (code === "P2021" || code === "P2022") return "schema";
+  if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND" || name === "ModuleNotFoundError") return "prisma_client_load";
+  return "database_operation";
+}
+
+function logDatabaseEvent(event: string, operation: string, error?: unknown, category?: string, environment?: string): void {
+  const value = error as { code?: unknown; name?: unknown } | null;
+  const errorName = typeof value?.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value.name) ? value.name : undefined;
+  const errorCode = typeof value?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(value.code) ? value.code : undefined;
+  const entry = {
+    event,
+    timestamp: new Date().toISOString(),
+    environment: environment ?? (process.env["NODE_ENV"] === "production" ? "production" : "development"),
+    runtimeMode: event === "database_runtime_unconfigured" ? "unconfigured" : "postgres",
+    operation,
+    ...(errorName ? { errorName } : {}),
+    ...(errorCode ? { errorCode } : {}),
+    ...(category || error !== undefined ? { errorCategory: category ?? sanitizedDatabaseCategory(error) } : {}),
+  };
+  const write = event === "database_connection_success" ? console.info : console.error;
+  write(JSON.stringify(entry));
 }
 
 function guardRepository(inner: Repository): Repository {
@@ -104,17 +130,32 @@ function guardRepository(inner: Repository): Repository {
       return (...args: unknown[]) => {
         try {
           const result = (value as (...a: unknown[]) => unknown).apply(target, args);
-          return result instanceof Promise ? result.catch((error: unknown) => { if (error instanceof AppError) throw error; throw databaseUnavailable(); }) : result;
-        } catch (error) { if (error instanceof AppError) throw error; throw databaseUnavailable(); }
+          return result instanceof Promise ? result.catch((error: unknown) => { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `repository.${String(prop)}`, error); throw databaseUnavailable(); }) : result;
+        } catch (error) { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `repository.${String(prop)}`, error); throw databaseUnavailable(); }
       };
     },
   }) as Repository;
 }
 
+function guardAdminData(inner: AdminDataService): AdminDataService {
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        try {
+          const result = (value as (...a: unknown[]) => unknown).apply(target, args);
+          return result instanceof Promise ? result.catch((error: unknown) => { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `admin.${String(prop)}`, error); throw databaseUnavailable(); }) : result;
+        } catch (error) { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `admin.${String(prop)}`, error); throw databaseUnavailable(); }
+      };
+    },
+  });
+}
+
 function delegateRepository(load: () => Promise<Repository>): Repository {
   return new Proxy({} as Repository, {
     get(_target, prop) {
-      return (...args: unknown[]) => load().then((repo) => {
+      return (...args: unknown[]) => load().catch(() => { throw databaseUnavailable(); }).then((repo) => {
         const fn = (repo as unknown as Record<PropertyKey, unknown>)[prop];
         if (typeof fn !== "function") throw databaseUnavailable();
         return (fn as (...a: unknown[]) => unknown).apply(repo, args);
@@ -123,27 +164,37 @@ function delegateRepository(load: () => Promise<Repository>): Repository {
   });
 }
 
-function guardAuthRepository(inner: AuthRepository): AuthRepository {
-  const run = <T>(work: () => Promise<T>): Promise<T> => guardCall(work);
+function guardAuthRepository(load: () => Promise<DatabaseServices>): AuthRepository {
+  const run = async <T>(operation: string, work: (auth: AuthRepository) => Promise<T>): Promise<T> => {
+    let auth: AuthRepository;
+    try { auth = (await load()).auth; }
+    catch { throw databaseUnavailable(); }
+    try { return await work(auth); }
+    catch (error) {
+      if (error instanceof AppError) throw error;
+      logDatabaseEvent("database_query_failed", operation, error);
+      throw databaseUnavailable();
+    }
+  };
   return {
-    createUser: (user) => run(() => inner.createUser(user)),
-    getUserByEmail: (email) => run(() => inner.getUserByEmail(email)),
-    getUserById: (userId) => run(() => inner.getUserById(userId)),
-    markEmailVerified: (userId, at) => run(() => inner.markEmailVerified(userId, at)),
-    setPasswordHash: (userId, passwordHash) => run(() => inner.setPasswordHash(userId, passwordHash)),
-    createSession: (session) => run(() => inner.createSession(session)),
-    getSessionByTokenHash: (tokenHash) => run(() => inner.getSessionByTokenHash(tokenHash)),
-    touchSession: (sessionId, lastUsedAt) => run(() => inner.touchSession(sessionId, lastUsedAt)),
-    revokeSession: (sessionId, at) => run(() => inner.revokeSession(sessionId, at)),
-    revokeAllSessionsForUser: (userId, at) => run(() => inner.revokeAllSessionsForUser(userId, at)),
-    createAuthToken: (token) => run(() => inner.createAuthToken(token)),
-    consumeAuthToken: (kind, tokenHash, now) => run(() => inner.consumeAuthToken(kind, tokenHash, now)),
-    completePasswordReset: (input) => run(() => inner.completePasswordReset(input)),
-    invalidateAuthTokens: (userId, kind, now) => run(() => inner.invalidateAuthTokens(userId, kind, now)),
-    getGoogleIdentityBySub: (googleSub) => run(() => inner.getGoogleIdentityBySub(googleSub)),
-    getGoogleIdentityByUserId: (userId) => run(() => inner.getGoogleIdentityByUserId(userId)),
-    linkGoogleIdentity: (identity) => run(() => inner.linkGoogleIdentity(identity)),
-    createGoogleUser: (user, identity) => run(() => inner.createGoogleUser(user, identity)),
+    createUser: (user) => run("auth.createUser", (auth) => auth.createUser(user)),
+    getUserByEmail: (email) => run("auth.getUserByEmail", (auth) => auth.getUserByEmail(email)),
+    getUserById: (userId) => run("auth.getUserById", (auth) => auth.getUserById(userId)),
+    markEmailVerified: (userId, at) => run("auth.markEmailVerified", (auth) => auth.markEmailVerified(userId, at)),
+    setPasswordHash: (userId, passwordHash) => run("auth.setPasswordHash", (auth) => auth.setPasswordHash(userId, passwordHash)),
+    createSession: (session) => run("auth.createSession", (auth) => auth.createSession(session)),
+    getSessionByTokenHash: (tokenHash) => run("auth.getSessionByTokenHash", (auth) => auth.getSessionByTokenHash(tokenHash)),
+    touchSession: (sessionId, lastUsedAt) => run("auth.touchSession", (auth) => auth.touchSession(sessionId, lastUsedAt)),
+    revokeSession: (sessionId, at) => run("auth.revokeSession", (auth) => auth.revokeSession(sessionId, at)),
+    revokeAllSessionsForUser: (userId, at) => run("auth.revokeAllSessionsForUser", (auth) => auth.revokeAllSessionsForUser(userId, at)),
+    createAuthToken: (token) => run("auth.createAuthToken", (auth) => auth.createAuthToken(token)),
+    consumeAuthToken: (kind, tokenHash, now) => run("auth.consumeAuthToken", (auth) => auth.consumeAuthToken(kind, tokenHash, now)),
+    completePasswordReset: (input) => run("auth.completePasswordReset", (auth) => auth.completePasswordReset(input)),
+    invalidateAuthTokens: (userId, kind, now) => run("auth.invalidateAuthTokens", (auth) => auth.invalidateAuthTokens(userId, kind, now)),
+    getGoogleIdentityBySub: (googleSub) => run("auth.getGoogleIdentityBySub", (auth) => auth.getGoogleIdentityBySub(googleSub)),
+    getGoogleIdentityByUserId: (userId) => run("auth.getGoogleIdentityByUserId", (auth) => auth.getGoogleIdentityByUserId(userId)),
+    linkGoogleIdentity: (identity) => run("auth.linkGoogleIdentity", (auth) => auth.linkGoogleIdentity(identity)),
+    createGoogleUser: (user, identity) => run("auth.createGoogleUser", (auth) => auth.createGoogleUser(user, identity)),
   };
 }
 
@@ -156,36 +207,45 @@ function guardAuthRepository(inner: AuthRepository): AuthRepository {
  */
 export function createDatabaseRuntime(connectionString: string, connect: DatabaseConnector = createPrismaClient, opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; mediaDir?: string | null; email?: ReturnType<typeof createEmailSetup> } = {}): Runtime {
   const now = opts.now ?? (() => new Date());
-  const ready = connect(connectionString).then((db) => ({ auth: new PrismaAuthRepository(db), content: new PrismaRepository(db, now), adminData: new AdminDataService(new PrismaAdminDataRepository(db), now) }));
-  void ready.catch(() => undefined);
-  const authRepo: AuthRepository = guardAuthRepository({
-    createUser: async (user) => (await ready).auth.createUser(user),
-    getUserByEmail: async (email) => (await ready).auth.getUserByEmail(email),
-    getUserById: async (userId) => (await ready).auth.getUserById(userId),
-    markEmailVerified: async (userId, at) => (await ready).auth.markEmailVerified(userId, at),
-    setPasswordHash: async (userId, passwordHash) => (await ready).auth.setPasswordHash(userId, passwordHash),
-    createSession: async (session) => (await ready).auth.createSession(session),
-    getSessionByTokenHash: async (tokenHash) => (await ready).auth.getSessionByTokenHash(tokenHash),
-    touchSession: async (sessionId, lastUsedAt) => (await ready).auth.touchSession(sessionId, lastUsedAt),
-    revokeSession: async (sessionId, at) => (await ready).auth.revokeSession(sessionId, at),
-    revokeAllSessionsForUser: async (userId, at) => (await ready).auth.revokeAllSessionsForUser(userId, at),
-    createAuthToken: async (token) => (await ready).auth.createAuthToken(token),
-    consumeAuthToken: async (kind, tokenHash, now) => (await ready).auth.consumeAuthToken(kind, tokenHash, now),
-    completePasswordReset: async (input) => (await ready).auth.completePasswordReset(input),
-    invalidateAuthTokens: async (userId, kind, now) => (await ready).auth.invalidateAuthTokens(userId, kind, now),
-    getGoogleIdentityBySub: async (googleSub) => (await ready).auth.getGoogleIdentityBySub(googleSub),
-    getGoogleIdentityByUserId: async (userId) => (await ready).auth.getGoogleIdentityByUserId(userId),
-    linkGoogleIdentity: async (identity) => (await ready).auth.linkGoogleIdentity(identity),
-    createGoogleUser: async (user, identity) => (await ready).auth.createGoogleUser(user, identity),
-  });
+  let ready: Promise<DatabaseServices> | null = null;
+  let retryAfter = 0;
+  const load = (): Promise<DatabaseServices> => {
+    if (!ready) {
+      if (Date.now() < retryAfter) return Promise.reject(databaseUnavailable());
+      let current: Promise<DatabaseServices>;
+      logDatabaseEvent("database_connection_check_started", "runtime.initialize");
+      current = (async () => {
+        let db: PrismaClientLike | null = null;
+        try {
+          db = await connect(connectionString);
+          await db.$queryRaw`SELECT 1`;
+          logDatabaseEvent("database_connection_success", "runtime.initialize");
+          return { auth: new PrismaAuthRepository(db), content: new PrismaRepository(db, now), adminData: new AdminDataService(new PrismaAdminDataRepository(db), now) };
+        } catch (error) {
+          logDatabaseEvent("database_connection_failed", "runtime.initialize", error);
+          if (db?.$disconnect) await db.$disconnect().catch(() => undefined);
+          throw error;
+        }
+      })().catch((error: unknown) => {
+        if (ready === current) {
+          ready = null; // A failed first connection must not poison this serverless instance forever.
+          retryAfter = Date.now() + DATABASE_RETRY_DELAY_MS; // Bound retries and diagnostic volume while a database is unavailable.
+        }
+        throw error;
+      });
+      ready = current;
+    }
+    return ready;
+  };
+  const authRepo: AuthRepository = guardAuthRepository(load);
   const email = opts.email ?? createEmailSetup();
   const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? process.env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000"), requireVerifiedEmail: email.requireVerifiedEmail, ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };
   const auth = new AuthService({ repo: authRepo, email: email.sender, limiter: new InMemoryRateLimiter(), now, newId: () => randomUUID(), config });
   const instagramOAuthStates = new AuthTokenInstagramOAuthStateStore(authRepo, () => randomUUID());
-  const content = guardRepository(delegateRepository(async () => (await ready).content));
+  const content = guardRepository(delegateRepository(async () => (await load()).content));
   const publishingMediaAccess = createConfiguredTemporaryMediaAccessAdapter();
   return {
-    mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => (await ready).adminData, now, newId: () => randomUUID(),
+    mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => guardAdminData((await load()).adminData), now, newId: () => randomUUID(),
     media: databaseMediaServices(opts.mediaDir === undefined ? process.env["CLIPFORGE_LOCAL_MEDIA_DIR"] : opts.mediaDir),
     currentUserId: async (request) => auth.getSessionUserId(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
     currentPrincipal: async (request) => auth.getSessionPrincipal(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
@@ -257,11 +317,18 @@ export function getRuntime(env: Environment = process.env): Runtime {
     holder.__clipforgeLocalRuntime ??= createLocalRuntime({ baseUrl: env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000" });
     return holder.__clipforgeLocalRuntime;
   }
-  const databaseUrl = env["DATABASE_URL"];
+  const databaseUrl = env["DATABASE_URL"]?.trim();
   if (databaseUrl) {
     const holder = globalThis as GlobalWithDemo;
     holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient);
     return holder.__clipforgeDatabaseRuntime;
+  }
+  if (env["NODE_ENV"] === "production") {
+    const holder = globalThis as GlobalWithDemo;
+    if (!holder.__clipforgeMissingDatabaseLogged) {
+      holder.__clipforgeMissingDatabaseLogged = true;
+      logDatabaseEvent("database_runtime_unconfigured", "runtime.configuration", undefined, "missing_configuration", "production");
+    }
   }
   if (env["CLIPFORGE_DEMO_MODE"] === "true" && env["NODE_ENV"] !== "production") {
     // Kept on globalThis so dev-server reloads do not recreate the sample data on every edit.
