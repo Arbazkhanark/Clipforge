@@ -1,3 +1,4 @@
+// src/components/UploadForm.tsx
 import type { UploadInfo } from "../server/queries.ts";
 
 const ACCEPT = ".mp4,.mov,.webm,.jpg,.jpeg,.png,.webp,video/mp4,video/quicktime,video/webm,image/jpeg,image/png,image/webp";

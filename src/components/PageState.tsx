@@ -1,3 +1,4 @@
+// src/components/PageState.tsx
 import type { AppError } from "../server/errors.ts";
 
 /** What to show when a page's data could not be loaded. Never reveals whether someone else's object exists. */

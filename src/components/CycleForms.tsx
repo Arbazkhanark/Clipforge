@@ -1,3 +1,4 @@
+// src/compnents/CycleForms.tsx
 import { CycleItemsTable } from "./CycleItemsTable.tsx";
 import { isEditableItem } from "../lib/domain/cycle-state.ts";
 import type { CycleDetail } from "../server/queries.ts";

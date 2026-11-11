@@ -1,3 +1,4 @@
+// app/(app)/dashboard/page.tsx
 import { DashboardView } from "../../../src/components/DashboardView.tsx";
 import { ErrorState } from "../../../src/components/PageState.tsx";
 import { loadPageData } from "../../../src/server/page-data.ts";
@@ -11,9 +12,25 @@ export const dynamic = "force-dynamic"; // per-user data: never pre-rendered or 
 
 type Search = { notice?: string; error?: string; status?: string };
 
-export default async function DashboardPage(props: { searchParams?: Promise<Search> }) {
+export default async function DashboardPage(props: {
+  searchParams?: Promise<Search>;
+}) {
   await requireCustomerPage("/dashboard");
   const searchParams = await props.searchParams;
-  const result = await loadPageData((ctx) => getDashboardData(ctx, "Asia/Kolkata", searchParams?.status));
-  return <><FlashMessage flash={parseFlash(searchParams)} />{result.ok ? <DashboardView data={result.data} actionsEnabled={result.mode !== "demo"} /> : <ErrorState error={result.error} />}</>;
+  const result = await loadPageData((ctx) =>
+    getDashboardData(ctx, "Asia/Kolkata", searchParams?.status),
+  );
+  return (
+    <>
+      <FlashMessage flash={parseFlash(searchParams)} />
+      {result.ok ? (
+        <DashboardView
+          data={result.data}
+          actionsEnabled={result.mode !== "demo"}
+        />
+      ) : (
+        <ErrorState error={result.error} />
+      )}
+    </>
+  );
 }

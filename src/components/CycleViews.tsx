@@ -1,3 +1,4 @@
+//src/components/CycleViews.tsx
 import type { CycleCard, CycleDetail } from "../server/queries.ts";
 import { CYCLE_STATUS_LABELS } from "./format.ts";
 import { CycleEditor, RepeatModeForm, StartCycleForm } from "./CycleForms.tsx";

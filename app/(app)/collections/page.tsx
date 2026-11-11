@@ -1,3 +1,4 @@
+// app/(app)/collections
 import { CollectionsOverviewView } from "../../../src/components/CollectionViews.tsx";
 import { ErrorState } from "../../../src/components/PageState.tsx";
 import { FlashMessage } from "../../../src/components/FlashMessage.tsx";

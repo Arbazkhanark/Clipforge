@@ -1,3 +1,4 @@
+// src/components/PreflightPanel.tsx
 import type { PreflightLevel, PreflightReport } from "../lib/domain/preflight.ts";
 
 const LEVEL_TEXT: Record<PreflightLevel, string> = { ready: "Ready", recommendation: "Recommendation", action_required: "Action required", blocked: "Blocked" };

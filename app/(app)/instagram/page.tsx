@@ -1,3 +1,4 @@
+// app/(app)/instagram
 import { InstagramAccountsView } from "../../../src/components/InstagramAccounts.tsx";
 import { ErrorState } from "../../../src/components/PageState.tsx";
 import { FlashMessage } from "../../../src/components/FlashMessage.tsx";
