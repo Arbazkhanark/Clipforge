@@ -1,3 +1,4 @@
+// src/components/AppShell.tsx
 import type { ReactNode } from "react";
 import type { EmailDelivery, RuntimeMode } from "../server/runtime.ts";
 

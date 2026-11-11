@@ -922,3 +922,345 @@ body.clipforge-dark .auth-toast--notice { border-color: #695039; background: #30
   .auth-google-button:hover, .auth-submit:hover:not(:disabled) { transform: none; }
   .auth-submit-spinner { animation: none; border-style: dotted; }
 }
+
+
+
+
+
+
+
+/* ================================================================
+   ClipForge × ReelQueue Theme
+   Warm cream light mode + dark charcoal/red-orange dark mode
+   ================================================================ */
+
+/* LIGHT MODE */
+body.clipforge-public {
+  --bg: #f6f3ed;
+  --fg: #1c1917;
+  --muted: #625b54;
+  --card: #fffdf9;
+  --border: #dcd5ca;
+  --accent: #b23a0a;
+  --accent-strong: #8f2d0b;
+  --accent-soft: #f5e4da;
+  --surface-raised: #fffdf9;
+  --public-shadow: 0 18px 54px rgb(48 32 22 / 9%);
+
+  background: var(--bg);
+  color: var(--fg);
+  color-scheme: light;
+  font-family: ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* DARK MODE — REELQUEUE PALETTE */
+body.clipforge-public.clipforge-dark {
+  --bg: #14110f;
+  --fg: #f5f1ea;
+  --muted: #aaa298;
+  --card: #1f1b18;
+  --border: #3e3832;
+  --accent: #fb923c;
+  --accent-strong: #ff914d;
+  --accent-soft: #3b241c;
+  --surface-raised: #25201c;
+  --public-shadow: 0 20px 54px rgb(0 0 0 / 34%);
+
+  color-scheme: dark;
+}
+
+/* FOCUS & LINKS */
+body.clipforge-public :where(
+  a, button, input, select, textarea, summary
+):focus-visible {
+  outline-color: #fb923c;
+}
+
+body.clipforge-public a:not(.button):not(.site-brand) {
+  text-decoration-color: color-mix(
+    in srgb, var(--accent) 45%, transparent
+  );
+}
+
+/* NAVIGATION */
+body.clipforge-public .site-header {
+  border-bottom-color: var(--border);
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+body.clipforge-public .site-brand-mark,
+body.clipforge-public .preview-sidebar-mark {
+  background: linear-gradient(
+    145deg,
+    #ff914d 0%,
+    #e85b30 55%,
+    #b83219 100%
+  );
+  color: #fff;
+}
+
+/* PRIMARY BUTTONS */
+body.clipforge-public .button-primary,
+body.clipforge-public .button-link {
+  border-color: #c94324;
+  background: linear-gradient(
+    100deg,
+    #ff914d 0%,
+    #e85b30 52%,
+    #b83219 100%
+  );
+  color: #fff;
+  box-shadow: 0 8px 22px rgb(184 50 25 / 22%);
+}
+
+body.clipforge-public .button-primary:hover,
+body.clipforge-public .button-link:hover {
+  filter: brightness(1.08);
+}
+
+body.clipforge-public .button-secondary {
+  border-color: var(--border);
+  background: var(--card);
+  color: var(--fg);
+}
+
+body.clipforge-public.clipforge-dark .button-secondary:hover {
+  background: #302720;
+}
+
+/* ACCENT TEXT */
+body.clipforge-public .eyebrow,
+body.clipforge-public .feature-number,
+body.clipforge-public .story-scene-number,
+body.clipforge-public .preview-kicker,
+body.clipforge-public .walkthrough-card-heading > span {
+  color: var(--accent-strong);
+}
+
+body.clipforge-public.clipforge-dark .eyebrow,
+body.clipforge-public.clipforge-dark .feature-number,
+body.clipforge-public.clipforge-dark .story-scene-number,
+body.clipforge-public.clipforge-dark .preview-kicker,
+body.clipforge-public.clipforge-dark .walkthrough-card-heading > span {
+  color: #ff914d;
+}
+
+body.clipforge-public .hero-copy h1 em {
+  color: var(--accent-strong);
+}
+
+body.clipforge-public.clipforge-dark .hero-copy h1 em {
+  color: #ff914d;
+}
+
+/* CARDS & CONTENT SECTIONS */
+body.clipforge-public :where(
+  .feature-card,
+  .walkthrough-card,
+  .home-plan-card,
+  .audience-grid article,
+  .faq-preview-grid article,
+  .comparison-card,
+  .problem-list article,
+  .story-scene,
+  .preview-window,
+  .intro-copy,
+  .walkthrough-preview,
+  .feature-footnote
+) {
+  border-color: var(--border);
+}
+
+body.clipforge-public :where(
+  .feature-card,
+  .walkthrough-card,
+  .home-plan-card,
+  .audience-grid article,
+  .faq-preview-grid article,
+  .comparison-card,
+  .problem-list article,
+  .story-scene,
+  .preview-window,
+  .walkthrough-preview
+) {
+  background-color: var(--card);
+}
+
+body.clipforge-public.clipforge-dark :where(
+  .feature-card,
+  .walkthrough-card,
+  .home-plan-card,
+  .audience-grid article,
+  .faq-preview-grid article,
+  .comparison-card,
+  .problem-list article,
+  .story-scene,
+  .preview-window,
+  .walkthrough-preview,
+  .intro-copy,
+  .feature-footnote
+) {
+  box-shadow: 0 14px 36px rgb(0 0 0 / 18%);
+}
+
+/* FEATURED CARDS */
+body.clipforge-public.clipforge-dark .comparison-card-featured,
+body.clipforge-public.clipforge-dark .home-plan-card-featured {
+  border-color: #8e3c25;
+  background: linear-gradient(150deg, #2b1e18, #211a16 72%);
+}
+
+body.clipforge-public.clipforge-dark .comparison-card-muted {
+  background: #1b1815;
+}
+
+/* HERO & STORY VISUALS */
+body.clipforge-public .hero-visual::before,
+body.clipforge-public .hero-orbit,
+body.clipforge-public .story-visual-note,
+body.clipforge-public .story-arrow,
+body.clipforge-public .preview-play {
+  color: #ff914d;
+}
+
+body.clipforge-public .preview-video-art,
+body.clipforge-public .story-frame,
+body.clipforge-public .story-segments i,
+body.clipforge-public .story-calendar-grid span:nth-of-type(3n) {
+  background: linear-gradient(145deg, #ffb16c, #b83219);
+}
+
+/* DARK PREVIEW PANELS */
+body.clipforge-public.clipforge-dark .preview-window-bar,
+body.clipforge-public.clipforge-dark .preview-sidebar,
+body.clipforge-public.clipforge-dark .preview-board,
+body.clipforge-public.clipforge-dark .preview-project-card,
+body.clipforge-public.clipforge-dark .preview-queue-row,
+body.clipforge-public.clipforge-dark .story-calendar,
+body.clipforge-public.clipforge-dark .story-edit,
+body.clipforge-public.clipforge-dark .story-clips,
+body.clipforge-public.clipforge-dark .story-status {
+  border-color: var(--border);
+  background-color: var(--surface-raised);
+  color: var(--fg);
+}
+
+body.clipforge-public.clipforge-dark .preview-disclaimer,
+body.clipforge-public.clipforge-dark .preview-queue-row small,
+body.clipforge-public.clipforge-dark .story-visual small,
+body.clipforge-public.clipforge-dark .story-calendar-head span {
+  color: var(--muted);
+}
+
+/* COMPARISON SECTION */
+body.clipforge-public.clipforge-dark .comparison-section {
+  background: #1b1714;
+}
+
+body.clipforge-public.clipforge-dark .trust-strip {
+  border-color: var(--border);
+  background: #1f1b18;
+  color: var(--muted);
+}
+
+/* FINAL CTA */
+body.clipforge-public.clipforge-dark .final-cta {
+  border-color: #71351f;
+  background:
+    radial-gradient(
+      ellipse at 90% 0%,
+      rgb(232 91 48 / 20%),
+      transparent 48%
+    ),
+    linear-gradient(
+      135deg,
+      #2a1c16,
+      #1f1915 62%,
+      #191512
+    );
+}
+
+body.clipforge-public.clipforge-dark .feedback-section {
+  border-color: var(--border);
+}
+
+/* ================================================================
+   WORKSPACE / DASHBOARD THEME
+   ================================================================ */
+
+body:has(.workspace-shell) {
+  --bg: #f6f3ed;
+  --fg: #1c1917;
+  --muted: #625b54;
+  --card: #fffdf9;
+  --border: #dcd5ca;
+  --accent: #b23a0a;
+
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* DASHBOARD DARK MODE */
+body.clipforge-dark:has(.workspace-shell),
+body.clipforge-public.clipforge-dark:has(.workspace-shell) {
+  --bg: #14110f;
+  --fg: #f5f1ea;
+  --muted: #aaa298;
+  --card: #1f1b18;
+  --border: #3e3832;
+  --accent: #fb923c;
+
+  color-scheme: dark;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* WORKSPACE SURFACES */
+.workspace-shell {
+  color: var(--fg);
+}
+
+.workspace-shell .app-nav,
+.workspace-shell .notice,
+.workspace-shell .card,
+.workspace-shell .plan-card,
+.workspace-shell .data-table,
+.workspace-shell fieldset {
+  border-color: var(--border);
+  background: var(--card);
+  color: var(--fg);
+}
+
+/* WORKSPACE LINKS */
+.workspace-shell .app-nav a,
+.workspace-shell .app-content a:not(.button-link) {
+  color: var(--accent);
+}
+
+/* WORKSPACE BUTTONS */
+.workspace-shell button,
+.workspace-shell .button-link {
+  border-color: #c94324;
+  background: linear-gradient(
+    100deg,
+    #ff914d 0%,
+    #e85b30 52%,
+    #b83219 100%
+  );
+  color: #fff;
+}
+
+/* WORKSPACE INPUTS */
+.workspace-shell input,
+.workspace-shell textarea,
+.workspace-shell select {
+  border-color: var(--border);
+  background: var(--card);
+  color: var(--fg);
+}
+
+body.clipforge-dark .workspace-shell .app-nav a {
+  border-color: var(--border);
+}

@@ -1,3 +1,4 @@
+// app/layout.tsx
 import type { ReactNode } from "react";
 import "./globals.css";
 import { getRuntime } from "../src/server/runtime.ts";

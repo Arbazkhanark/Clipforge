@@ -1,3 +1,4 @@
+// app/page.tsx
 import { PLAN_CATALOG, PLAN_IDS, formatPaiseAsRupees } from "../src/lib/billing/catalog.ts";
 import { formatCount, formatStorage } from "../src/components/format.ts";
 import { ProductStory } from "../src/components/ProductStory.tsx";

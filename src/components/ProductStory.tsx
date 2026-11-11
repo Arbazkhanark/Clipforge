@@ -1,3 +1,4 @@
+// src/components/ProductStory.tsx
 const SCENES = [
   { number: "01", title: "Create", detail: "You record, plan, and choose what is worth sharing.", kind: "creator" },
   { number: "02", title: "Select and trim", detail: "You choose source moments and set each clip's trim range.", kind: "clips" },
