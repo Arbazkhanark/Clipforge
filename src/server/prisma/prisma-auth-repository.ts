@@ -12,7 +12,9 @@ export class PrismaAuthRepository implements AuthRepository {
 
   async createUser(user: UserRecord): Promise<boolean> {
     try {
-      await this.db.user.create({ data: { id: user.id, email: user.email, emailVerified: user.emailVerifiedAt, passwordHash: user.passwordHash, name: user.name, role: user.role, createdAt: user.createdAt } });
+      // Public signup must use the database's ordinary-user default. An
+      // untrusted caller-supplied UserRecord.role is never persisted here.
+      await this.db.user.create({ data: { id: user.id, email: user.email, emailVerified: user.emailVerifiedAt, passwordHash: user.passwordHash, name: user.name, createdAt: user.createdAt } });
       return true;
     } catch (error) { if (isUniqueViolation(error)) return false; throw error; } // the UNIQUE index decides races, not our code
   }
@@ -70,17 +72,18 @@ export class PrismaAuthRepository implements AuthRepository {
     if (identity.userId !== user.id) return "sub_taken";
     try {
       await this.db.$transaction(async (tx) => {
-        await tx.user.create({ data: { id: user.id, email: user.email, emailVerified: user.emailVerifiedAt, passwordHash: user.passwordHash, name: user.name, role: user.role, createdAt: user.createdAt } });
+        // As with password signup, public Google signup relies on the DB's
+        // role default instead of accepting a caller-selected role.
+        await tx.user.create({ data: { id: user.id, email: user.email, emailVerified: user.emailVerifiedAt, passwordHash: user.passwordHash, name: user.name, createdAt: user.createdAt } });
         await tx.googleIdentity.create({ data: { id: identity.id, userId: identity.userId, googleSub: identity.googleSub, createdAt: identity.createdAt } });
       });
       return "created";
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
       const subOwner = await this.getGoogleIdentityBySub(identity.googleSub);
-      if (subOwner) {
-        await this.db.user.deleteMany({ where: { id: user.id, email: user.email } });
-        return "sub_taken";
-      }
+      // The transaction has already rolled back both inserts. Never issue a
+      // compensating broad delete that could remove a pre-existing user.
+      if (subOwner) return "sub_taken";
       return "email_taken";
     }
   }

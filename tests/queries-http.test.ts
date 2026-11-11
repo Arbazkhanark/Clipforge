@@ -85,7 +85,7 @@ test("a collection you cannot view is indistinguishable from a missing one; expi
 test("public-view collections are visible to others but give them no use/import/download", async () => {
   repo.collections.set("pub", { id: "pub", ownerId: "someone", visibility: "public_view", archived: false, name: "Public one", mediaIds: ["demo-shared-1"] });
   const detail = await getCollectionDetail(await ctxFor("eve"), "pub");
-  assert.deepEqual(detail.permissions, { canUseInCycle: false, canImport: false, canDownload: false, isOwner: false });
+  assert.deepEqual(detail.permissions, { canUseInCycle: false, canImport: false, canRequestImport: false, canDownload: false, isOwner: false });
 });
 
 test("deleted media is hidden from collections and the library", async () => {

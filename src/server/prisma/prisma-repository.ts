@@ -208,6 +208,8 @@ export class PrismaRepository implements Repository {
     const auditWriteFailure = Symbol("promotion update audit write failed");
     try {
       return await this.db.$transaction(async (tx) => {
+        const actorLock = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${actorUserId} FOR UPDATE`;
+        if (!Array.isArray(actorLock) || actorLock.length === 0) return { status: "conflict" };
         const actor = await tx.user.findUnique({ where: { id: actorUserId }, select: { role: true } });
         if (actor?.["role"] !== "admin") return { status: "conflict" };
         const currentRow = await tx.promotion.findUnique({ where: { id: record.id } });
@@ -243,7 +245,7 @@ export class PrismaRepository implements Repository {
           await this.insertPromotionEvent(tx, {
             id: `event-${record.id}-updated-${updatedAt.getTime()}`, eventKey: `promotion:${record.id}:updated:${updatedAt.getTime()}`,
             eventType: "promotion_updated", promotionId: record.id, actorUserId, occurredAt: updatedAt,
-            metadata: { status: "draft", source: "admin_draft_edit", reason: record.reason },
+            metadata: { status: "draft", source: "admin_draft_edit", reason: record.reason, reasonOld: current.reason, reasonNew: record.reason },
           });
         } catch { throw auditWriteFailure; }
         const updatedRow = await tx.promotion.findUnique({ where: { id: record.id } });
@@ -255,11 +257,43 @@ export class PrismaRepository implements Repository {
       throw error;
     }
   }
+  async updatePromotionReason(input: { id: string; reason: string | null; expectedUpdatedAt: Date; actorUserId: string; now: Date }): Promise<import("../repository.ts").UpdatePromotionReasonResult> {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.id) || !/^[A-Za-z0-9_-]{1,64}$/.test(input.actorUserId) || !Number.isFinite(input.expectedUpdatedAt.getTime()) || !Number.isFinite(input.now.getTime()) || (input.reason !== null && (typeof input.reason !== "string" || input.reason.length > 500))) return { status: "conflict" };
+    const auditWriteFailure = Symbol("promotion reason audit write failed");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        // All promotion mutations follow User first, Promotion second.
+        const actorLock = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.actorUserId} FOR UPDATE`;
+        if (!Array.isArray(actorLock) || actorLock.length === 0) return { status: "conflict" };
+        const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { role: true } });
+        if (actor?.["role"] !== "admin") return { status: "conflict" };
+        const lockedPromotion = await tx.$queryRaw`SELECT "id" FROM "Promotion" WHERE "id" = ${input.id} FOR UPDATE`;
+        if (!Array.isArray(lockedPromotion) || lockedPromotion.length === 0) return { status: "missing" };
+        const currentRow = await tx.promotion.findUnique({ where: { id: input.id } });
+        if (!currentRow) return { status: "missing" };
+        const current = this.promotionFromRow(currentRow);
+        if (current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()) return { status: "stale" };
+        const updatedAt = new Date(Math.max(input.now.getTime(), input.expectedUpdatedAt.getTime() + 1));
+        const changed = await tx.promotion.updateMany({ where: { id: input.id, updatedAt: input.expectedUpdatedAt }, data: { reason: input.reason, updatedAt } });
+        if (changed.count !== 1) return { status: "stale" };
+        try {
+          await this.insertPromotionEvent(tx, { id: `event-${input.id}-reason-${updatedAt.getTime()}`, eventKey: `promotion:${input.id}:reason:${updatedAt.getTime()}`, eventType: "promotion_updated", promotionId: input.id, actorUserId: input.actorUserId, occurredAt: updatedAt, metadata: { source: "admin_reason_update", status: current.status, reasonOld: current.reason, reasonNew: input.reason } });
+        } catch { throw auditWriteFailure; }
+        const updatedRow = await tx.promotion.findUnique({ where: { id: input.id } });
+        return updatedRow ? { status: "updated", promotion: this.promotionFromRow(updatedRow) } : { status: "conflict" };
+      });
+    } catch (error) {
+      if (error === auditWriteFailure) return { status: "conflict" };
+      throw error;
+    }
+  }
   async transitionCouponStatus(input: { id: string; expectedStatus: "draft" | "active"; nextStatus: "active" | "paused"; expectedUpdatedAt: Date; actorUserId: string; now: Date }): Promise<TransitionCouponStatusResult> {
     if (!Number.isFinite(input.expectedUpdatedAt.getTime()) || !Number.isFinite(input.now.getTime()) || !((input.expectedStatus === "draft" && input.nextStatus === "active") || (input.expectedStatus === "active" && input.nextStatus === "paused"))) return { status: "conflict" };
     const auditWriteFailure = Symbol("coupon status audit write failed");
     try {
       return await this.db.$transaction(async (tx) => {
+        const actorLock = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.actorUserId} FOR UPDATE`;
+        if (!Array.isArray(actorLock) || actorLock.length === 0) return { status: "conflict" };
         const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { role: true } });
         if (actor?.["role"] !== "admin") return { status: "conflict" };
         const row = await tx.promotion.findUnique({ where: { id: input.id } });
@@ -403,8 +437,8 @@ export class PrismaRepository implements Repository {
         }
         const discounted = input.planId !== undefined && input.planId !== null && input.interval !== undefined && input.interval !== null && input.listPricePaise !== undefined && input.listPricePaise !== null && input.discountPaise !== undefined && input.discountPaise !== null && input.payablePaise !== undefined && input.payablePaise !== null && validDiscountSnapshot(promotion, { userId: input.userId, planId: input.planId, interval: input.interval, listPricePaise: input.listPricePaise, discountPaise: input.discountPaise, payablePaise: input.payablePaise, now: input.now });
         if (!discounted) return { status: "conflict" as const };
-        const activeForUser = await tx.promotionRedemption.findFirst({ where: { promotionId: input.promotionId, userId: input.userId, status: { in: ["reserved", "redeemed", "manual_review"] } }, select: { id: true } });
-        if (activeForUser) return { status: "conflict" as const };
+        const previousForUser = await tx.promotionRedemption.findFirst({ where: { promotionId: input.promotionId, userId: input.userId }, select: { id: true } });
+        if (previousForUser) return { status: "conflict" as const };
         const counted = await tx.promotionRedemption.count({ where: { promotionId: input.promotionId, status: { in: ["reserved", "redeemed", "manual_review"] } } });
         if (promotion.usageLimit !== null && counted >= promotion.usageLimit) return { status: "conflict" as const };
         if (input.manualPaymentIntentId) {
@@ -506,6 +540,8 @@ export class PrismaRepository implements Repository {
       return await this.db.$transaction(async (tx) => {
         const locked = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
         if (!Array.isArray(locked) || locked.length === 0) return { status: "conflict" as const };
+        const promotionLock = await tx.$queryRaw`SELECT "id" FROM "Promotion" WHERE "id" = ${input.promotionId} FOR UPDATE`;
+        if (!Array.isArray(promotionLock) || promotionLock.length === 0) return { status: "conflict" as const };
         const promotionRow = await tx.promotion.findUnique({ where: { id: input.promotionId } });
         if (!promotionRow) return { status: "conflict" as const };
         const promotion = this.promotionFromRow(promotionRow);
@@ -668,7 +704,7 @@ export class PrismaRepository implements Repository {
   }
 
   private razorpayIntentFromRow(row: Record<string, unknown>): RazorpaySubscriptionIntentRecord {
-    return { id: String(row["id"]), userId: String(row["userId"]), idempotencyKey: String(row["idempotencyKey"]), autoRenewConsentAt: row["autoRenewConsentAt"] as Date | null, autoRenewConsentVersion: row["autoRenewConsentVersion"] as string | null, providerSubscriptionId: row["providerSubscriptionId"] as string | null, providerPlanId: String(row["providerPlanId"]), checkoutUrl: row["checkoutUrl"] as string | null, planId: row["planId"] as PlanId, interval: row["interval"] as "weekly" | "monthly", amountPaise: Number(row["amountPaise"]), currency: "INR", status: row["status"] as RazorpayIntentStatus, errorCategory: row["errorCategory"] as string | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date };
+    return { id: String(row["id"]), userId: String(row["userId"]), idempotencyKey: String(row["idempotencyKey"]), autoRenewConsentAt: row["autoRenewConsentAt"] as Date | null, autoRenewConsentVersion: row["autoRenewConsentVersion"] as string | null, providerSubscriptionId: row["providerSubscriptionId"] as string | null, providerPlanId: String(row["providerPlanId"]), checkoutUrl: row["checkoutUrl"] as string | null, planId: row["planId"] as PlanId, interval: row["interval"] as "weekly" | "monthly", amountPaise: row["amountPaise"] === null ? null : Number(row["amountPaise"]), currency: "INR", status: row["status"] as RazorpayIntentStatus, errorCategory: row["errorCategory"] as string | null, createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date };
   }
   async reserveRazorpaySubscriptionIntent(input: ReserveRazorpaySubscriptionIntentInput): Promise<{ status: "created" | "existing" | "conflict"; intent?: RazorpaySubscriptionIntentRecord }> {
     if (input.planId === "free" || getPlan(input.planId).pricePaise[input.interval] !== input.amountPaise || !input.idempotencyKey || input.idempotencyKey.length > 128 || !(input.autoRenewConsentAt instanceof Date) || !input.autoRenewConsentVersion) return { status: "conflict" };
@@ -815,7 +851,7 @@ export class PrismaRepository implements Repository {
         if (promotion.status !== "active" || promotion.startsAt > input.now || (promotion.expiresAt !== null && promotion.expiresAt <= input.now) ||
           (promotion.targetUserId !== null && promotion.targetUserId !== input.userId) || !promotion.eligiblePlanIds.includes(input.planId) || !validPromotionRecord(promotion) ||
           !validDiscountSnapshot(promotion, { userId: input.userId, planId: input.planId, interval: input.interval, ...amounts, now: input.now })) return { status: "unavailable" as const };
-        const previous = await tx.promotionRedemption.findFirst({ where: { promotionId: promotion.id, userId: input.userId, status: { in: ["reserved", "redeemed", "manual_review"] } }, select: { id: true } });
+        const previous = await tx.promotionRedemption.findFirst({ where: { promotionId: promotion.id, userId: input.userId }, select: { id: true } });
         if (previous) return { status: "conflict" as const };
         const used = await tx.promotionRedemption.count({ where: { promotionId: promotion.id, status: { in: ["reserved", "redeemed", "manual_review"] } } });
         if (promotion.usageLimit !== null && used >= promotion.usageLimit) return { status: "unavailable" as const };
@@ -960,8 +996,8 @@ export class PrismaRepository implements Repository {
         const subscription = input.subscriptionId ? await tx.subscription.findUnique({ where: { razorpaySubscriptionId: input.subscriptionId } }) : null;
         if (input.newStatus && (!subscription || !lockedUserId || subscription["userId"] !== lockedUserId || input.createdAt === undefined)) return "unknown_subscription";
         const intent = input.subscriptionId ? await tx.razorpaySubscriptionIntent.findUnique({ where: { providerSubscriptionId: input.subscriptionId } }) : null;
-        if (input.newStatus === "active" && (!intent || intent["status"] === "manual_review" || !input.payment || input.payment.status !== "captured" || input.payment.currency !== "INR" || input.payment.amount !== Number(intent["amountPaise"]) || !input.payment.id)) return "invalid_transition";
-        const validPlanPayment = Boolean(intent && input.payment && input.payment.currency === "INR" && input.payment.amount === Number(intent["amountPaise"]) && (input.payment.status === "captured" || input.payment.status === "failed"));
+        if (input.newStatus === "active" && (!intent || intent["status"] === "manual_review" || intent["amountPaise"] == null || !input.payment || input.payment.status !== "captured" || input.payment.currency !== "INR" || input.payment.amount !== Number(intent["amountPaise"]) || !input.payment.id)) return "invalid_transition";
+        const validPlanPayment = Boolean(intent && intent["amountPaise"] != null && input.payment && input.payment.currency === "INR" && input.payment.amount === Number(intent["amountPaise"]) && (input.payment.status === "captured" || input.payment.status === "failed"));
         await tx.webhookEvent.create({ data: { providerEventId: input.providerEventId, eventType: input.eventType, status: "received", receivedAt: this.now(), processedAt: null, errorMessage: null } });
         if (!input.newStatus || input.createdAt === undefined || !subscription) {
           await tx.webhookEvent.update({ where: { providerEventId: input.providerEventId }, data: { status: "ignored", processedAt: this.now() } });
@@ -981,7 +1017,7 @@ export class PrismaRepository implements Repository {
         if (intent && input.payment && validPlanPayment) {
           await tx.paymentRecord.create({ data: { userId: subscription["userId"], providerPaymentId: input.payment.id, amountPaise: input.payment.amount, currency: input.payment.currency, status: input.payment.status, subscriptionIntentId: intent["id"], providerSubscriptionId: input.subscriptionId, createdAt: this.now() } });
         }
-        if (intent && ["active", "cancelled", "completed", "expired"].includes(outcome.state.status)) {
+        if (intent && !(intent["status"] === "manual_review" && intent["amountPaise"] == null) && ["active", "cancelled", "completed", "expired"].includes(outcome.state.status)) {
           const intentStatus = outcome.state.status === "active" ? "active" : outcome.state.status === "cancelled" ? "cancelled" : "expired";
           await tx.razorpaySubscriptionIntent.updateMany({ where: { id: intent["id"], providerSubscriptionId: input.subscriptionId }, data: { status: intentStatus, updatedAt: this.now() } });
         }

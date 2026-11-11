@@ -17,6 +17,7 @@ export async function verifyOwnedSubscriptionPayment(request: Request, runtime: 
   if (typeof subscriptionId !== "string" || typeof paymentId !== "string" || typeof signature !== "string") return json({ error: "invalid_request" }, 400);
   const intent = await runtime.repo.getRazorpaySubscriptionIntentByProviderId(userId, subscriptionId);
   if (!intent) return json({ error: "subscription_not_found" }, 404);
+  if (intent.amountPaise === null || intent.status === "manual_review") return json({ error: "payment_requires_manual_review" }, 409);
   const client = clientOverride ?? new RazorpayTestClient(config);
   const verified = await client.verifySubscriptionPayment({ paymentId, subscriptionId, signature, amountPaise: intent.amountPaise });
   if (!verified) return json({ error: "payment_not_verified" }, 400);

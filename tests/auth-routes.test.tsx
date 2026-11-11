@@ -168,7 +168,10 @@ test("PAGES read the cookie from the request headers: signed-in users see their 
   }
   setPageCookieReaderForTests(async () => ann);
   const layout = html(await AppLayout({ children: <p>x</p> }));
-  assert.ok(layout.includes("data-local-banner")); assert.ok(layout.includes("disappear when the server restarts")); assert.ok(layout.includes('action="/api/auth/logout"')); assert.ok(layout.includes("Connect Google")); assert.ok(!layout.includes("data-demo-banner"));
+  assert.ok(layout.includes("data-local-banner")); assert.ok(layout.includes("disappear when the server restarts")); assert.ok(layout.includes('action="/api/auth/logout"')); assert.ok(!layout.includes("data-demo-banner"));
+  const googleConfigured = (await import("../src/server/auth/google-oauth.ts")).readGoogleOAuthConfig() !== null;
+  assert.equal(layout.includes("Connect Google"), googleConfigured);
+  assert.equal(layout.includes("Google sign-in is not configured."), !googleConfigured);
   const header = html(await RootLayout({ children: <p>x</p> }));
   assert.ok(header.includes('data-auth-state="signed-in"')); assert.ok(!header.includes('data-auth-state="signed-out"'));
   setPageCookieReaderForTests(async () => null);

@@ -19,6 +19,17 @@ import RegisterPage from "../app/register/page.tsx";
 import { NOW } from "./helpers.ts";
 
 const html = (node: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(node);
+async function assertLoginRedirect(page: Promise<unknown>, returnTo: string): Promise<void> {
+  await assert.rejects(page, (error: unknown) => {
+    const digest = (error as { digest?: unknown } | null)?.digest;
+    assert.equal(typeof digest, "string", "unauthenticated page must use Next's server redirect");
+    const [code, , location, status] = (digest as string).split(";");
+    assert.equal(code, "NEXT_REDIRECT");
+    assert.equal(location, `/login?returnTo=${encodeURIComponent(returnTo)}`);
+    assert.equal(status, "307");
+    return true;
+  });
+}
 let repo: MemoryRepository;
 const runtimeFor = (userId: string | null, mode: Runtime["mode"] = "demo"): Runtime =>
   ({ mode, repo, currentUserId: async () => userId, newId: () => "x", now: () => NOW });
@@ -152,20 +163,21 @@ test("cycle detail reflects a revoked share: preflight turns Blocked", async () 
   assert.ok(detail.includes("Blocked")); assert.ok(detail.includes("can no longer be used"));
 });
 
-test("not signed in: every data page asks you to sign in and shows no data", async () => {
+test("not signed in: every private data page redirects to login before rendering", async () => {
   setRuntimeForTests(runtimeFor(null));
-  for (const page of [DashboardPage({}), MediaPage({}), CollectionsPage({}), CyclesPage({}), CollectionPage({ params: Promise.resolve({ collectionId: "demo-col-1" }) }), CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }) })]) {
-    const out = html(await page);
-    assert.ok(out.includes("Sign in required"), out.slice(0, 120)); assert.ok(!out.includes("Sample"));
-  }
+  await assertLoginRedirect(DashboardPage({}), "/dashboard");
+  await assertLoginRedirect(MediaPage({}), "/media");
+  await assertLoginRedirect(CollectionsPage({}), "/collections");
+  await assertLoginRedirect(CyclesPage({}), "/cycles");
+  await assertLoginRedirect(CollectionPage({ params: Promise.resolve({ collectionId: "demo-col-1" }) }), "/collections/demo-col-1");
+  await assertLoginRedirect(CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }) }), `/cycles/${DEMO_CYCLE_ID}`);
 });
 
 test("DEFAULT (no demo flag): nothing is faked - nobody is signed in and the database is unavailable", async () => {
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(null);
     assert.equal(getRuntime().mode, "unconfigured");
-    const out = html(await DashboardPage({}));
-    assert.ok(out.includes("Sign in required")); assert.ok(!out.includes("Sample"));
+    await assertLoginRedirect(DashboardPage({}), "/dashboard");
     assert.ok(!html(await AppLayout({ children: <p>x</p> })).includes("Demo mode"));
   });
 });
@@ -179,7 +191,7 @@ test("CLIPFORGE_DEMO_MODE=true switches to sample data and shows the demo banner
     const layout = html(await AppLayout({ children: <p>child</p> }));
     assert.ok(layout.includes("data-demo-banner")); assert.ok(layout.includes("SAMPLE data")); assert.ok(layout.includes("read-only previews"));
     for (const label of ["Dashboard", "Media library", "Collections", "Publishing cycles", "Plans"]) assert.ok(layout.includes(label));
-    assert.ok(layout.includes('aria-label="App"'));
+    assert.ok(layout.includes('aria-label="Workspace"'));
   });
 });
 

@@ -167,7 +167,7 @@ export class MemoryRepository implements Repository {
   async updateDraftPromotion(input: { record: PromotionRecord; expectedUpdatedAt: Date; actorUserId: string }): Promise<import("./repository.ts").UpdateDraftPromotionResult> {
     const { record, expectedUpdatedAt, actorUserId } = input;
     if (!Number.isFinite(expectedUpdatedAt.getTime()) || !validPromotionRecord(record) || (record.code && normalizePromotionCode(record.code) !== record.code)) return { status: "conflict" };
-    return this.withPromotionLock(`promotion:${record.id}`, async () => {
+    return this.withPromotionLock(`user:${actorUserId}`, () => this.withPromotionLock(`promotion:${record.id}`, async () => {
       await tick();
       const current = this.promotions.get(record.id);
       if (!current) return { status: "missing" };
@@ -189,7 +189,7 @@ export class MemoryRepository implements Repository {
       try {
         const logged = await this.insertPromotionEvent({
           id: `event-${record.id}-updated-${updatedAt.getTime()}`, eventKey, eventType: "promotion_updated", promotionId: record.id,
-          actorUserId, occurredAt: updatedAt, metadata: { status: "draft", source: "admin_draft_edit", reason: updated.reason },
+          actorUserId, occurredAt: updatedAt, metadata: { status: "draft", source: "admin_draft_edit", reason: updated.reason, reasonOld: current.reason, reasonNew: updated.reason },
         });
         if (!logged) {
           this.promotions.set(record.id, clone(current));
@@ -204,11 +204,36 @@ export class MemoryRepository implements Repository {
         this.audit.length = oldAuditLength;
         return { status: "conflict" };
       }
-    });
+    }));
+  }
+  async updatePromotionReason(input: { id: string; reason: string | null; expectedUpdatedAt: Date; actorUserId: string; now: Date }): Promise<import("./repository.ts").UpdatePromotionReasonResult> {
+    if (!Number.isFinite(input.expectedUpdatedAt.getTime()) || !Number.isFinite(input.now.getTime()) || (input.reason !== null && (typeof input.reason !== "string" || input.reason.length > 500))) return { status: "conflict" };
+    return this.withPromotionLock(`user:${input.actorUserId}`, () => this.withPromotionLock(`promotion:${input.id}`, async () => {
+      await tick();
+      const current = this.promotions.get(input.id);
+      if (!current) return { status: "missing" };
+      if (this.userRoles.get(input.actorUserId) !== "admin") return { status: "conflict" };
+      if (current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()) return { status: "stale" };
+      const updatedAt = new Date(Math.max(input.now.getTime(), input.expectedUpdatedAt.getTime() + 1));
+      const updated = { ...current, reason: input.reason, updatedAt };
+      const eventKey = `promotion:${input.id}:reason:${updatedAt.getTime()}`;
+      const event = { id: `event-${input.id}-reason-${updatedAt.getTime()}`, eventKey, eventType: "promotion_updated" as const, promotionId: input.id, actorUserId: input.actorUserId, occurredAt: updatedAt, metadata: { source: "admin_reason_update", status: current.status, reasonOld: current.reason, reasonNew: input.reason } };
+      const oldAuditLength = this.audit.length;
+      this.promotions.set(input.id, clone(updated));
+      try {
+        if (!await this.insertPromotionEvent(event)) throw new Error("Promotion reason audit could not be recorded.");
+        return { status: "updated", promotion: clone(updated) };
+      } catch {
+        this.promotions.set(input.id, clone(current));
+        this.promotionLifecycleEvents.delete(eventKey);
+        this.audit.length = oldAuditLength;
+        return { status: "conflict" };
+      }
+    }));
   }
   async transitionCouponStatus(input: { id: string; expectedStatus: "draft" | "active"; nextStatus: "active" | "paused"; expectedUpdatedAt: Date; actorUserId: string; now: Date }): Promise<TransitionCouponStatusResult> {
     if (!Number.isFinite(input.expectedUpdatedAt.getTime()) || !Number.isFinite(input.now.getTime()) || !((input.expectedStatus === "draft" && input.nextStatus === "active") || (input.expectedStatus === "active" && input.nextStatus === "paused"))) return { status: "conflict" };
-    return this.withPromotionLock(`promotion:${input.id}`, async () => {
+    return this.withPromotionLock(`user:${input.actorUserId}`, () => this.withPromotionLock(`promotion:${input.id}`, async () => {
       await tick();
       const current = this.promotions.get(input.id);
       if (!current) return { status: "missing" };
@@ -238,7 +263,7 @@ export class MemoryRepository implements Repository {
         this.promotions.set(input.id, clone(current)); this.promotionLifecycleEvents.delete(eventKey); this.audit.length = oldAuditLength;
         return { status: "conflict" };
       }
-    });
+    }));
   }
   async listPromotions(query: { skip: number; take: number; search?: string; type?: "discount_coupon" | "free_access_coupon"; status?: PromotionRecord["status"] }): Promise<{ items: PromotionRecord[]; total: number }> {
     await tick();
@@ -318,7 +343,7 @@ export class MemoryRepository implements Repository {
       }
       const discounted = input.planId !== undefined && input.planId !== null && input.interval !== undefined && input.interval !== null && input.listPricePaise !== undefined && input.listPricePaise !== null && input.discountPaise !== undefined && input.discountPaise !== null && input.payablePaise !== undefined && input.payablePaise !== null && validDiscountSnapshot(p, { userId: input.userId, planId: input.planId, interval: input.interval, listPricePaise: input.listPricePaise, discountPaise: input.discountPaise, payablePaise: input.payablePaise, now: input.now });
       if (!discounted) return { status: "conflict" as const };
-      if ([...this.promotionRedemptions.values()].some((r) => r.promotionId === input.promotionId && r.userId === input.userId && ["reserved", "redeemed", "manual_review"].includes(r.status))) return { status: "conflict" as const };
+      if ([...this.promotionRedemptions.values()].some((r) => r.promotionId === input.promotionId && r.userId === input.userId)) return { status: "conflict" as const };
       const usage = [...this.promotionRedemptions.values()].filter((r) => r.promotionId === input.promotionId && ["reserved", "redeemed", "manual_review"].includes(r.status)).length;
       if (p.usageLimit !== null && usage >= p.usageLimit) return { status: "conflict" as const };
       if (input.manualPaymentIntentId) {
@@ -430,7 +455,7 @@ export class MemoryRepository implements Repository {
     });
   }
   async createPromotionalAccessGrant(input: CreatePromotionalAccessGrantInput): Promise<{ status: "created" | "existing" | "conflict"; grant?: PromotionalAccessGrantRecord }> {
-    return this.withPromotionLock(`user:${input.userId}`, async () => {
+    return this.withPromotionLock(`user:${input.userId}`, () => this.withPromotionLock(`promotion:${input.promotionId}`, async () => {
       await tick();
       if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.id) || !Number.isSafeInteger(input.durationDays) || input.durationDays < 1 || input.durationDays > 30) return { status: "conflict" as const };
       const p = this.promotions.get(input.promotionId);
@@ -451,7 +476,7 @@ export class MemoryRepository implements Repository {
       const logged = await this.insertPromotionEvent({ id: `event-${grant.id}`, eventKey: `grant:${grant.id}:created`, eventType: "grant_created", promotionId: grant.promotionId, subjectUserId: grant.userId, actorUserId: grant.grantedByAdminId, redemptionId: grant.redemptionId, accessGrantId: grant.id, occurredAt: input.now, metadata: { status: "queued", planId: grant.planId, durationDays: grant.durationDays, reason: grant.reason } });
       if (!logged) { this.promotionalAccessGrants.delete(grant.id); return { status: "conflict" as const }; }
       return { status: "created" as const, grant: clone(grant) };
-    });
+    }));
   }
   async activateNextPromotionalAccessGrant(userId: string, now: Date): Promise<PromotionalAccessGrantRecord | null> {
     return this.withPromotionLock(`user:${userId}`, async () => {
@@ -578,7 +603,7 @@ export class MemoryRepository implements Repository {
         if (this.manualPaymentIntents.has(input.id) || !validPromotionRecord(promotion) || promotion.status !== "active" || promotion.startsAt > input.now ||
           (promotion.expiresAt !== null && promotion.expiresAt <= input.now) || (promotion.targetUserId !== null && promotion.targetUserId !== input.userId) || !promotion.eligiblePlanIds.includes(input.planId) ||
           !validDiscountSnapshot(promotion, { userId: input.userId, planId: input.planId, interval: input.interval, ...amounts, now: input.now })) return { status: "unavailable" };
-        if ([...this.promotionRedemptions.values()].some((row) => row.promotionId === promotion.id && row.userId === input.userId && ["reserved", "redeemed", "manual_review"].includes(row.status))) return { status: "conflict" };
+        if ([...this.promotionRedemptions.values()].some((row) => row.promotionId === promotion.id && row.userId === input.userId)) return { status: "conflict" };
         const usage = [...this.promotionRedemptions.values()].filter((row) => row.promotionId === promotion.id && ["reserved", "redeemed", "manual_review"].includes(row.status)).length;
         if (promotion.usageLimit !== null && usage >= promotion.usageLimit) return { status: "unavailable" };
         const activeManual = [...this.manualPlanAccesses.values()].some((access) => access.userId === input.userId && access.expiresAt > input.now);
@@ -787,8 +812,8 @@ export class MemoryRepository implements Repository {
       const row = this.razorpaySubscriptions.get(subscriptionId);
       if (!row || row.userId !== owner) return "unknown_subscription";
       const intent = [...this.razorpaySubscriptionIntents.values()].find((i) => i.providerSubscriptionId === subscriptionId);
-      if (newStatus === "active" && (!intent || intent.status === "manual_review" || !input.payment || input.payment.status !== "captured" || input.payment.currency !== "INR" || input.payment.amount !== intent.amountPaise)) return "invalid_transition";
-      const validPlanPayment = Boolean(intent && input.payment && input.payment.currency === "INR" && input.payment.amount === intent.amountPaise && (input.payment.status === "captured" || input.payment.status === "failed"));
+      if (newStatus === "active" && (!intent || intent.status === "manual_review" || intent.amountPaise === null || !input.payment || input.payment.status !== "captured" || input.payment.currency !== "INR" || input.payment.amount !== intent.amountPaise)) return "invalid_transition";
+      const validPlanPayment = Boolean(intent && intent.amountPaise !== null && input.payment && input.payment.currency === "INR" && input.payment.amount === intent.amountPaise && (input.payment.status === "captured" || input.payment.status === "failed"));
       if (validPlanPayment && input.payment && this.razorpayPayments.has(input.payment.id)) { this.razorpayWebhookEvents.set(input.providerEventId, { eventType: input.eventType, status: "ignored" }); return "duplicate"; }
       const outcome = applySubscriptionEvent({ planId: row.planId, interval: row.interval, status: row.status, lastEventAt: row.lastEventAt, processedEventIds: [] }, { eventId: input.providerEventId, createdAt: eventCreatedAt, newStatus });
       if (!outcome.applied) {
@@ -800,7 +825,7 @@ export class MemoryRepository implements Repository {
         this.razorpayPayments.set(input.payment.id, { userId: row.userId, intentId: intent.id, amountPaise: input.payment.amount, currency: input.payment.currency, status: input.payment.status, providerSubscriptionId: subscriptionId });
       }
       if (intent && outcome.state.status === "active") this.razorpaySubscriptionIntents.set(intent.id, { ...intent, status: "active", updatedAt: new Date() });
-      if (intent && outcome.state.status === "cancelled") this.razorpaySubscriptionIntents.set(intent.id, { ...intent, status: "cancelled", updatedAt: new Date() });
+      if (intent && !(intent.status === "manual_review" && intent.amountPaise === null) && outcome.state.status === "cancelled") this.razorpaySubscriptionIntents.set(intent.id, { ...intent, status: "cancelled", updatedAt: new Date() });
       this.razorpayWebhookEvents.set(input.providerEventId, { eventType: input.eventType, status: "processed" });
       this.plans.set(row.userId, hasPaidEntitlements(outcome.state) ? row.planId : "free");
       return "applied";

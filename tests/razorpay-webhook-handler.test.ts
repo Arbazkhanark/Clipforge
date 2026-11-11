@@ -93,6 +93,28 @@ test("captured event with wrong catalog amount is rejected without entitlement o
   assert.equal(repo.razorpayPayments.size, 0);
 });
 
+test("unknown legacy historical amount cannot activate a subscription in memory or fake Prisma", async () => {
+  const memory = await configuredRepo();
+  const legacyMemoryIntent = memory.razorpaySubscriptionIntents.get("intent_test")!;
+  memory.razorpaySubscriptionIntents.set(legacyMemoryIntent.id, { ...legacyMemoryIntent, amountPaise: null, providerPlanId: "legacy_unverified", status: "manual_review", errorCategory: "legacy_subscription_unverified" });
+  const memoryResponse = await handleRazorpayWebhook(request("subscription.charged", "legacy_charge_memory"), { repo: memory, webhookSecret: secret });
+  assert.equal(memoryResponse.status, 409);
+  assert.equal(memory.razorpaySubscriptions.get("sub_test")?.status, "created");
+  assert.equal(memory.razorpayPayments.size, 0);
+  assert.equal(memory.razorpaySubscriptionIntents.get("intent_test")?.status, "manual_review");
+
+  const db = new FakePrismaClient();
+  await db.user.create({ data: { id: "legacy-user", role: "user" } });
+  await db.subscription.create({ data: { id: "legacy-sub-row", userId: "legacy-user", planId: "creator", interval: "monthly", status: "created", razorpaySubscriptionId: "sub_test", lastEventAt: 0n, trialEndsAt: null, currentPeriodEnd: null } });
+  await db.razorpaySubscriptionIntent.create({ data: { id: "legacy-intent", userId: "legacy-user", idempotencyKey: "legacy-key", providerSubscriptionId: "sub_test", providerPlanId: "legacy_unverified", checkoutUrl: null, planId: "creator", interval: "monthly", amountPaise: null, currency: "INR", status: "manual_review", errorCategory: "legacy_subscription_unverified", createdAt: new Date(0), updatedAt: new Date(0) } });
+  const fakeRepo = new PrismaRepository(db, () => new Date(1_800_000_000_000));
+  const fakeResponse = await handleRazorpayWebhook(request("subscription.charged", "legacy_charge_fake"), { repo: fakeRepo, webhookSecret: secret });
+  assert.equal(fakeResponse.status, 409);
+  assert.equal((await db.subscription.findUnique({ where: { id: "legacy-sub-row" } }))?.["status"], "created");
+  assert.equal(db.paymentRecord.rows.length, 0);
+  assert.equal((await db.razorpaySubscriptionIntent.findUnique({ where: { id: "legacy-intent" } }))?.["status"], "manual_review");
+});
+
 test("unknown events are durably marked ignored and event timestamps prevent stale regression", async () => {
   const repo = await configuredRepo();
   const unknown = await handleRazorpayWebhook(request("payment.captured", "evt_unknown"), { repo, webhookSecret: secret });

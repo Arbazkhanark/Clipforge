@@ -308,6 +308,62 @@ test("a UNIQUE violation is reported as 'email taken', but unrelated database er
   await assert.rejects(() => repo.createUser({ ...u, id: "u3", email: "z@example.com" }), /connection lost/);
 });
 
+test("public password and Google user inserts omit caller-supplied role and use the normal-user database default", async () => {
+  const client = new FakePrismaClient(); const repo = new PrismaAuthRepository(client);
+  const inserts: Record<string, unknown>[] = [];
+  const originalCreate = client.user.create.bind(client.user);
+  client.user.create = async ({ data }) => {
+    inserts.push(structuredClone(data));
+    // Model the PostgreSQL DEFAULT for User.role in this fake-Prisma test.
+    return originalCreate({ data: { role: "user", ...data } });
+  };
+  const now = new Date("2026-11-11T00:00:00Z");
+  const passwordUser = { id: "public-password", email: "password@example.test", emailVerifiedAt: null, passwordHash: "hash", name: null, role: "admin" as const, createdAt: now };
+  assert.equal(await repo.createUser(passwordUser), true);
+  assert.equal(inserts[0]?.["role"], undefined);
+  assert.equal(client.user.rows.find((row) => row["id"] === passwordUser.id)?.["role"], "user");
+
+  const googleUser = { id: "public-google", email: "google@example.test", emailVerifiedAt: now, passwordHash: null, name: null, role: "admin" as const, createdAt: now };
+  assert.equal(await repo.createGoogleUser(googleUser, { id: "google-identity", userId: googleUser.id, googleSub: "google-sub-public", createdAt: now }), "created");
+  assert.equal(inserts[1]?.["role"], undefined);
+  assert.equal(client.user.rows.find((row) => row["id"] === googleUser.id)?.["role"], "user");
+});
+
+test("duplicate Google subject rolls back the new user insert and never deletes an existing user", async () => {
+  const client = new FakePrismaClient(); const repo = new PrismaAuthRepository(client);
+  const now = new Date("2026-11-11T00:00:00Z");
+  await client.user.create({ data: { id: "google-owner", email: "owner@example.test", role: "user" } });
+  await client.googleIdentity.create({ data: { id: "existing-identity", userId: "google-owner", googleSub: "already-linked", createdAt: now } });
+
+  let rollbacks = 0;
+  client.afterTransactionRollback = () => { rollbacks++; };
+  let deleteCalls = 0;
+  client.user.deleteMany = async () => { deleteCalls++; return { count: 0 }; };
+  const candidate = { id: "new-google-user", email: "new@example.test", emailVerifiedAt: now, passwordHash: null, name: null, role: "admin" as const, createdAt: now };
+  const result = await repo.createGoogleUser(candidate, { id: "new-identity", userId: candidate.id, googleSub: "already-linked", createdAt: now });
+
+  assert.equal(result, "sub_taken");
+  assert.equal(rollbacks, 1);
+  assert.equal(client.user.rows.some((row) => row["id"] === candidate.id), false);
+  assert.deepEqual(client.user.rows.map((row) => row["id"]), ["google-owner"]);
+  assert.equal(client.googleIdentity.rows.length, 1);
+  assert.equal(deleteCalls, 0);
+
+  // A collision on user email/id must not make the duplicate-subject handler
+  // delete that pre-existing row while reporting sub_taken.
+  await client.user.create({ data: { id: "preexisting-candidate", email: "preexisting@example.test", role: "user" } });
+  const existing = client.user.rows.find((row) => row["id"] === "preexisting-candidate");
+  assert.ok(existing);
+  const collision = await repo.createGoogleUser(
+    { id: "preexisting-candidate", email: "preexisting@example.test", emailVerifiedAt: null, passwordHash: null, name: null, role: "admin", createdAt: now },
+    { id: "collision-identity", userId: "preexisting-candidate", googleSub: "already-linked", createdAt: now },
+  );
+  assert.equal(collision, "sub_taken");
+  assert.equal(client.user.rows.some((row) => row["id"] === "preexisting-candidate"), true);
+  assert.equal(client.user.rows.find((row) => row["id"] === "preexisting-candidate")?.["email"], "preexisting@example.test");
+  assert.equal(deleteCalls, 0);
+});
+
 test("password reset rolls back the new password and the used token when session revocation fails", async () => {
   const client = new FakePrismaClient(); const repo = new PrismaAuthRepository(client);
   const now = new Date("2026-06-01T12:00:00Z");

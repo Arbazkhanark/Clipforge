@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
-import { createAdminPromotionDetailRoute, createAdminPromotionLifecycleHistoryRoute, createAdminPromotionRedemptionHistoryRoute, createAdminPromotionStatusRoute, createAdminPromotionUpdateRoute, createAdminPromotionsRoute } from "../src/server/admin/promotion-routes.ts";
+import { createAdminPromotionDetailRoute, createAdminPromotionLifecycleHistoryRoute, createAdminPromotionReasonRoute, createAdminPromotionRedemptionHistoryRoute, createAdminPromotionStatusRoute, createAdminPromotionUpdateRoute, createAdminPromotionsRoute } from "../src/server/admin/promotion-routes.ts";
 import type { Runtime } from "../src/server/runtime.ts";
 
 const now = new Date("2026-11-08T12:00:00.000Z");
@@ -17,7 +17,7 @@ function setup(role: "admin" | "user" | null = "admin") {
     currentPrincipal: async () => role ? { userId: role === "admin" ? "admin-1" : "user-1", role } : null,
     newId: () => `promotion-${++nextId}`, now: () => now,
   };
-  return { repo, route: createAdminPromotionsRoute(() => runtime), detailRoute: createAdminPromotionDetailRoute(() => runtime), redemptionHistoryRoute: createAdminPromotionRedemptionHistoryRoute(() => runtime), lifecycleHistoryRoute: createAdminPromotionLifecycleHistoryRoute(() => runtime), updateRoute: createAdminPromotionUpdateRoute(() => runtime), statusRoute: createAdminPromotionStatusRoute(() => runtime) };
+  return { repo, route: createAdminPromotionsRoute(() => runtime), detailRoute: createAdminPromotionDetailRoute(() => runtime), redemptionHistoryRoute: createAdminPromotionRedemptionHistoryRoute(() => runtime), lifecycleHistoryRoute: createAdminPromotionLifecycleHistoryRoute(() => runtime), updateRoute: createAdminPromotionUpdateRoute(() => runtime), reasonRoute: createAdminPromotionReasonRoute(() => runtime), statusRoute: createAdminPromotionStatusRoute(() => runtime) };
 }
 
 function post(route: (request: Request) => Promise<Response>, body: unknown) {
@@ -35,6 +35,12 @@ function put(route: (request: Request) => Promise<Response>, id: string, body: u
 function patchStatus(route: (request: Request) => Promise<Response>, id: string, action: string, etag?: string, origin = "http://localhost") {
   return route(new Request(`http://localhost/api/admin/promotions/${id}`, {
     method: "PATCH", headers: { origin, "content-type": "application/json", ...(etag ? { "if-match": etag } : {}) }, body: JSON.stringify({ action }),
+  }));
+}
+
+function patchReason(route: (request: Request) => Promise<Response>, id: string, reason: unknown, etag?: string, origin = "http://localhost") {
+  return route(new Request(`http://localhost/api/admin/promotions/${id}/reason`, {
+    method: "PATCH", headers: { origin, "content-type": "application/json", ...(etag ? { "if-match": etag } : {}) }, body: JSON.stringify({ reason }),
   }));
 }
 
@@ -337,6 +343,36 @@ test("coupon edit rejects unsupported immutable fields and invalid coupon values
   ]) assert.equal((await put(updateRoute, "promotion-1", body, etag)).status, 400);
   assert.equal((await repo.getPromotion("promotion-1"))?.discountValue, 50);
   assert.equal((await repo.listPromotionLifecycleEvents("promotion-1")).length, 1);
+});
+
+test("Admin can make a reason-only edit after use without changing terms; the route is protected and ETag-checked", async () => {
+  const { repo, route, detailRoute, reasonRoute } = setup();
+  assert.equal((await post(route, discountCoupon())).status, 201);
+  const detail = await detailRoute(new Request("http://localhost/api/admin/promotions/promotion-1"));
+  const before = (await detail.json() as { data: Record<string, unknown> }).data;
+  const row = repo.promotions.get("promotion-1")!;
+  repo.promotionRedemptions.set("used-redemption", { id: "used-redemption", promotionId: row.id, userId: "user-1", status: "redeemed", idempotencyKey: "used-key", planId: "creator", interval: "weekly", listPricePaise: 49_900, discountPaise: 24_950, payablePaise: 24_950, currency: "INR", manualPaymentIntentId: null, manualPaymentIntentUserId: null, reservedAt: now, redeemedAt: now, releasedAt: null, createdAt: now, updatedAt: now });
+  const deniedUser = await patchReason(setup("user").reasonRoute, "promotion-1", "blocked", detail.headers.get("etag")!);
+  assert.equal(deniedUser.status, 403);
+  const deniedAnonymous = await patchReason(setup(null).reasonRoute, "promotion-1", "blocked", detail.headers.get("etag")!);
+  assert.equal(deniedAnonymous.status, 401);
+  assert.equal((await patchReason(reasonRoute, "promotion-1", "new context")).status, 428);
+  assert.equal((await patchReason(reasonRoute, "promotion-1", "new context", detail.headers.get("etag")!, "https://attacker.invalid")).status, 403);
+  assert.equal((await reasonRoute(new Request("http://localhost/api/admin/promotions/promotion-1/reason", { method: "PATCH", headers: { origin: "http://localhost", "content-type": "application/json", "if-match": detail.headers.get("etag")! }, body: JSON.stringify({ reason: "changed", status: "paused" }) }))).status, 400);
+  assert.equal((await patchReason(reasonRoute, "promotion-1", "stale", '"stale"')).status, 409);
+  const response = await patchReason(reasonRoute, "promotion-1", "Reviewed after use", detail.headers.get("etag")!);
+  assert.equal(response.status, 200);
+  assert.notEqual(response.headers.get("etag"), detail.headers.get("etag"));
+  assert.deepEqual(await response.json(), { data: { id: "promotion-1", reason: "Reviewed after use", updatedAt: new Date(now.getTime() + 1).toISOString() } });
+  const after = await repo.getPromotion("promotion-1");
+  assert.ok(after);
+  assert.equal(after.reason, "Reviewed after use");
+  for (const key of ["id", "type", "status", "code", "discountType", "discountValue", "eligiblePlanIds", "createdByAdminId"] as const) assert.deepEqual(after[key], before[key], `${key} is unchanged`);
+  assert.equal(after.createdAt.getTime(), now.getTime(), "creation time is unchanged");
+  const event = (await repo.listPromotionLifecycleEvents("promotion-1")).at(-1);
+  assert.equal(event?.actorUserId, "admin-1");
+  assert.equal(event?.metadata?.reasonOld, before.reason);
+  assert.equal(event?.metadata?.reasonNew, "Reviewed after use");
 });
 
 test("Admin coupon PUT requires If-Match and rejects cross-origin requests", async () => {

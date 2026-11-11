@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "npm run prisma:generate && next build",
-    "prisma:generate": "DIRECT_URL=postgresql://127.0.0.1:5432/clipforge_generate prisma generate",
+    "prisma:generate": "DIRECT_URL=postgresql://127.0.0.1:5432/clipforge_generate?schema=public prisma generate",
     "postinstall": "npm run prisma:generate",
     "start": "next start",
     "test": "node --import tsx --import ./tests/helpers/register-css.mjs --test \"tests/**/*.test.ts\" \"tests/**/*.test.tsx\"",

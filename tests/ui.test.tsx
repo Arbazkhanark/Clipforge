@@ -42,8 +42,8 @@ test("pricing table shows the exact agreed prices for every plan, weekly and mon
 
 test("pricing: separate renewal choices are disabled until sandbox configuration is ready", () => {
   const out = html(<PricingTable />);
-  assert.ok(out.includes("payment option stays unavailable"));
-  assert.equal((out.match(/disabled/g) ?? []).length, 12);
+  assert.ok(out.includes("Checkout stays unavailable until the relevant payment configuration is complete."));
+  assert.equal((out.match(/disabled/g) ?? []).length, 15);
   assert.ok(out.includes("type=\"checkbox\""));
   assert.ok(out.includes("No automatic deductions"));
   assert.ok(!out.includes("Choose Pro"));
@@ -110,7 +110,7 @@ test("preflight panel shows level text, counts, and the unverified-limits note",
   const items = [makeItem({ id: "a", captionText: "" })];
   const report = runPreflight({ cycle: makeCycle({ status: "draft" }), items, socialAccountStatus: "token_expired", scheduledItemsPerMonthLimit: 100, scheduledItemsUsedThisMonth: 0, coverSupport: "unknown", sourceAccessByItemId: { a: { allowed: true, reason: "ok" } } });
   const out = html(<PreflightPanel report={report} />);
-  assert.ok(out.includes("Blocked")); assert.ok(out.includes("Fix the items below")); assert.ok(out.includes("documented limit of 100"));
+  assert.ok(out.includes("Blocked")); assert.ok(out.includes("Fix the items below")); assert.ok(out.includes("content_publishing_limit"));
   const ready = html(<PreflightPanel report={{ overall: "ready", canStart: true, checks: [] }} />);
   assert.ok(ready.includes("You can start this cycle."));
 });
@@ -119,7 +119,7 @@ test("schedule preview lists times in the chosen zone and warns about unplaced v
   const { slots, unfilled } = generateSlots({ startFrom: new Date("2026-06-01T00:00:00Z"), count: 5, settings: { timeZone: "Asia/Kolkata", intervalMinutes: 60, postsPerInterval: 1, daysOfWeek: [1], windowStart: "09:00", windowEnd: "10:00", dailyMax: null, endDate: "2026-06-01" } });
   const out = html(<SchedulePreview slots={slots} unfilled={unfilled} timeZone="Asia/Kolkata" />);
   assert.equal((out.match(/<time /g) ?? []).length, 2);
-  assert.ok(out.includes("3 videos did not get a time")); assert.ok(out.includes("documented limit of 100"));
+  assert.ok(out.includes("3 videos did not get a time")); assert.ok(out.includes("not an account quota check")); assert.ok(out.includes("content_publishing_limit"));
 });
 
 test("import warning shows every required warning and a required checkbox", () => {
@@ -136,7 +136,9 @@ test("Instagram page shows connect and disconnect without a password or token", 
 
 test("pages render: home is honest, pricing uses the catalog, layout is accessible", async () => {
   const home = html(<HomePage />);
-  assert.ok(home.includes("Early development")); assert.ok(!/testimonial|trusted by|\d+\+ (creators|users)/i.test(home));
+  assert.ok(home.includes("You Focus on Creating."));
+  assert.ok(home.includes("We do not publish invented reviews or customer counts."));
+  assert.ok(!/trusted by|\d+\+ (creators|users)/i.test(home));
   assert.ok(html(<PricingPage />).includes("₹3,999"));
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(null);
@@ -146,12 +148,12 @@ test("pages render: home is honest, pricing uses the catalog, layout is accessib
   });
 });
 
-test("registration and sign-in copy matches database, local outbox, and unconfigured modes", async () => {
+test("registration and sign-in copy matches database, local memory, and unconfigured modes", async () => {
   const outbox = html(<AuthForm mode="register" demoMode={false} available persistence="database" emailDelivery="outbox" />);
   assert.ok(outbox.includes('data-auth-mode="database-outbox"'));
-  assert.ok(outbox.includes("local outbox"));
-  assert.ok(outbox.includes("No email is sent"));
-  assert.ok(outbox.includes("must be confirmed"));
+  assert.ok(outbox.includes("No email provider is connected"));
+  assert.ok(outbox.includes("confirmation and password-reset messages are unavailable"));
+  assert.ok(outbox.includes("new accounts remain unverified"));
   assert.ok(!outbox.includes("stays unverified"));
   assert.ok(!/we sent/i.test(outbox));
   const unavailable = html(<AuthForm mode="login" demoMode={false} available persistence="database" emailDelivery="unavailable" />);
@@ -160,14 +162,15 @@ test("registration and sign-in copy matches database, local outbox, and unconfig
   assert.ok(unavailable.includes("stays unverified"));
   const local = html(<AuthForm mode="login" demoMode={false} available persistence="memory" />);
   assert.ok(local.includes('data-auth-mode="local"'));
-  assert.ok(local.includes("local outbox"));
-  assert.ok(local.includes("No email is sent"));
+  assert.ok(local.includes("Local development accounts live in server memory"));
+  assert.ok(local.includes("No email provider is connected"));
+  assert.ok(local.includes("verification and password-reset messages are unavailable"));
   const off = html(<AuthForm mode="register" demoMode={false} available={false} />);
   assert.ok(off.includes("not available yet"));
   assert.ok(/<button type="submit" disabled/.test(off));
-  assert.ok(FLASH_NOTICES.registered.includes("No email was sent"));
+  assert.ok(FLASH_NOTICES.registered.includes("no confirmation message was sent"));
   assert.ok(!/we sent/i.test(FLASH_NOTICES.registered));
-  assert.ok(FLASH_ERRORS.email_not_verified.includes("No email was sent"));
+  assert.ok(FLASH_ERRORS.email_not_verified.includes("no confirmation message was sent"));
   const runtime = { mode: "database", emailDelivery: "outbox", auth: {}, currentUserId: async () => null, repo: {}, newId: () => "x", now: () => new Date(0) } as Runtime;
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(runtime);

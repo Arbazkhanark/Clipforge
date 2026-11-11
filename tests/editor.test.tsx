@@ -327,5 +327,11 @@ test("page: a video of unknown size says so; someone else's video looks missing;
   const hidden = html(await EditorPage({ searchParams: Promise.resolve({ media: "evevid" }) })); const missing = html(await EditorPage({ searchParams: Promise.resolve({ media: "zzz" }) })); assert.equal(hidden, missing); assert.ok(hidden.includes("Not found"));
   assert.ok(html(await EditorPage({ searchParams: Promise.resolve({ media: "../x" }) })).includes("Choose a video"));                          // an unsafe id is ignored, never used
   assert.ok(html(await EditorPage({ searchParams: Promise.resolve({ media: "v1", notice: "template_saved" }) })).includes("original video was not changed"));
-  setRuntimeForTests(runtime(null)); assert.ok(html(await EditorPage({})).includes("Sign in required"));
+  setRuntimeForTests(runtime(null));
+  await assert.rejects(EditorPage({}), (error: unknown) => {
+    const digest = (error as { digest?: unknown } | null)?.digest;
+    assert.equal(typeof digest, "string");
+    assert.match(digest as string, /^NEXT_REDIRECT;replace;\/login\?returnTo=%2Feditor;307;$/);
+    return true;
+  });
 });

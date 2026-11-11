@@ -153,7 +153,7 @@ for (const [label, setup] of [["memory", memory], ["fake Prisma", async () => (a
     assert.deepEqual((await repo.listPromotionLifecycleEvents("coupon")).map((event) => event.eventType), ["promotion_created", "coupon_reserved"]);
   });
 
-  test(`${label}: released reservation may be retried, manual review keeps the slot held`, async () => {
+  test(`${label}: released reservation frees global capacity but never permits the same user to reuse the coupon`, async () => {
     const repo = await setup(); await repo.createPromotion(coupon("coupon"));
     await seedDiscountIntent(repo, "intent-1");
     await repo.createOrGetPromotionRedemption(discountInput("r1", "user-a", { manualPaymentIntentId: "intent-1" }));
@@ -163,21 +163,64 @@ for (const [label, setup] of [["memory", memory], ["fake Prisma", async () => (a
     assert.equal(await repo.transitionPromotionRedemption({ id: "r1", userId: "user-a", expectedStatus: "manual_review", nextStatus: "released", now: T0 }), false);
     assert.equal(await repo.finishManualPaymentIntent({ id: "intent-1", userId: "user-a", status: "failed", now: T0 }), true);
     assert.equal(await repo.transitionPromotionRedemption({ id: "r1", userId: "user-a", expectedStatus: "manual_review", nextStatus: "released", now: T0 }), true);
-    const retry = await repo.reserveDiscountedManualPaymentIntent({ id: "intent-2", userId: "user-a", idempotencyKey: "intent-2-retry-key-12345", planId: "creator", interval: "weekly", couponCode: "SAVE50", now: T0 });
-    assert.equal(retry.status, "created"); if (retry.status !== "created") return;
-    assert.equal(await repo.finishManualPaymentIntent({ id: "intent-2", userId: "user-a", status: "created", providerPaymentLinkId: "link-2", checkoutUrl: "https://example.invalid/checkout", now: T0 }), true);
-    assert.equal(await repo.settleManualPayment({ userId: "user-a", intentId: "intent-2", providerPaymentLinkId: "link-2", providerPaymentId: "payment-2", amountPaise: 24_950, currency: "INR", status: "captured", paidAt: T0, now: T0 }), "applied");
-    assert.equal((await repo.listPromotionLifecycleEvents("coupon")).filter((event) => event.redemptionId === retry.redemption.id && event.eventType === "coupon_redeemed").length, 1);
+    assert.equal((await repo.reserveDiscountedManualPaymentIntent({ id: "intent-2", userId: "user-a", idempotencyKey: "intent-2-retry-key-12345", planId: "creator", interval: "weekly", couponCode: "SAVE50", now: T0 })).status, "conflict");
+    const otherUser = await repo.reserveDiscountedManualPaymentIntent({ id: "intent-2-other-user", userId: "user-b", idempotencyKey: "intent-2-other-user-key-12345", planId: "creator", interval: "weekly", couponCode: "SAVE50", now: T0 });
+    assert.equal(otherUser.status, "created", "released use returns global capacity for another user");
     assert.equal(await repo.transitionPromotionRedemption({ id: "r1", userId: "user-b", expectedStatus: "manual_review", nextStatus: "redeemed", now: T0 }), false);
+  });
+
+  test(`${label}: every redemption status blocks a second use by the same user`, async () => {
+    const repo = await setup();
+    const statuses = ["reserved", "redeemed", "released", "manual_review"] as const;
+    for (const status of statuses) {
+      const promotionId = `coupon-${status}`;
+      await repo.createPromotion(coupon(promotionId, { code: `CODE-${status.toUpperCase()}`, usageLimit: 1 }));
+      const row = { id: `history-${status}`, promotionId, userId: "user-a", status, idempotencyKey: `history-${status}`, planId: "creator", interval: "weekly", listPricePaise: 49_900, discountPaise: 4_990, payablePaise: 44_910, currency: "INR", manualPaymentIntentId: null, manualPaymentIntentUserId: null, reservedAt: T0, redeemedAt: status === "redeemed" ? T0 : null, releasedAt: status === "released" ? T0 : null, createdAt: T0, updatedAt: T0 };
+      if (repo instanceof MemoryRepository) repo.promotionRedemptions.set(row.id, row as import("../src/server/repository.ts").PromotionRedemptionRecord);
+      else await (repo as unknown as { db: FakePrismaClient }).db.promotionRedemption.create({ data: row });
+      const duplicate = await repo.createOrGetPromotionRedemption({ ...discountInput(`retry-${status}`), promotionId });
+      assert.equal(duplicate.status, "conflict", `${status} history must block reuse`);
+      if (status === "released") {
+        const differentUser = await repo.createOrGetPromotionRedemption({ ...discountInput("other-user-released", "user-b"), promotionId });
+        assert.equal(differentUser.status, "created", "released history does not consume the global slot");
+      }
+    }
   });
 }
 
 for (const label of ["memory", "fake Prisma"] as const) {
+  test(`${label}: promotion reason remains editable after use with an atomic old/new audit record`, async () => {
+    const { repo, seedHistory, failAudit, snapshotAudit } = await promotionRepository(label);
+    const current = coupon("coupon", { status: "active" });
+    assert.equal(await repo.createPromotion(current), true);
+    await seedHistory("coupon");
+    const first = await repo.updatePromotionReason({ id: "coupon", reason: "reviewed support context", expectedUpdatedAt: T0, actorUserId: "admin-a", now: new Date(T0.getTime() + 2) });
+    assert.equal(first.status, "updated");
+    if (first.status !== "updated") return;
+    assert.equal(first.promotion.status, "active");
+    assert.equal(first.promotion.code, current.code);
+    assert.equal(first.promotion.reason, "reviewed support context");
+    const events = await repo.listPromotionLifecycleEvents("coupon");
+    const reasonEvent = events.find((event) => event.metadata?.source === "admin_reason_update");
+    assert.equal(reasonEvent?.actorUserId, "admin-a");
+    assert.equal(reasonEvent?.occurredAt.getTime(), first.promotion.updatedAt.getTime());
+    assert.equal(reasonEvent?.metadata?.reasonOld, current.reason);
+    assert.equal(reasonEvent?.metadata?.reasonNew, first.promotion.reason);
+
+    const auditBefore = await snapshotAudit();
+    failAudit();
+    const rejected = await repo.updatePromotionReason({ id: "coupon", reason: "must roll back", expectedUpdatedAt: first.promotion.updatedAt, actorUserId: "admin-a", now: new Date(first.promotion.updatedAt.getTime() + 2) });
+    assert.equal(rejected.status, "conflict");
+    assert.deepEqual(await repo.getPromotion("coupon"), first.promotion);
+    assert.deepEqual(await snapshotAudit(), auditBefore);
+    assert.equal((await repo.listPromotionLifecycleEvents("coupon")).length, events.length);
+  });
+
   test(`${label}: draft coupon update is version-checked, immutable, and audited atomically`, async () => {
     const { repo } = await promotionRepository(label);
     const current = coupon("coupon", { status: "draft" });
     assert.equal(await repo.createPromotion(current), true);
-    const changed = { ...current, code: "SAVE25", discountValue: 25, updatedAt: new Date(T0.getTime()) };
+    const changed = { ...current, code: "SAVE25", discountValue: 25, reason: "updated support context", updatedAt: new Date(T0.getTime()) };
     const result = await repo.updateDraftPromotion({ record: changed, expectedUpdatedAt: T0, actorUserId: "admin-a" });
     assert.equal(result.status, "updated");
     if (result.status !== "updated") return;
@@ -187,6 +230,9 @@ for (const label of ["memory", "fake Prisma"] as const) {
     assert.equal(result.promotion.createdAt.getTime(), current.createdAt.getTime());
     assert.equal(result.promotion.status, "draft");
     assert.deepEqual((await repo.listPromotionLifecycleEvents("coupon")).map((event) => event.eventType), ["promotion_created", "promotion_updated"]);
+    const updateEvent = (await repo.listPromotionLifecycleEvents("coupon")).find((event) => event.eventType === "promotion_updated");
+    assert.equal(updateEvent?.metadata?.reasonOld, current.reason);
+    assert.equal(updateEvent?.metadata?.reasonNew, changed.reason);
   });
 
   test(`${label}: simultaneous draft edits allow one winner and reject the stale writer`, async () => {

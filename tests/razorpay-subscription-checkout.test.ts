@@ -9,9 +9,10 @@ import { verifyOwnedSubscriptionPayment } from "../src/server/billing/subscripti
 import { RazorpayTestClient, type RazorpayTestConfig } from "../src/server/billing/razorpay-client.ts";
 import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
 import { FakePrismaClient } from "./helpers/fake-prisma.ts";
+import type { Repository } from "../src/server/repository.ts";
 
 const config: RazorpayTestConfig = { keyId: "rzp_test_fake", keySecret: "fake-secret-123", webhookSecret: "fake-webhook-secret", subscriptionPlanIds: { creator: { weekly: "plan_creator_week", monthly: "plan_creator_month" } }, subscriptionTotalCount: 120 };
-function rt(userId: string | null, repo = new MemoryRepository()): Runtime {
+function rt(userId: string | null, repo: Repository = new MemoryRepository()): Runtime {
   return { mode: "database", repo, currentUserId: async () => userId, newId: () => "intent_1234567890123456", now: () => new Date("2026-11-07T00:00:00Z") } as Runtime;
 }
 function request(planId = "creator", interval = "weekly", key = "request_key_1234567890"): Request {
@@ -68,6 +69,30 @@ test("idempotency key cannot be reused for another plan or interval", async () =
   await createSubscriptionCheckout(request(), runtime, client, config);
   const mismatch = await createSubscriptionCheckout(request("creator", "monthly"), runtime, client, config);
   assert.equal(mismatch.status, 409);
+});
+
+test("legacy recurring intent with unknown historical amount stays manual review and is never provider-verified", async () => {
+  const db = new FakePrismaClient();
+  await db.user.create({ data: { id: "legacy-owner", role: "user" } });
+  await db.razorpaySubscriptionIntent.create({ data: {
+    id: "legacy-intent", userId: "legacy-owner", idempotencyKey: "legacy-key", autoRenewConsentAt: null,
+    autoRenewConsentVersion: null, providerSubscriptionId: "legacy-subscription", providerPlanId: "legacy_unverified",
+    checkoutUrl: null, planId: "creator", interval: "weekly", amountPaise: null, currency: "INR", status: "manual_review",
+    errorCategory: "legacy_subscription_unverified", createdAt: new Date(0), updatedAt: new Date(0),
+  } });
+  const repo = new PrismaRepository(db);
+  const intent = await repo.getRazorpaySubscriptionIntentByProviderId("legacy-owner", "legacy-subscription");
+  assert.equal(intent?.amountPaise, null);
+  let providerCalls = 0;
+  const client = new RazorpayTestClient(config, async () => { providerCalls += 1; return Response.json({}); });
+  const request = new Request("https://clipforge.test/api/payments/razorpay/subscriptions/verify", {
+    method: "POST", headers: { host: "clipforge.test", origin: "https://clipforge.test", "content-type": "application/json" },
+    body: JSON.stringify({ razorpay_subscription_id: "legacy-subscription", razorpay_payment_id: "payment", razorpay_signature: "signature" }),
+  });
+  const response = await verifyOwnedSubscriptionPayment(request, rt("legacy-owner", repo), client, config);
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "payment_requires_manual_review" });
+  assert.equal(providerCalls, 0);
 });
 
 test("fake-Prisma reservation serializes owner intents and binds the created Subscription to the same plan and owner", async () => {

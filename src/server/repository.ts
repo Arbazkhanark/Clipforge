@@ -133,7 +133,7 @@ export type CollectionGrantMutationResult =
 export interface RazorpaySubscriptionEventInput { providerEventId: string; eventType: string; subscriptionId?: string; newStatus?: SubscriptionStatus; createdAt?: number; currentPeriodEnd?: number; payment?: { id: string; amount: number; currency: string; status: string }; }
 export type RazorpaySubscriptionEventResult = "applied" | "duplicate" | "ignored" | "stale" | "invalid_transition" | "unknown_subscription";
 export type RazorpayIntentStatus = "creating" | "created" | "active" | "failed" | "manual_review" | "cancelled" | "expired";
-export interface RazorpaySubscriptionIntentRecord { id: string; userId: string; idempotencyKey: string; autoRenewConsentAt?: Date | null; autoRenewConsentVersion?: string | null; providerSubscriptionId: string | null; providerPlanId: string; checkoutUrl: string | null; planId: PlanId; interval: "weekly" | "monthly"; amountPaise: number; currency: "INR"; status: RazorpayIntentStatus; errorCategory: string | null; createdAt: Date; updatedAt: Date; }
+export interface RazorpaySubscriptionIntentRecord { id: string; userId: string; idempotencyKey: string; autoRenewConsentAt?: Date | null; autoRenewConsentVersion?: string | null; providerSubscriptionId: string | null; providerPlanId: string; checkoutUrl: string | null; planId: PlanId; interval: "weekly" | "monthly"; amountPaise: number | null; currency: "INR"; status: RazorpayIntentStatus; errorCategory: string | null; createdAt: Date; updatedAt: Date; }
 export interface ReserveRazorpaySubscriptionIntentInput { id: string; userId: string; idempotencyKey: string; autoRenewConsentAt: Date; autoRenewConsentVersion: string; providerPlanId: string; planId: PlanId; interval: "weekly" | "monthly"; amountPaise: number; now: Date; }
 export interface SubscriptionContinuationCandidate { id: string; userId: string; planId: PlanId; interval: "weekly" | "monthly"; providerSubscriptionId: string; currentPeriodEnd: Date; }
 export interface SubscriptionContinuationInput { id: string; subscriptionId: string; providerSubscriptionId: string; cycleEnd: Date; observedTotalCount: number; observedPaidCount: number; observedRemainingCount: number; targetRemainingCount: number; now: Date; }
@@ -231,6 +231,9 @@ export interface PromotionListPage { items: PromotionRecord[]; total: number; }
 export type UpdateDraftPromotionResult =
   | { status: "updated"; promotion: PromotionRecord }
   | { status: "missing" | "target_user_missing" | "not_draft" | "stale" | "history" | "duplicate_code" | "conflict" };
+export type UpdatePromotionReasonResult =
+  | { status: "updated"; promotion: PromotionRecord }
+  | { status: "missing" | "stale" | "conflict" };
 export type TransitionCouponStatusResult =
   | { status: "updated"; promotion: PromotionRecord }
   | { status: "missing" | "not_coupon" | "invalid_status" | "stale" | "conflict" };
@@ -238,6 +241,7 @@ export type TransitionCouponStatusResult =
 export interface Repository {
   createPromotion(record: PromotionRecord): Promise<boolean>;
   updateDraftPromotion(input: { record: PromotionRecord; expectedUpdatedAt: Date; actorUserId: string }): Promise<UpdateDraftPromotionResult>;
+  updatePromotionReason(input: { id: string; reason: string | null; expectedUpdatedAt: Date; actorUserId: string; now: Date }): Promise<UpdatePromotionReasonResult>;
   transitionCouponStatus(input: { id: string; expectedStatus: "draft" | "active"; nextStatus: "active" | "paused"; expectedUpdatedAt: Date; actorUserId: string; now: Date }): Promise<TransitionCouponStatusResult>;
   listPromotions(query: PromotionListQuery): Promise<PromotionListPage>;
   getPromotionUsageCounts(promotionIds: string[]): Promise<Record<string, PromotionUsageCounts>>;

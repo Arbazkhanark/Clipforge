@@ -455,7 +455,8 @@ model RazorpaySubscriptionIntent {
   providerPlanId          String
   planId                  String
   interval                BillingInterval
-  amountPaise             Int
+  /// Null only for legacy subscriptions whose historical amount was not independently verified.
+  amountPaise             Int?
   currency                String                           @default("INR")
   status                  RazorpaySubscriptionIntentStatus @default(creating)
   errorCategory           String?
@@ -577,6 +578,8 @@ model PromotionRedemption {
   lifecycleEvents           PromotionLifecycleEvent[]
 
   @@unique([userId, idempotencyKey])
+  /// A user may redeem a promotion once across every lifecycle status, including released.
+  @@unique([promotionId, userId])
   @@unique([id, userId])
   @@unique([id, userId, promotionId])
   @@unique([manualPaymentIntentId, manualPaymentIntentUserId])

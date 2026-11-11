@@ -80,7 +80,7 @@ export function calculateDiscountAmounts(p: {
 
 export function validPromotionEventMetadata(value: Record<string, unknown> | null | undefined): Record<string, string | number | boolean | null> | null {
   if (!value) return null;
-  const allowed = new Set(["reason", "planId", "durationDays", "discountType", "discountValue", "discountPaise", "payablePaise", "status", "source"]);
+  const allowed = new Set(["reason", "reasonOld", "reasonNew", "planId", "durationDays", "discountType", "discountValue", "discountPaise", "payablePaise", "status", "source"]);
   const result: Record<string, string | number | boolean | null> = {};
   for (const [key, item] of Object.entries(value)) {
     if (!allowed.has(key)) return null;

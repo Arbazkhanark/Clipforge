@@ -230,6 +230,32 @@ export function createAdminPromotionUpdateRoute(runtime: () => Runtime = getRunt
   }, runtime);
 }
 
+/** Narrow audited path for changing internal reason text after promotion use. */
+export function createAdminPromotionReasonRoute(runtime: () => Runtime = getRuntime) {
+  return adminApiRoute(async (request, adminId) => {
+    if (request.method !== "PATCH") throw new AppError(405, "method_not_allowed", "This promotion reason endpoint supports PATCH only.");
+    const promotionId = couponIdFromRequest(request);
+    const current = runtime();
+    const existing = await current.repo.getPromotion(promotionId);
+    if (!existing) throw new AppError(404, "not_found", "Promotion was not found.");
+    const ifMatch = request.headers.get("if-match");
+    if (!ifMatch) throw new AppError(428, "precondition_required", "Reload this promotion before changing its reason.");
+    if (ifMatch !== promotionEtag(existing)) throw new AppError(409, "stale_promotion", "This promotion changed since it was loaded. Reload it and try again.");
+    const parsed = await readSmallJson(request);
+    if (!parsed.ok) throw new AppError(parsed.status, parsed.error, "Promotion reason could not be read.");
+    if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) throw new AppError(400, "invalid_reason", "Promotion reason is invalid.");
+    const body = parsed.value as Record<string, unknown>;
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "reason") || (body.reason !== null && (typeof body.reason !== "string" || body.reason.length > 500))) throw new AppError(400, "invalid_reason", "Provide only a reason of 500 characters or fewer, or null.");
+    const result = await current.repo.updatePromotionReason({ id: promotionId, reason: body.reason as string | null, expectedUpdatedAt: existing.updatedAt, actorUserId: adminId, now: current.now() });
+    if (result.status === "missing") throw new AppError(404, "not_found", "Promotion was not found.");
+    if (result.status === "stale") throw new AppError(409, "stale_promotion", "This promotion changed since it was loaded. Reload it and try again.");
+    if (result.status !== "updated") throw new AppError(409, "promotion_conflict", "Promotion reason could not be updated.");
+    const response = json({ data: { id: result.promotion.id, reason: result.promotion.reason, updatedAt: result.promotion.updatedAt.toISOString() } });
+    response.headers.set("ETag", promotionEtag(result.promotion));
+    return response;
+  }, runtime);
+}
+
 export function createAdminPromotionStatusRoute(runtime: () => Runtime = getRuntime) {
   return adminApiRoute(async (request, adminId) => {
     if (request.method !== "PATCH") throw new AppError(405, "method_not_allowed", "This coupon status endpoint supports PATCH only.");

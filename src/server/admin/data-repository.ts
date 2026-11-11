@@ -48,7 +48,7 @@ export type AdminInstagramDetails = {
 export type AdminPaymentRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; amountPaise: number; currency: string; status: string; providerPaymentId: string; providerSubscriptionId: string | null; planId: string | null; interval: string | null; billingMode: "recurring" | "manual" | "unlinked" | "conflicting"; createdAt: Date };
 export type AdminSubscriptionRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; planId: string; interval: string; status: string; currentPeriodEnd: Date | null; cancelAtPeriodEnd: boolean; cancellationRequestedAt: Date | null; createdAt: Date; updatedAt: Date };
 export type AdminManualAccessRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; planId: string; startsAt: Date; expiresAt: Date; createdAt: Date; paymentReferenceAvailable: boolean };
-export type AdminBillingIntentRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; planId: string; interval: string; amountPaise: number; currency: string; status: string; createdAt: Date; updatedAt: Date; billingMode: "recurring" | "manual" };
+export type AdminBillingIntentRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; planId: string; interval: string; amountPaise: number | null; currency: string; status: string; createdAt: Date; updatedAt: Date; billingMode: "recurring" | "manual" };
 export type AdminPlanEntitlementRow = { userId: string; name: string | null; email: string; planId: string; source: "free_fallback" | "recurring_subscription" | "subscription_trial" | "manual_access" | "inconsistent"; subscriptionStatus: string | null; subscriptionPeriodEnd: Date | null; manualAccessExpiresAt: Date | null; planDefinitionAvailable: boolean; inconsistentStoredPlan: boolean };
 export type AdminPlanCounts = { byPlan: Record<PlanId, number>; unknownPlanCount: number };
 export type AdminPlanEntitlementSummary = { complete: boolean; totalUsers: number; byPlan: Record<PlanId, number>; bySource: Record<"recurring_subscription" | "subscription_trial" | "manual_access", number>; inconsistentEntitlements: number; unavailableReason: string | null };
@@ -67,7 +67,7 @@ export type AdminAnalyticsReport = {
 export type AdminPaymentDetails = {
   payment: { id: string; amountPaise: number; currency: string; status: string; providerPaymentId: string; providerSubscriptionId: string | null; createdAt: Date; billingMode: AdminPaymentRow["billingMode"] };
   owner: { id: string; name: string | null; email: string } | null;
-  plan: { planId: string; interval: string; expectedAmountPaise: number; currency: string; intentStatus: string; createdAt: Date; updatedAt: Date } | null;
+  plan: { planId: string; interval: string; expectedAmountPaise: number | null; currency: string; intentStatus: string; createdAt: Date; updatedAt: Date } | null;
   currentSubscription: { planId: string; interval: string; status: string; currentPeriodEnd: Date | null; cancelAtPeriodEnd: boolean; cancellationRequestedAt: Date | null } | null;
   manualAccess: { planId: string; startsAt: Date; expiresAt: Date; createdAt: Date } | null;
   unavailableInformation: string[];
@@ -78,7 +78,7 @@ export type AdminAuditDetails = { event: AdminAuditRow; metadata: "withheld"; hi
 export type AdminUserDetails = {
   profile: AdminUserRow;
   subscription: { planId: string; interval: string; status: string; currentPeriodEnd: Date | null; cancelAtPeriodEnd: boolean; cancellationRequestedAt: Date | null; createdAt: Date; updatedAt: Date } | null;
-  subscriptionIntents: { id: string; planId: string; interval: string; amountPaise: number; currency: string; status: string; createdAt: Date; updatedAt: Date }[];
+  subscriptionIntents: { id: string; planId: string; interval: string; amountPaise: number | null; currency: string; status: string; createdAt: Date; updatedAt: Date }[];
   manualPaymentIntents: { id: string; planId: string; interval: string; amountPaise: number; currency: string; status: string; accessStartsAt: Date | null; accessEndsAt: Date | null; createdAt: Date; updatedAt: Date }[];
   manualAccessPeriods: { id: string; intentId: string; planId: string; startsAt: Date; expiresAt: Date; createdAt: Date }[];
   payments: { id: string; amountPaise: number; currency: string; status: string; providerPaymentId: string; providerSubscriptionId: string | null; createdAt: Date }[];
@@ -531,7 +531,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     const owners = [...new Set(rows.map((row) => str(row, "userId")))];
     const users = owners.length ? await this.db.user.findMany({ where: { id: { in: owners } }, select: { id: true, name: true, email: true } }) : [];
     const userMap = new Map(users.map((row) => [str(row, "id"), { name: nullableStr(row, "name"), email: str(row, "email") }]));
-    return makePage(rows.map((row) => { const userId = str(row, "userId"); const owner = userMap.get(userId); return { id: str(row, "id"), userId, ownerName: owner?.name ?? null, ownerEmail: owner?.email ?? "unknown", planId: str(row, "planId"), interval: str(row, "interval"), amountPaise: num(row, "amountPaise"), currency: str(row, "currency"), status: str(row, "status"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]), billingMode: "recurring" as const }; }), total, query);
+    return makePage(rows.map((row) => { const userId = str(row, "userId"); const owner = userMap.get(userId); return { id: str(row, "id"), userId, ownerName: owner?.name ?? null, ownerEmail: owner?.email ?? "unknown", planId: str(row, "planId"), interval: str(row, "interval"), amountPaise: row["amountPaise"] === null ? null : num(row, "amountPaise"), currency: str(row, "currency"), status: str(row, "status"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]), billingMode: "recurring" as const }; }), total, query);
   }
 
   async listManualPaymentIntents(query: AdminListQuery): Promise<AdminPage<AdminBillingIntentRow>> {
@@ -574,7 +574,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     return {
       payment: { id: str(row, "id"), amountPaise: num(row, "amountPaise"), currency: str(row, "currency"), status: str(row, "status"), providerPaymentId: str(row, "providerPaymentId"), providerSubscriptionId: nullableStr(row, "providerSubscriptionId"), createdAt: toDate(row["createdAt"]), billingMode },
       owner: ownerRow ? { id: str(ownerRow, "id"), name: nullableStr(ownerRow, "name"), email: str(ownerRow, "email") } : null,
-      plan: linked ? { planId: str(linked, "planId"), interval: str(linked, "interval"), expectedAmountPaise: num(linked, "amountPaise"), currency: str(linked, "currency"), intentStatus: str(linked, "status"), createdAt: toDate(linked["createdAt"]), updatedAt: toDate(linked["updatedAt"]) } : null,
+      plan: linked ? { planId: str(linked, "planId"), interval: str(linked, "interval"), expectedAmountPaise: linked["amountPaise"] === null ? null : num(linked, "amountPaise"), currency: str(linked, "currency"), intentStatus: str(linked, "status"), createdAt: toDate(linked["createdAt"]), updatedAt: toDate(linked["updatedAt"]) } : null,
       currentSubscription, manualAccess,
       unavailableInformation: ["payment method is not stored", "refund records and refund amounts are not stored", "gateway transaction fees are not stored", "tax breakdown is not stored", "raw webhook events are not linked to a payment record"],
     };
@@ -627,11 +627,12 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     const auditRows = await this.db.auditLog.findMany({ where: auditWhere, select: AUDIT_SELECT, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 });
     const cycles = cycleRowsLimited.map((row) => { const id = str(row, "id"); const counts = cycleCounts.get(id); return { id, name: str(row, "name"), status: str(row, "status"), timezone: str(row, "timezone"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]), itemCount: counts?.total ?? 0, scheduledItemCount: counts?.scheduled ?? 0 }; });
     const subscription = subscriptionRow ? { planId: str(subscriptionRow, "planId"), interval: str(subscriptionRow, "interval"), status: str(subscriptionRow, "status"), currentPeriodEnd: nullableDate(subscriptionRow["currentPeriodEnd"]), cancelAtPeriodEnd: subscriptionRow["cancelAtPeriodEnd"] === true, cancellationRequestedAt: nullableDate(subscriptionRow["cancellationRequestedAt"]), createdAt: toDate(subscriptionRow["createdAt"]), updatedAt: toDate(subscriptionRow["updatedAt"]) } : null;
-    const mapIntent = (row: Row) => ({ id: str(row, "id"), planId: str(row, "planId"), interval: str(row, "interval"), amountPaise: num(row, "amountPaise"), currency: str(row, "currency"), status: str(row, "status"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]) });
+    const mapIntent = (row: Row) => ({ id: str(row, "id"), planId: str(row, "planId"), interval: str(row, "interval"), amountPaise: row["amountPaise"] === null ? null : num(row, "amountPaise"), currency: str(row, "currency"), status: str(row, "status"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]) });
+    const mapManualIntent = (row: Row) => ({ ...mapIntent(row), amountPaise: num(row, "amountPaise") });
     return {
       profile, subscription,
       subscriptionIntents: intentRows.slice(0, HISTORY_LIMIT).map(mapIntent),
-      manualPaymentIntents: manualIntentRows.slice(0, HISTORY_LIMIT).map((row) => ({ ...mapIntent(row), accessStartsAt: nullableDate(row["accessStartsAt"]), accessEndsAt: nullableDate(row["accessEndsAt"]) })),
+      manualPaymentIntents: manualIntentRows.slice(0, HISTORY_LIMIT).map((row) => ({ ...mapManualIntent(row), accessStartsAt: nullableDate(row["accessStartsAt"]), accessEndsAt: nullableDate(row["accessEndsAt"]) })),
       manualAccessPeriods: accessRows.slice(0, HISTORY_LIMIT).map((row) => ({ id: str(row, "id"), intentId: str(row, "intentId"), planId: str(row, "planId"), startsAt: toDate(row["startsAt"]), expiresAt: toDate(row["expiresAt"]), createdAt: toDate(row["createdAt"]) })),
       payments: paymentRows.slice(0, HISTORY_LIMIT).map((row) => ({ id: str(row, "id"), amountPaise: num(row, "amountPaise"), currency: str(row, "currency"), status: str(row, "status"), providerPaymentId: str(row, "providerPaymentId"), providerSubscriptionId: nullableStr(row, "providerSubscriptionId"), createdAt: toDate(row["createdAt"]) })),
       socialAccounts: accountRows.slice(0, HISTORY_LIMIT).map((row) => ({ id: str(row, "id"), platform: str(row, "platform"), username: nullableStr(row, "username"), accountType: nullableStr(row, "accountType"), grantedScopes: nullableStr(row, "grantedScopes"), status: str(row, "status"), tokenExpiresAt: nullableDate(row["tokenExpiresAt"]), createdAt: toDate(row["createdAt"]) })),
