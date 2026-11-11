@@ -14,21 +14,22 @@ test("OAuth state is stored as a hash, is owner-bound, expires, and can be consu
   assert.equal(row.kind, "instagram_oauth_state");
   assert.equal(row.tokenHash.includes("random-state"), false);
   const state = "random-state-value-00000000000000000000000000000000000000000";
-  assert.equal(await store.consume(state, NOW), "owner1");
-  assert.equal(await store.consume(state, NOW), null);
+  assert.deepEqual(await store.consume(state, NOW), { status: "consumed", userId: "owner1" });
+  assert.deepEqual(await store.consume(state, NOW), { status: "already_consumed" });
   const expiredState = `${state}-expired`;
   await store.issue(expiredState, "owner1", NOW);
-  assert.equal(await store.consume(expiredState, new Date(NOW.getTime() + 600_000)), null);
+  assert.deepEqual(await store.consume(expiredState, new Date(NOW.getTime() + 600_000)), { status: "expired" });
+  assert.deepEqual(await store.consume("unknown-state", NOW), { status: "not_found" });
 });
 
-test("new OAuth state invalidates the previous outstanding state for that account owner", async () => {
+test("new OAuth state does not invalidate another live one-time state for the same owner", async () => {
   const repo = new MemoryAuthRepository();
   let id = 0;
   const store = new AuthTokenInstagramOAuthStateStore(repo, () => `state-${++id}`);
   await store.issue("older-state", "owner1", NOW);
   await store.issue("newer-state", "owner1", NOW);
-  assert.equal(await store.consume("older-state", NOW), null);
-  assert.equal(await store.consume("newer-state", NOW), "owner1");
+  assert.deepEqual(await store.consume("older-state", NOW), { status: "consumed", userId: "owner1" });
+  assert.deepEqual(await store.consume("newer-state", NOW), { status: "consumed", userId: "owner1" });
 });
 
 test("Prisma-backed OAuth state stores only a hash and atomic consume rejects replay and expiry", async () => {
@@ -40,8 +41,9 @@ test("Prisma-backed OAuth state stores only a hash and atomic consume rejects re
   const row = db.authToken.rows[0]!;
   assert.equal(row["tokenHash"].includes(state), false);
   const outcomes = await Promise.all([store.consume(state, NOW), store.consume(state, NOW)]);
-  assert.deepEqual(outcomes.sort(), [null, "owner1"]);
+  assert.equal(outcomes.filter((outcome) => outcome.status === "consumed").length, 1);
+  assert.equal(outcomes.filter((outcome) => outcome.status === "already_consumed").length, 1);
   const expiredState = `${state}-expired`;
   await store.issue(expiredState, "owner1", NOW);
-  assert.equal(await store.consume(expiredState, new Date(NOW.getTime() + 600_000)), null);
+  assert.deepEqual(await store.consume(expiredState, new Date(NOW.getTime() + 600_000)), { status: "expired" });
 });

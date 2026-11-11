@@ -22,6 +22,8 @@ export interface AuthRepository {
   revokeAllSessionsForUser(userId: string, at: Date): Promise<void>;
 
   createAuthToken(token: AuthTokenRecord): Promise<void>;
+  /** Read one hashed token record for safe failure classification after an atomic consume miss. */
+  getAuthToken(kind: AuthTokenKind, tokenHash: string): Promise<AuthTokenRecord | null>;
   /** Marks a token used and returns it - ONLY if it exists, matches the kind, is unused and unexpired. Atomic: two requests cannot both succeed. */
   consumeAuthToken(kind: AuthTokenKind, tokenHash: string, now: Date): Promise<AuthTokenRecord | null>;
   /**

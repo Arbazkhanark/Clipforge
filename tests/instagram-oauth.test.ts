@@ -7,7 +7,7 @@ import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
 import { FakePrismaClient } from "./helpers/fake-prisma.ts";
 import { buildSessionCookie } from "../src/server/auth/tokens.ts";
 import { encryptToken, decryptToken, readInstagramTokenKey } from "../src/server/instagram/token-cipher.ts";
-import { buildInstagramAuthorizationUrl, consumeInstagramOAuthState, exchangeInstagramCode, issueInstagramOAuthState, readInstagramOAuthConfig, type InstagramConnectedProfile, type InstagramOAuthConfig } from "../src/server/instagram/instagram-oauth.ts";
+import { buildInstagramAuthorizationUrl, consumeInstagramOAuthState, exchangeInstagramCode, instagramStateCookieName, issueInstagramOAuthState, readInstagramOAuthConfig, type InstagramConnectedProfile, type InstagramExchangeResult, type InstagramOAuthConfig } from "../src/server/instagram/instagram-oauth.ts";
 import { instagramCallbackRoute, instagramDisconnectRoute, instagramStartRoute } from "../src/server/instagram/instagram-routes.ts";
 
 const NOW = new Date("2026-06-01T12:00:00Z");
@@ -88,11 +88,38 @@ test("exchange accepts only explicit professional account types and validates re
   }
   assert.equal((await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: fetchFor("BUSINESS", ["", "instagram_business_basic", "instagram_business_basic", "extra_scope", "instagram_business_content_publish"]) })).ok, true);
   const missing = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: fetchFor("BUSINESS", ["instagram_business_basic"]) });
-  assert.deepEqual(missing, { ok: false, reason: "missing_permission" });
+  assert.deepEqual(missing, { ok: false, reason: "authorization_code_permissions_invalid" });
   const malformed = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: fetchFor("BUSINESS", ["instagram_business_basic", "instagram_business_content_publish", "bad!scope"]) });
-  assert.deepEqual(malformed, { ok: false, reason: "missing_permission" });
+  assert.deepEqual(malformed, { ok: false, reason: "authorization_code_permissions_invalid" });
   const expired = await exchangeInstagramCode({ config: CONFIG, code: "old", now: NOW, fetchImpl: async () => new Response("no", { status: 400 }) });
   assert.deepEqual(expired, { ok: false, reason: "expired_code" });
+});
+
+test("exchange failures report fixed stage reasons without retaining provider response details", async () => {
+  const validAuth = () => Response.json({ access_token: "short", user_id: "1789001", permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
+  const validLong = () => Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+  const validProfile = () => Response.json({ user_id: "1789001", username: "ada.clips", account_type: "BUSINESS" });
+  const cases: Array<{ name: string; fetchImpl: typeof fetch; reason: string }> = [
+    { name: "authorization network", fetchImpl: async () => { throw new Error(TOKEN); }, reason: "authorization_code_exchange_network_error" },
+    { name: "authorization rejected", fetchImpl: async () => new Response("private provider body", { status: 500 }), reason: "authorization_code_exchange_rejected" },
+    { name: "authorization response malformed", fetchImpl: async () => Response.json({}), reason: "authorization_code_response_invalid" },
+    { name: "authorization permissions missing", fetchImpl: async () => Response.json({ access_token: "short", user_id: "1789001", permissions: [] }), reason: "authorization_code_permissions_invalid" },
+    { name: "long token network", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : Promise.reject(new Error(TOKEN)), reason: "long_lived_token_exchange_network_error" },
+    { name: "long token rejected", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : new Response("private provider body", { status: 500 }), reason: "long_lived_token_exchange_rejected" },
+    { name: "long token response malformed", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : Response.json({ access_token: "", expires_in: 0 }), reason: "long_lived_token_response_invalid" },
+    { name: "profile network", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Promise.reject(new Error(TOKEN)), reason: "profile_lookup_network_error" },
+    { name: "profile rejected", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : new Response("private provider body", { status: 500 }), reason: "profile_lookup_rejected" },
+    { name: "profile malformed", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : new Response("not-json"), reason: "profile_response_invalid" },
+    { name: "profile identity mismatch", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "other", username: "ada.clips", account_type: "BUSINESS" }), reason: "profile_identity_mismatch" },
+    { name: "unsupported account", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "1789001", username: "ada.clips", account_type: "PERSONAL" }), reason: "unsupported_account" },
+    { name: "invalid username", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "1789001", username: "bad username", account_type: "BUSINESS" }), reason: "profile_username_invalid" },
+    { name: "invalid expiry", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? Response.json({ access_token: TOKEN, expires_in: 1e100 }) : validProfile(), reason: "token_expiry_invalid" },
+  ];
+  for (const entry of cases) {
+    const result = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: entry.fetchImpl });
+    assert.deepEqual(result, { ok: false, reason: entry.reason }, entry.name);
+    assert.equal(JSON.stringify(result).includes(TOKEN), false, entry.name);
+  }
 });
 
 test("start and callback require state and a session, and the stored account has no token", async () => {
@@ -100,7 +127,7 @@ test("start and callback require state and a session, and the stored account has
   const oauthStates = new Map<string, string>();
   runtime.instagramOAuthStates = {
     async issue(state, ownerId) { oauthStates.set(state, ownerId); },
-    async consume(state) { const ownerId = oauthStates.get(state) ?? null; oauthStates.delete(state); return ownerId; },
+    async consume(state) { const userId = oauthStates.get(state); oauthStates.delete(state); return userId ? { status: "consumed", userId } : { status: "not_found" }; },
   };
   const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW };
   const blocked = await instagramStartRoute(routes)(form("/api/instagram/start", [], ""));
@@ -134,6 +161,24 @@ test("start and callback require state and a session, and the stored account has
   assert.equal(accounts[0]?.accountType, "BUSINESS");
   assert.equal(JSON.stringify(accounts).includes(TOKEN), false);
   assert.equal(JSON.stringify(accounts).includes("v1."), false);
+});
+
+test("overlapping OAuth starts keep independent browser cookies and one-time states", async () => {
+  const { runtime, cookie } = await signedIn();
+  const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW };
+  const first = await instagramStartRoute(routes)(form("/api/instagram/start", [], cookie));
+  const firstState = new URL(first.headers.get("location") ?? "https://invalid/").searchParams.get("state")!;
+  const firstStateCookie = first.headers.getSetCookie().map((item) => item.split(";")[0]!).find((item) => item.includes("clipforge_ig_state_"))!;
+  const second = await instagramStartRoute(routes)(form("/api/instagram/start", [], `${cookie}; ${firstStateCookie}`));
+  const secondState = new URL(second.headers.get("location") ?? "https://invalid/").searchParams.get("state")!;
+  const secondStateCookie = second.headers.getSetCookie().map((item) => item.split(";")[0]!).find((item) => item.includes("clipforge_ig_state_"))!;
+  assert.notEqual(firstStateCookie.split("=", 1)[0], secondStateCookie.split("=", 1)[0]);
+  const cookieJar = `${cookie}; ${firstStateCookie}; ${secondStateCookie}`;
+  const callback = instagramCallbackRoute({ ...routes, exchange: async () => ({ ok: true, profile: profile() }) });
+  const firstCallback = await callback(new Request(`http://localhost:3000/api/instagram/callback?code=abc&state=${firstState}`, { headers: { cookie: cookieJar } }));
+  const secondCallback = await callback(new Request(`http://localhost:3000/api/instagram/callback?code=abc&state=${secondState}`, { headers: { cookie: cookieJar } }));
+  assert.match(firstCallback.headers.get("location") ?? "", /notice=instagram_connected/);
+  assert.match(secondCallback.headers.get("location") ?? "", /notice=instagram_connected/);
 });
 
 test("disconnect requires confirmation and does not affect another user's account", async () => {
@@ -185,24 +230,133 @@ test("callback state is bound to its starting session and provider failures neve
   const jar = `${cookie}; ${start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ")}`;
   activeUserId = "different-user";
   let exchangeCalls = 0;
-  const wrongOwner = await instagramCallbackRoute({ ...routes, exchange: async () => { exchangeCalls += 1; throw new Error(TOKEN); } })(new Request(`http://localhost:3000/api/instagram/callback?code=abc&state=${state}`, { headers: { cookie: jar } }));
+  const ownerDiagnostics: Array<{ event: string; reason: string }> = [];
+  const wrongOwner = await instagramCallbackRoute({ ...routes, diagnosticLogger: { warn: (entry) => ownerDiagnostics.push(entry) }, exchange: async () => { exchangeCalls += 1; throw new Error(TOKEN); } })(new Request(`http://localhost:3000/api/instagram/callback?code=abc&state=${state}`, { headers: { cookie: jar } }));
   assert.match(wrongOwner.headers.get("location") ?? "", /error=not_authenticated/);
   assert.equal(exchangeCalls, 0);
+  assert.deepEqual(ownerDiagnostics, [{ event: "instagram_oauth_state_rejected", reason: "session_user_mismatch" }]);
   activeUserId = await originalResolver(new Request("http://localhost:3000/", { headers: { cookie } }));
   const retryStart = await instagramStartRoute(routes)(form("/api/instagram/start", [], cookie));
   const retryState = new URL(retryStart.headers.get("location") ?? "https://invalid/").searchParams.get("state") ?? "";
   const retryJar = `${cookie}; ${retryStart.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ")}`;
+  const diagnostics: Array<{ event: string; reason: string }> = [];
   let logged = "";
   const oldConsoleError = console.error;
   console.error = (...args: unknown[]) => { logged += args.map(String).join(" "); };
   let failed: Response;
   try {
-    failed = await instagramCallbackRoute({ ...routes, exchange: async () => { throw new Error(TOKEN); } })(new Request(`http://localhost:3000/api/instagram/callback?code=abc&state=${retryState}`, { headers: { cookie: retryJar } }));
+    failed = await instagramCallbackRoute({ ...routes, diagnosticLogger: { warn: (entry) => diagnostics.push(entry) }, exchange: async () => { throw new Error(TOKEN); } })(new Request(`http://localhost:3000/api/instagram/callback?code=abc&state=${retryState}`, { headers: { cookie: retryJar } }));
   } finally { console.error = oldConsoleError; }
   assert.match(failed.headers.get("location") ?? "", /error=instagram_callback_error/);
   assert.equal((failed.headers.get("location") ?? "").includes(TOKEN), false);
   assert.equal(logged.includes(TOKEN), false);
+  assert.deepEqual(diagnostics, [{ event: "instagram_oauth_exchange_failed", reason: "exchange_unexpected_failure" }]);
+  assert.equal(JSON.stringify(diagnostics).includes(TOKEN), false);
   runtime.currentUserId = originalResolver;
+});
+
+test("callback emits fixed diagnostics for provider, code, exchange, and persistence failures", async () => {
+  const { runtime, cookie } = await signedIn();
+  const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW };
+  const diagnostics: Array<{ event: string; reason: string }> = [];
+  const logger = { warn: (entry: { event: string; reason: string }) => diagnostics.push(entry) };
+  const invoke = async (query: string, exchange?: () => Promise<InstagramExchangeResult>, alter?: () => void) => {
+    const start = await instagramStartRoute(routes)(form("/api/instagram/start", [], cookie));
+    const state = new URL(start.headers.get("location") ?? "https://invalid/").searchParams.get("state")!;
+    const stateCookie = start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ");
+    alter?.();
+    const before = diagnostics.length;
+    const response = await instagramCallbackRoute({ ...routes, diagnosticLogger: logger, ...(exchange ? { exchange } : {}) })(new Request(`http://localhost:3000/api/instagram/callback${query}&state=${state}`, { headers: { cookie: `${cookie}; ${stateCookie}` } }));
+    return { response, entries: diagnostics.slice(before) };
+  };
+
+  const provider = await invoke("?error=server_error", async () => ({ ok: true, profile: profile() }));
+  assert.match(provider.response.headers.get("location") ?? "", /error=instagram_callback_error/);
+  assert.deepEqual(provider.entries, [{ event: "instagram_oauth_callback_rejected", reason: "provider_returned_error" }]);
+
+  const malformedCode = await invoke("?code=bad%20code", async () => ({ ok: true, profile: profile() }));
+  assert.deepEqual(malformedCode.entries, [{ event: "instagram_oauth_callback_rejected", reason: "authorization_code_missing_or_malformed" }]);
+
+  const providerReasons = ["authorization_code_exchange_network_error", "authorization_code_exchange_rejected", "authorization_code_response_invalid", "authorization_code_permissions_invalid", "long_lived_token_exchange_network_error", "long_lived_token_exchange_rejected", "long_lived_token_response_invalid", "profile_lookup_network_error", "profile_lookup_rejected", "profile_response_invalid", "profile_identity_mismatch", "unsupported_account", "profile_username_invalid", "token_expiry_invalid"] as const;
+  for (const reason of providerReasons) {
+    const result = await invoke("?code=abc", async () => ({ ok: false, reason }));
+    assert.deepEqual(result.entries, [{ event: "instagram_oauth_exchange_failed", reason }], reason);
+    assert.match(result.response.headers.get("location") ?? "", /error=instagram_/);
+  }
+
+  const thrown = await invoke("?code=abc", async () => { throw new Error(TOKEN); });
+  assert.deepEqual(thrown.entries, [{ event: "instagram_oauth_exchange_failed", reason: "exchange_unexpected_failure" }]);
+
+  const persistenceCases: Array<{ stage: string; change: () => void; restore: () => void }> = [
+    { stage: "plan_activation", change: () => { runtime.repo.getPlanIdForUser = async () => { throw new Error(TOKEN); }; }, restore: () => { runtime.repo.getPlanIdForUser = originalPlan; } },
+    { stage: "account_link", change: () => { runtime.repo.saveInstagramConnectionWithinLimit = async () => { throw new Error(TOKEN); }; }, restore: () => { runtime.repo.saveInstagramConnectionWithinLimit = originalSave; } },
+    { stage: "audit_write", change: () => { runtime.repo.appendAudit = async () => { throw new Error(TOKEN); }; }, restore: () => { runtime.repo.appendAudit = originalAudit; } },
+  ];
+  const originalPlan = runtime.repo.getPlanIdForUser.bind(runtime.repo);
+  const originalSave = runtime.repo.saveInstagramConnectionWithinLimit.bind(runtime.repo);
+  const originalAudit = runtime.repo.appendAudit.bind(runtime.repo);
+  let accountSuffix = 1;
+  for (const entry of persistenceCases) {
+    const result = await invoke("?code=abc", async () => ({ ok: true, profile: profile({ externalAccountId: `1789${accountSuffix++}` }) }), entry.change);
+    entry.restore();
+    assert.match(result.response.headers.get("location") ?? "", /error=instagram_callback_error/);
+    assert.deepEqual(result.entries, [{ event: "instagram_oauth_persistence_failed", reason: `${entry.stage}_failed` }]);
+  }
+  assert.equal(JSON.stringify(diagnostics).includes(TOKEN), false);
+  assert.equal(JSON.stringify(diagnostics).includes(CONFIG.clientSecret), false);
+});
+
+test("OAuth callback diagnostics distinguish state rejection causes without logging state material", async () => {
+  const { runtime, cookie } = await signedIn();
+  const diagnostics: Array<{ event: string; reason: string }> = [];
+  const logger = { warn: (entry: { event: string; reason: string }) => diagnostics.push(entry) };
+  const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW, diagnosticLogger: logger };
+  const request = (query: string, state: string, cookieValue?: string) => new Request(`http://localhost:3000/api/instagram/callback${query}`, { headers: { cookie: `${cookie}${cookieValue === undefined ? "" : `; ${instagramStateCookieName(state, false)}=${cookieValue}`}` } });
+  const call = async (query: string, state: string, cookieValue?: string) => instagramCallbackRoute(routes)(request(query, state, cookieValue));
+  const state = "a".repeat(43);
+
+  await instagramCallbackRoute(routes)(new Request("http://localhost:3000/api/instagram/callback", { headers: { cookie } }));
+  await call(`?state=${state}`, state);
+  await call("?state=bad", "bad", "bad");
+  await call(`?state=${state}`, state, "bad");
+  await call(`?state=${state}`, state, "b".repeat(43));
+  await call(`?state=${state}`, state, state); // Correct cookie/query pair, but no persisted token hash.
+
+  const expired = "e".repeat(43);
+  await runtime.instagramOAuthStates!.issue(expired, "owner1", new Date(NOW.getTime() - 601_000));
+  await call(`?state=${expired}`, expired, expired);
+
+  const consumed = "c".repeat(43);
+  await runtime.instagramOAuthStates!.issue(consumed, "owner1", NOW);
+  assert.equal((await runtime.instagramOAuthStates!.consume(consumed, NOW)).status, "consumed");
+  await call(`?state=${consumed}`, consumed, consumed);
+
+  assert.deepEqual(diagnostics.map((entry) => entry.reason), [
+    "state_parameter_missing",
+    "state_cookie_missing",
+    "state_parameter_malformed",
+    "state_cookie_malformed",
+    "state_cookie_query_mismatch",
+    "state_hash_not_found",
+    "state_record_expired",
+    "state_record_already_consumed",
+  ]);
+  assert.ok(diagnostics.every((entry) => entry.event === "instagram_oauth_state_rejected"));
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(serialized.includes(state), false);
+  assert.equal(serialized.includes(cookie), false);
+});
+
+test("OAuth state-store database failure is logged safely and fails closed", async () => {
+  const { runtime, cookie } = await signedIn();
+  const state = "d".repeat(43);
+  const diagnostics: Array<{ event: string; reason: string }> = [];
+  runtime.instagramOAuthStates = { issue: async () => undefined, consume: async () => { throw new Error("sensitive database detail"); } };
+  const response = await instagramCallbackRoute({ runtime: () => runtime, config: CONFIG, now: () => NOW, diagnosticLogger: { warn: (entry) => diagnostics.push(entry) } })(new Request(`http://localhost:3000/api/instagram/callback?state=${state}`, { headers: { cookie: `${cookie}; ${instagramStateCookieName(state, false)}=${state}` } }));
+  assert.match(response.headers.get("location") ?? "", /error=database_unavailable/);
+  assert.deepEqual(diagnostics, [{ event: "instagram_oauth_state_lookup_failed", reason: "state_store_database_error" }]);
+  assert.equal(JSON.stringify(diagnostics).includes("sensitive database detail"), false);
+  assert.equal(JSON.stringify(diagnostics).includes(state), false);
 });
 
 test("Prisma mapping keeps the ciphertext in the row and out of the account record", async () => {

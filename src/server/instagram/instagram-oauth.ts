@@ -7,7 +7,7 @@
 // client_id, redirect_uri, response_type, scope, and optional state. It does not list code_challenge.
 // This file follows the Business Login host. It does not add PKCE, because neither page documents it.
 // This file does not run unless a test or a configured server calls exchangeInstagramCode.
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Environment } from "../environment.ts";
 import { INSTAGRAM_REQUIRED_SCOPES } from "../../lib/integrations/instagram-capabilities.ts";
 import { isSupportedInstagramAccountType, missingInstagramScopes, normalizeInstagramScopes } from "../../lib/integrations/instagram-eligibility.ts";
@@ -30,7 +30,23 @@ export interface InstagramConnectedProfile {
   accessToken: string;
   tokenExpiresAt: Date;
 }
-export type InstagramExchangeResult = { ok: true; profile: InstagramConnectedProfile } | { ok: false; reason: "expired_code" | "callback_error" | "missing_permission" | "unsupported_account" };
+export type InstagramExchangeFailure =
+  | "expired_code"
+  | "authorization_code_exchange_network_error"
+  | "authorization_code_exchange_rejected"
+  | "authorization_code_response_invalid"
+  | "authorization_code_permissions_invalid"
+  | "long_lived_token_exchange_network_error"
+  | "long_lived_token_exchange_rejected"
+  | "long_lived_token_response_invalid"
+  | "profile_lookup_network_error"
+  | "profile_lookup_rejected"
+  | "profile_response_invalid"
+  | "profile_identity_mismatch"
+  | "unsupported_account"
+  | "profile_username_invalid"
+  | "token_expiry_invalid";
+export type InstagramExchangeResult = { ok: true; profile: InstagramConnectedProfile } | { ok: false; reason: InstagramExchangeFailure };
 
 export function readInstagramOAuthConfig(env: Environment = process.env): InstagramOAuthConfig | null {
   const clientId = env["INSTAGRAM_APP_ID"]?.trim() ?? "";
@@ -77,19 +93,27 @@ export function buildInstagramAuthorizationUrl(config: InstagramOAuthConfig, sta
   return url.toString();
 }
 
-function cookieName(secure: boolean): string { return `${secure ? "__Host-" : ""}clipforge_ig_state`; }
+const validState = (state: string) => /^[A-Za-z0-9_-]{43,128}$/.test(state);
+
+/** A state-derived cookie name lets concurrent browser tabs keep separate state cookies. */
+export function instagramStateCookieName(state: string, secure: boolean): string {
+  const prefix = secure ? "__Host-" : "";
+  if (!validState(state)) return `${prefix}clipforge_ig_state`;
+  const suffix = createHash("sha256").update(state).digest("hex").slice(0, 24);
+  return `${prefix}clipforge_ig_state_${suffix}`;
+}
 
 export function buildInstagramStateCookie(state: string, secure: boolean): string {
-  return [`${cookieName(secure)}=${state}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${OAUTH_MAX_AGE_SECONDS}`, ...(secure ? ["Secure"] : [])].join("; ");
+  return [`${instagramStateCookieName(state, secure)}=${state}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${OAUTH_MAX_AGE_SECONDS}`, ...(secure ? ["Secure"] : [])].join("; ");
 }
 
-export function clearInstagramStateCookie(secure: boolean): string {
-  return [`${cookieName(secure)}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0", ...(secure ? ["Secure"] : [])].join("; ");
+export function clearInstagramStateCookie(secure: boolean, state?: string): string {
+  return [`${instagramStateCookieName(state ?? "", secure)}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0", ...(secure ? ["Secure"] : [])].join("; ");
 }
 
-export function readInstagramStateCookie(cookieHeader: string | null | undefined, secure: boolean): string | null {
+export function readInstagramStateCookie(cookieHeader: string | null | undefined, secure: boolean, state: string): string | null {
   if (!cookieHeader || cookieHeader.length > 8192) return null;
-  const expected = cookieName(secure);
+  const expected = instagramStateCookieName(state, secure);
   for (const part of cookieHeader.split(";")) {
     const index = part.indexOf("=");
     if (index === -1) continue;
@@ -122,16 +146,17 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   const body = new URLSearchParams({ client_id: args.config.clientId, client_secret: args.config.clientSecret, grant_type: "authorization_code", redirect_uri: args.config.redirectUri, code: args.code });
   let shortResponse: Response;
   try { shortResponse = await fetchImpl(TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body }); }
-  catch { return { ok: false, reason: "callback_error" }; }
+  catch { return { ok: false, reason: "authorization_code_exchange_network_error" }; }
   const shortJson = await readJson(shortResponse);
   const shortData = asRecord(shortJson?.["data"]) ?? (Array.isArray(shortJson?.["data"]) ? asRecord((shortJson?.["data"] as unknown[])[0]) : shortJson);
   const shortToken = typeof shortData?.["access_token"] === "string" ? shortData["access_token"] : "";
   const userId = shortData?.["user_id"];
   const externalAccountId = typeof userId === "string" || typeof userId === "number" ? String(userId) : "";
-  if (!shortResponse.ok || !shortToken || !/^[0-9]{1,32}$/.test(externalAccountId)) return { ok: false, reason: shortResponse.status === 400 ? "expired_code" : "callback_error" };
+  if (!shortResponse.ok) return { ok: false, reason: shortResponse.status === 400 ? "expired_code" : "authorization_code_exchange_rejected" };
+  if (!shortToken || !/^[0-9]{1,32}$/.test(externalAccountId)) return { ok: false, reason: "authorization_code_response_invalid" };
   const parsedScopes = normalizeInstagramScopes(shortData?.["permissions"]);
   const grantedScopes = parsedScopes.scopes;
-  if (parsedScopes.malformed || missingInstagramScopes(grantedScopes).length > 0) return { ok: false, reason: "missing_permission" };
+  if (parsedScopes.malformed || missingInstagramScopes(grantedScopes).length > 0) return { ok: false, reason: "authorization_code_permissions_invalid" };
 
   const longUrl = new URL("/access_token", GRAPH_ORIGIN);
   longUrl.searchParams.set("grant_type", "ig_exchange_token");
@@ -139,28 +164,30 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   longUrl.searchParams.set("access_token", shortToken);
   let longResponse: Response;
   try { longResponse = await fetchImpl(longUrl); }
-  catch { return { ok: false, reason: "callback_error" }; }
+  catch { return { ok: false, reason: "long_lived_token_exchange_network_error" }; }
   const longJson = await readJson(longResponse);
   const accessToken = typeof longJson?.["access_token"] === "string" ? longJson["access_token"] : "";
   const expiresIn = typeof longJson?.["expires_in"] === "number" ? longJson["expires_in"] : Number(longJson?.["expires_in"]);
-  if (!longResponse.ok || !accessToken || !Number.isFinite(expiresIn) || expiresIn <= 0) return { ok: false, reason: "callback_error" };
+  if (!longResponse.ok) return { ok: false, reason: "long_lived_token_exchange_rejected" };
+  if (!accessToken || !Number.isFinite(expiresIn) || expiresIn <= 0) return { ok: false, reason: "long_lived_token_response_invalid" };
 
   const profileUrl = new URL("/me", GRAPH_ORIGIN);
   profileUrl.searchParams.set("fields", "user_id,username,account_type");
   profileUrl.searchParams.set("access_token", accessToken);
   let profileResponse: Response;
   try { profileResponse = await fetchImpl(profileUrl); }
-  catch { return { ok: false, reason: "callback_error" }; }
+  catch { return { ok: false, reason: "profile_lookup_network_error" }; }
   const profileJson = await readJson(profileResponse);
-  if (!profileResponse.ok || !profileJson) return { ok: false, reason: "callback_error" };
+  if (!profileResponse.ok) return { ok: false, reason: "profile_lookup_rejected" };
+  if (!profileJson) return { ok: false, reason: "profile_response_invalid" };
   const profileUserId = profileJson["user_id"];
-  if ((typeof profileUserId !== "string" && typeof profileUserId !== "number") || String(profileUserId) !== externalAccountId) return { ok: false, reason: "callback_error" };
+  if ((typeof profileUserId !== "string" && typeof profileUserId !== "number") || String(profileUserId) !== externalAccountId) return { ok: false, reason: "profile_identity_mismatch" };
   const rawAccountType = profileJson["account_type"];
   if (!isSupportedInstagramAccountType(rawAccountType)) return { ok: false, reason: "unsupported_account" };
   const accountType: InstagramAccountType = rawAccountType;
   const username = typeof profileJson["username"] === "string" && /^[A-Za-z0-9._]{1,30}$/.test(profileJson["username"]) ? profileJson["username"] : null;
-  if (!username) return { ok: false, reason: "callback_error" };
+  if (!username) return { ok: false, reason: "profile_username_invalid" };
   const tokenExpiresAt = new Date(args.now.getTime() + expiresIn * 1000);
-  if (Number.isNaN(tokenExpiresAt.getTime()) || tokenExpiresAt <= args.now) return { ok: false, reason: "callback_error" };
+  if (Number.isNaN(tokenExpiresAt.getTime()) || tokenExpiresAt <= args.now) return { ok: false, reason: "token_expiry_invalid" };
   return { ok: true, profile: { externalAccountId, username, accountType, grantedScopes, accessToken, tokenExpiresAt } };
 }

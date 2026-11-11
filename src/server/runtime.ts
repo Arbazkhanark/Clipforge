@@ -188,6 +188,7 @@ function guardAuthRepository(load: () => Promise<DatabaseServices>): AuthReposit
     revokeSession: (sessionId, at) => run("auth.revokeSession", (auth) => auth.revokeSession(sessionId, at)),
     revokeAllSessionsForUser: (userId, at) => run("auth.revokeAllSessionsForUser", (auth) => auth.revokeAllSessionsForUser(userId, at)),
     createAuthToken: (token) => run("auth.createAuthToken", (auth) => auth.createAuthToken(token)),
+    getAuthToken: (kind, tokenHash) => run("auth.getAuthToken", (auth) => auth.getAuthToken(kind, tokenHash)),
     consumeAuthToken: (kind, tokenHash, now) => run("auth.consumeAuthToken", (auth) => auth.consumeAuthToken(kind, tokenHash, now)),
     completePasswordReset: (input) => run("auth.completePasswordReset", (auth) => auth.completePasswordReset(input)),
     invalidateAuthTokens: (userId, kind, now) => run("auth.invalidateAuthTokens", (auth) => auth.invalidateAuthTokens(userId, kind, now)),

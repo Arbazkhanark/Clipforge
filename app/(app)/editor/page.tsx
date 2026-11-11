@@ -1,3 +1,4 @@
+// app/(app)/editor/page.tsx
 import { EditorView } from "../../../src/components/EditorViews.tsx";
 import { ErrorState } from "../../../src/components/PageState.tsx";
 import { FlashMessage } from "../../../src/components/FlashMessage.tsx";

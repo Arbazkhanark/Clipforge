@@ -26,6 +26,11 @@ export class MemoryAuthRepository implements AuthRepository {
   async revokeAllSessionsForUser(userId: string, at: Date): Promise<void> { await tick(); for (const s of this.sessions.values()) if (s.userId === userId && !s.revokedAt) s.revokedAt = at; }
 
   async createAuthToken(token: AuthTokenRecord): Promise<void> { await tick(); this.tokens.set(token.id, clone(token)); }
+  async getAuthToken(kind: AuthTokenKind, tokenHash: string): Promise<AuthTokenRecord | null> {
+    await tick();
+    const token = [...this.tokens.values()].find((item) => item.kind === kind && item.tokenHash === tokenHash);
+    return token ? clone(token) : null;
+  }
   async completePasswordReset(input: { tokenHash: string; now: Date; passwordHash: string; passwordProblems: (email: string) => string[] }): Promise<{ status: "reset" } | { status: "invalid" } | { status: "rejected"; problems: string[] }> {
     await tick();
     const token = [...this.tokens.values()].find((item) => item.tokenHash === input.tokenHash && item.kind === "password_reset");

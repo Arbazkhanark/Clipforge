@@ -30,6 +30,10 @@ export class PrismaAuthRepository implements AuthRepository {
   async revokeAllSessionsForUser(userId: string, at: Date): Promise<void> { await this.db.session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: at } }); }
 
   async createAuthToken(t: AuthTokenRecord): Promise<void> { await this.db.authToken.create({ data: { id: t.id, userId: t.userId, kind: t.kind, tokenHash: t.tokenHash, expiresAt: t.expiresAt, usedAt: t.usedAt, createdAt: t.createdAt } }); }
+  async getAuthToken(kind: AuthTokenKind, tokenHash: string): Promise<AuthTokenRecord | null> {
+    const row = await this.db.authToken.findUnique({ where: { tokenHash } });
+    return row && row["kind"] === kind ? rowToToken(row) : null;
+  }
   async completePasswordReset(input: { tokenHash: string; now: Date; passwordHash: string; passwordProblems: (email: string) => string[] }): Promise<{ status: "reset" } | { status: "invalid" } | { status: "rejected"; problems: string[] }> {
     return this.db.$transaction(async (tx) => {
       const token = await tx.authToken.findUnique({ where: { tokenHash: input.tokenHash } });

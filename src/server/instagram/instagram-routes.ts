@@ -10,7 +10,7 @@ import { encryptToken } from "./token-cipher.ts";
 import { isValidInstagramConnectionProfile } from "../../lib/integrations/instagram-eligibility.ts";
 import {
   buildInstagramAuthorizationUrl, buildInstagramStateCookie, clearInstagramStateCookie, exchangeInstagramCode,
-  instagramSafeEqual, readInstagramOAuthConfig, readInstagramStateCookie, createInstagramState,
+  instagramSafeEqual, instagramStateCookieName, readInstagramOAuthConfig, readInstagramStateCookie, createInstagramState,
   type InstagramExchangeResult, type InstagramOAuthConfig,
 } from "./instagram-oauth.ts";
 
@@ -22,6 +22,8 @@ export interface InstagramRouteOptions {
   config?: InstagramOAuthConfig | null;
   now?: () => Date;
   exchange?: Exchange;
+  /** Receives only fixed event/reason labels; never state, code, cookies, or provider payloads. */
+  diagnosticLogger?: { warn(entry: { event: string; reason: string }): void };
 }
 
 const STATE_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
@@ -34,8 +36,14 @@ function withCookies(location: string, cookies: string[]): Response {
   return response;
 }
 
-function finish(secure: boolean, code: FlashErrorCode): Response {
-  return withCookies(buildFlashLocation("/instagram", "error", code), [clearInstagramStateCookie(secure)]);
+function finish(secure: boolean, code: FlashErrorCode, state?: string): Response {
+  return withCookies(buildFlashLocation("/instagram", "error", code), [clearInstagramStateCookie(secure, state)]);
+}
+
+function logOAuthState(options: InstagramRouteOptions, event: string, reason: string): void {
+  const entry = { event, reason };
+  if (options.diagnosticLogger) options.diagnosticLogger.warn(entry);
+  else console.warn(JSON.stringify(entry));
 }
 
 export const instagramStartRoute = (options: InstagramRouteOptions = {}) => async (request: Request): Promise<Response> => {
@@ -49,7 +57,7 @@ export const instagramStartRoute = (options: InstagramRouteOptions = {}) => asyn
   if (!config || !runtime.instagramOAuthStates) return finish(secure, "instagram_not_configured");
   const state = createInstagramState();
   try { await runtime.instagramOAuthStates.issue(state, userId, (options.now ?? (() => new Date()))()); }
-  catch { return finish(secure, "instagram_callback_error"); }
+  catch { logOAuthState(options, "instagram_oauth_state_issue_failed", "state_store_write_failed"); return finish(secure, "instagram_callback_error"); }
   return withCookies(buildInstagramAuthorizationUrl(config, state), [buildInstagramStateCookie(state, secure)]);
 };
 
@@ -60,45 +68,113 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
   const config = options.config === undefined ? readInstagramOAuthConfig() : options.config;
   const url = new URL(request.url);
   const state = url.searchParams.get("state") ?? "";
-  const cookieState = readInstagramStateCookie(request.headers.get("cookie"), secure);
-  if (!cookieState || !STATE_PATTERN.test(state) || !instagramSafeEqual(cookieState, state)) return finish(secure, "instagram_invalid_state");
+  const finishCallback = (code: FlashErrorCode) => finish(secure, code, state);
+  if (!url.searchParams.has("state")) {
+    logOAuthState(options, "instagram_oauth_state_rejected", "state_parameter_missing");
+    return finishCallback("instagram_invalid_state");
+  }
+  if (!STATE_PATTERN.test(state)) {
+    logOAuthState(options, "instagram_oauth_state_rejected", "state_parameter_malformed");
+    return finishCallback("instagram_invalid_state");
+  }
+  const cookieHeader = request.headers.get("cookie");
+  const cookieState = readInstagramStateCookie(cookieHeader, secure, state);
+  if (!cookieState) {
+    const cookieName = instagramStateCookieName(state, secure);
+    const cookieWasPresent = (cookieHeader ?? "").split(";").some((part) => part.trim().startsWith(`${cookieName}=`));
+    logOAuthState(options, "instagram_oauth_state_rejected", cookieWasPresent ? "state_cookie_malformed" : "state_cookie_missing");
+    return finishCallback("instagram_invalid_state");
+  }
+  if (!instagramSafeEqual(cookieState, state)) {
+    logOAuthState(options, "instagram_oauth_state_rejected", "state_cookie_query_mismatch");
+    return finishCallback("instagram_invalid_state");
+  }
   const now = (options.now ?? (() => new Date()))();
-  const stateOwnerId = await runtime.instagramOAuthStates?.consume(state, now) ?? null;
-  if (!stateOwnerId) return finish(secure, "instagram_invalid_state");
+  if (!runtime.instagramOAuthStates) {
+    logOAuthState(options, "instagram_oauth_state_rejected", "state_store_unavailable");
+    return finishCallback("instagram_not_configured");
+  }
+  let consumed: Awaited<ReturnType<NonNullable<Runtime["instagramOAuthStates"]>["consume"]>>;
+  try { consumed = await runtime.instagramOAuthStates.consume(state, now); }
+  catch {
+    logOAuthState(options, "instagram_oauth_state_lookup_failed", "state_store_database_error");
+    return finishCallback("database_unavailable");
+  }
+  if (consumed.status !== "consumed") {
+    const reason = consumed.status === "not_found" ? "state_hash_not_found" : consumed.status === "expired" ? "state_record_expired" : consumed.status === "already_consumed" ? "state_record_already_consumed" : "state_consume_race_lost";
+    logOAuthState(options, "instagram_oauth_state_rejected", reason);
+    return finishCallback("instagram_invalid_state");
+  }
   const userId = await runtime.currentUserId(request);
-  if (!userId || userId !== stateOwnerId) return finish(secure, "not_authenticated");
+  if (!userId || userId !== consumed.userId) {
+    logOAuthState(options, "instagram_oauth_state_rejected", "session_user_mismatch");
+    return finishCallback("not_authenticated");
+  }
   const providerError = url.searchParams.get("error");
-  if (providerError === "access_denied") return finish(secure, "instagram_cancelled");
-  if (providerError) return finish(secure, "instagram_callback_error");
-  if (!config) return finish(secure, "instagram_not_configured");
+  if (providerError === "access_denied") return finishCallback("instagram_cancelled");
+  if (providerError) {
+    logOAuthState(options, "instagram_oauth_callback_rejected", "provider_returned_error");
+    return finishCallback("instagram_callback_error");
+  }
+  if (!config) return finishCallback("instagram_not_configured");
   const code = url.searchParams.get("code") ?? "";
-  if (!CODE_PATTERN.test(code)) return finish(secure, "instagram_callback_error");
+  if (!CODE_PATTERN.test(code)) {
+    logOAuthState(options, "instagram_oauth_callback_rejected", "authorization_code_missing_or_malformed");
+    return finishCallback("instagram_callback_error");
+  }
   let exchanged: InstagramExchangeResult;
   try {
     exchanged = options.exchange ? await options.exchange({ code, now }) : await exchangeInstagramCode({ config, code, now });
   } catch {
-    return finish(secure, "instagram_callback_error");
+    logOAuthState(options, "instagram_oauth_exchange_failed", "exchange_unexpected_failure");
+    return finishCallback("instagram_callback_error");
   }
   if (!exchanged.ok) {
-    const codeByReason = { expired_code: "instagram_expired_code", callback_error: "instagram_callback_error", missing_permission: "instagram_missing_permission", unsupported_account: "instagram_unsupported_account" } as const;
-    return finish(secure, codeByReason[exchanged.reason]);
+    logOAuthState(options, "instagram_oauth_exchange_failed", exchanged.reason);
+    const codeByReason = {
+      expired_code: "instagram_expired_code",
+      authorization_code_exchange_network_error: "instagram_callback_error",
+      authorization_code_exchange_rejected: "instagram_callback_error",
+      authorization_code_response_invalid: "instagram_callback_error",
+      authorization_code_permissions_invalid: "instagram_missing_permission",
+      long_lived_token_exchange_network_error: "instagram_callback_error",
+      long_lived_token_exchange_rejected: "instagram_callback_error",
+      long_lived_token_response_invalid: "instagram_callback_error",
+      profile_lookup_network_error: "instagram_callback_error",
+      profile_lookup_rejected: "instagram_callback_error",
+      profile_response_invalid: "instagram_callback_error",
+      profile_identity_mismatch: "instagram_callback_error",
+      unsupported_account: "instagram_unsupported_account",
+      profile_username_invalid: "instagram_callback_error",
+      token_expiry_invalid: "instagram_callback_error",
+    } as const;
+    return finishCallback(codeByReason[exchanged.reason]);
   }
-  if (!isValidInstagramConnectionProfile(exchanged.profile, now)) return finish(secure, "instagram_unsupported_account");
+  if (!isValidInstagramConnectionProfile(exchanged.profile, now)) {
+    logOAuthState(options, "instagram_oauth_profile_rejected", "profile_not_eligible");
+    return finishCallback("instagram_unsupported_account");
+  }
+  let persistenceStage: "connection_prepare" | "plan_activation" | "account_link" | "audit_write" = "connection_prepare";
   try {
     const connection = {
       id: runtime.newId(), userId, externalAccountId: exchanged.profile.externalAccountId, username: exchanged.profile.username,
       accountType: exchanged.profile.accountType, grantedScopes: exchanged.profile.grantedScopes, tokenExpiresAt: exchanged.profile.tokenExpiresAt,
       encryptedAccessToken: encryptToken(config.tokenKey, exchanged.profile.accessToken),
     };
+    persistenceStage = "plan_activation";
     await runtime.repo.getPlanIdForUser(userId, now); // activates any now-eligible queued grant before the locked account-cap check
+    persistenceStage = "account_link";
     const saved = await runtime.repo.saveInstagramConnectionWithinLimit(connection, now);
-    if (saved.status === "limit") return finish(secure, "plan_limit");
+    if (saved.status === "limit") return finishCallback("plan_limit");
+    persistenceStage = "audit_write";
     await runtime.repo.appendAudit({ actorId: userId, action: "instagram.connected", entityType: "SocialAccount", entityId: saved.accountId });
   } catch (error) {
-    if (error instanceof AppError && error.code === "database_unavailable") return finish(secure, "database_unavailable");
-    return finish(secure, "instagram_callback_error");
+    const databaseUnavailable = error instanceof AppError && error.code === "database_unavailable";
+    logOAuthState(options, "instagram_oauth_persistence_failed", databaseUnavailable ? `database_unavailable_${persistenceStage}` : `${persistenceStage}_failed`);
+    if (databaseUnavailable) return finishCallback("database_unavailable");
+    return finishCallback("instagram_callback_error");
   }
-  return withCookies(buildFlashLocation("/instagram", "notice", "instagram_connected"), [clearInstagramStateCookie(secure)]);
+  return withCookies(buildFlashLocation("/instagram", "notice", "instagram_connected"), [clearInstagramStateCookie(secure, state)]);
 };
 
 export const instagramDisconnectRoute = (options: InstagramRouteOptions = {}) => async (request: Request): Promise<Response> => {
