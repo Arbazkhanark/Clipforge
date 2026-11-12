@@ -135,7 +135,8 @@ function isPresentInstagramUserId(value: unknown): boolean {
 }
 
 function isValidInstagramUserId(value: unknown): boolean {
-  return (typeof value === "string" || typeof value === "number") && /^[0-9]{1,32}$/.test(String(value));
+  if (typeof value === "string") return /^[0-9]{1,32}$/.test(value);
+  return typeof value === "number" && Number.isSafeInteger(value) && /^[0-9]{1,32}$/.test(String(value));
 }
 
 function logInstagramIdentityComparison(exchangeUserId: unknown, profileUserId: unknown): { result: "matched" | "mismatch" | "missing" | "malformed"; identityMatch: boolean } {
@@ -143,7 +144,13 @@ function logInstagramIdentityComparison(exchangeUserId: unknown, profileUserId: 
   const profilePresent = isPresentInstagramUserId(profileUserId);
   const exchangeValid = isValidInstagramUserId(exchangeUserId);
   const profileValid = isValidInstagramUserId(profileUserId);
-  const identityMatch = exchangeValid && profileValid && String(exchangeUserId) === String(profileUserId);
+  const exchangeComparableId = exchangeValid ? String(exchangeUserId) : null;
+  const profileComparableId = profileValid ? String(profileUserId) : null;
+  const identityMatch = exchangeComparableId !== null && profileComparableId !== null && exchangeComparableId === profileComparableId;
+  const userIdType = (value: unknown): "string" | "number" | "missing" | "other" =>
+    value === undefined || value === null ? "missing" : typeof value === "string" ? "string" : typeof value === "number" ? "number" : "other";
+  const userIdLength = (value: unknown, valid: boolean): number | null => valid ? String(value).length : null;
+  const numberSafeInteger = (value: unknown): boolean | null => typeof value === "number" ? Number.isSafeInteger(value) : null;
   const result = (exchangePresent && !exchangeValid) || (profilePresent && !profileValid)
     ? "malformed"
     : !exchangePresent || !profilePresent
@@ -152,6 +159,12 @@ function logInstagramIdentityComparison(exchangeUserId: unknown, profileUserId: 
 
   console.info(JSON.stringify({
     event: "instagram_oauth_identity_comparison",
+    exchange_user_id_type: userIdType(exchangeUserId),
+    profile_user_id_type: userIdType(profileUserId),
+    exchange_user_id_length: userIdLength(exchangeUserId, exchangeValid),
+    profile_user_id_length: userIdLength(profileUserId, profileValid),
+    exchange_number_safe_integer: numberSafeInteger(exchangeUserId),
+    profile_number_safe_integer: numberSafeInteger(profileUserId),
     exchange_user_id_present: exchangePresent,
     profile_user_id_present: profilePresent,
     exchange_user_id_valid: exchangeValid,
@@ -185,13 +198,13 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   const shortData = asRecord(shortJson?.["data"]) ?? (Array.isArray(shortJson?.["data"]) ? asRecord((shortJson?.["data"] as unknown[])[0]) : shortJson);
   const shortToken = typeof shortData?.["access_token"] === "string" ? shortData["access_token"] : "";
   const userId = shortData?.["user_id"];
-  const externalAccountId = typeof userId === "string" || typeof userId === "number" ? String(userId) : "";
   if (!shortResponse.ok) return { ok: false, reason: shortResponse.status === 400 ? "expired_code" : "authorization_code_exchange_rejected" };
   if (!shortToken) return { ok: false, reason: "authorization_code_response_invalid" };
   if (!isValidInstagramUserId(userId)) {
     logInstagramIdentityComparison(userId, undefined);
     return { ok: false, reason: "authorization_code_response_invalid" };
   }
+  const externalAccountId = String(userId);
   const parsedScopes = normalizeInstagramScopes(shortData?.["permissions"]);
   const grantedScopes = parsedScopes.scopes;
   if (parsedScopes.malformed || missingInstagramScopes(grantedScopes).length > 0) return { ok: false, reason: "authorization_code_permissions_invalid" };
