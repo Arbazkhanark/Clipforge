@@ -127,7 +127,7 @@ export function readInstagramStateCookie(cookieHeader: string | null | undefined
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function isPresentInstagramUserId(value: unknown): boolean {
@@ -175,17 +175,42 @@ function logInstagramIdentityComparison(exchangeUserId: unknown, profileUserId: 
   return { result, identityMatch };
 }
 
-async function readJson(response: Response): Promise<Record<string, unknown> | null> {
+const UNSUPPORTED_NUMERIC_USER_ID = Symbol("unsupported_numeric_user_id");
+
+type JsonParseContext = { source?: string };
+type JsonReviverWithSource = (this: unknown, key: string, value: unknown, context?: JsonParseContext) => unknown;
+type JsonParserWithSource = (text: string, reviver: JsonReviverWithSource) => unknown;
+
+export function parseInstagramJson(text: string, parser: JsonParserWithSource = JSON.parse as unknown as JsonParserWithSource): unknown {
+  return parser(text, (key, value, context) => {
+    if (key !== "user_id" || typeof value !== "number") return value;
+    const source = context?.source;
+    if (source === undefined) return UNSUPPORTED_NUMERIC_USER_ID;
+    // Accept only the original unsigned decimal integer token. Preserve it as
+    // text before JSON.parse's rounded Number can be used as an identifier.
+    return /^[0-9]+$/.test(source) ? source : UNSUPPORTED_NUMERIC_USER_ID;
+  });
+}
+
+async function readJson(response: Response): Promise<unknown | null> {
   const text = await response.text();
   if (text.length > 20_000) return null;
   try {
-    const parsed = JSON.parse(text) as unknown;
-    const record = asRecord(parsed);
-    if (record) return record;
-    return Array.isArray(parsed) ? asRecord(parsed[0]) : null;
+    return parseInstagramJson(text);
   } catch {
     return null;
   }
+}
+
+function parseAuthorizationCodeTokenResponse(value: unknown): Record<string, unknown> | null {
+  const root = asRecord(value);
+  if (!root) return null;
+  if (!Object.hasOwn(root, "data")) return root;
+
+  // Compatibility wrapper: exactly one token response object, with no
+  // competing top-level fields. Never choose an arbitrary entry.
+  if (Object.keys(root).length !== 1 || !Array.isArray(root["data"]) || root["data"].length !== 1) return null;
+  return asRecord(root["data"][0]);
 }
 
 export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig; code: string; now: Date; fetchImpl?: typeof fetch }): Promise<InstagramExchangeResult> {
@@ -195,7 +220,7 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   try { shortResponse = await fetchImpl(TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body }); }
   catch { return { ok: false, reason: "authorization_code_exchange_network_error" }; }
   const shortJson = await readJson(shortResponse);
-  const shortData = asRecord(shortJson?.["data"]) ?? (Array.isArray(shortJson?.["data"]) ? asRecord((shortJson?.["data"] as unknown[])[0]) : shortJson);
+  const shortData = parseAuthorizationCodeTokenResponse(shortJson);
   const shortToken = typeof shortData?.["access_token"] === "string" ? shortData["access_token"] : "";
   const userId = shortData?.["user_id"];
   if (!shortResponse.ok) return { ok: false, reason: shortResponse.status === 400 ? "expired_code" : "authorization_code_exchange_rejected" };
@@ -216,7 +241,7 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   let longResponse: Response;
   try { longResponse = await fetchImpl(longUrl); }
   catch { return { ok: false, reason: "long_lived_token_exchange_network_error" }; }
-  const longJson = await readJson(longResponse);
+  const longJson = asRecord(await readJson(longResponse));
   const accessToken = typeof longJson?.["access_token"] === "string" ? longJson["access_token"] : "";
   const expiresIn = typeof longJson?.["expires_in"] === "number" ? longJson["expires_in"] : Number(longJson?.["expires_in"]);
   if (!longResponse.ok) return { ok: false, reason: "long_lived_token_exchange_rejected" };
@@ -228,7 +253,7 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   let profileResponse: Response;
   try { profileResponse = await fetchImpl(profileUrl); }
   catch { return { ok: false, reason: "profile_lookup_network_error" }; }
-  const profileJson = await readJson(profileResponse);
+  const profileJson = asRecord(await readJson(profileResponse));
   if (!profileResponse.ok) return { ok: false, reason: "profile_lookup_rejected" };
   if (!profileJson) return { ok: false, reason: "profile_response_invalid" };
   const profileUserId = profileJson["user_id"];

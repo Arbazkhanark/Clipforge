@@ -7,7 +7,7 @@ import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
 import { FakePrismaClient } from "./helpers/fake-prisma.ts";
 import { buildSessionCookie } from "../src/server/auth/tokens.ts";
 import { encryptToken, decryptToken, readInstagramTokenKey } from "../src/server/instagram/token-cipher.ts";
-import { buildInstagramAuthorizationUrl, consumeInstagramOAuthState, exchangeInstagramCode, instagramStateCookieName, issueInstagramOAuthState, readInstagramOAuthConfig, type InstagramConnectedProfile, type InstagramExchangeResult, type InstagramOAuthConfig } from "../src/server/instagram/instagram-oauth.ts";
+import { buildInstagramAuthorizationUrl, consumeInstagramOAuthState, exchangeInstagramCode, instagramStateCookieName, issueInstagramOAuthState, parseInstagramJson, readInstagramOAuthConfig, type InstagramConnectedProfile, type InstagramExchangeResult, type InstagramOAuthConfig } from "../src/server/instagram/instagram-oauth.ts";
 import { instagramCallbackRoute, instagramDisconnectRoute, instagramStartRoute } from "../src/server/instagram/instagram-routes.ts";
 
 const NOW = new Date("2026-06-01T12:00:00Z");
@@ -170,14 +170,14 @@ test("Instagram identity comparison logs only safe presence, validity, and match
   }> = [
     { name: "matching string IDs", exchangeId: "1789001", profileId: "1789001", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: true, result: "matched" } },
     { name: "different string IDs", exchangeId: "1789001", profileId: "1789002", expectedReason: "profile_identity_mismatch", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: false, result: "mismatch" } },
-    { name: "matching safe integer IDs", exchangeId: 1789001, profileId: 1789001, expectedLog: { exchange_user_id_type: "number", profile_user_id_type: "number", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: true, profile_number_safe_integer: true, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: true, result: "matched" } },
-    { name: "matching string and safe integer IDs", exchangeId: "1789001", profileId: 1789001, expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "number", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: true, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: true, result: "matched" } },
-    { name: "safe string and number IDs with different values", exchangeId: "1789001", profileId: 1789002, expectedReason: "profile_identity_mismatch", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "number", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: true, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: false, result: "mismatch" } },
+    { name: "matching JSON numeric IDs are preserved as strings", exchangeId: 1789001, profileId: 1789001, expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: true, result: "matched" } },
+    { name: "JSON numeric and string IDs compare exactly", exchangeId: "1789001", profileId: 1789001, expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: true, result: "matched" } },
+    { name: "different JSON numeric ID mismatches", exchangeId: "1789001", profileId: 1789002, expectedReason: "profile_identity_mismatch", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: false, result: "mismatch" } },
     { name: "missing exchange ID", exchangeId: omitted, profileId: "1789001", expectedReason: "authorization_code_response_invalid", expectedLog: { exchange_user_id_type: "missing", profile_user_id_type: "missing", exchange_user_id_length: null, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: false, profile_user_id_present: false, exchange_user_id_valid: false, profile_user_id_valid: false, identity_match: false, result: "missing" } },
     { name: "missing profile ID", exchangeId: "1789001", profileId: omitted, expectedReason: "profile_identity_missing", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "missing", exchange_user_id_length: 7, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: false, exchange_user_id_valid: true, profile_user_id_valid: false, identity_match: false, result: "missing" } },
     { name: "malformed exchange ID", exchangeId: { invalid: true }, profileId: "1789001", expectedReason: "authorization_code_response_invalid", expectedLog: { exchange_user_id_type: "other", profile_user_id_type: "missing", exchange_user_id_length: null, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: false, exchange_user_id_valid: false, profile_user_id_valid: false, identity_match: false, result: "malformed" } },
     { name: "malformed profile ID", exchangeId: "1789001", profileId: { invalid: true }, expectedReason: "profile_identity_malformed", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "other", exchange_user_id_length: 7, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: false, identity_match: false, result: "malformed" } },
-    { name: "unsafe numeric profile ID", exchangeId: "1789001", profileId: 9007199254740992, expectedReason: "profile_identity_malformed", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "number", exchange_user_id_length: 7, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: false, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: false, identity_match: false, result: "malformed" } },
+    { name: "large JSON numeric profile ID is not rounded", exchangeId: "1789001", profileId: 9007199254740992, expectedReason: "profile_identity_mismatch", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 16, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: false, result: "mismatch" } },
   ];
 
   for (const entry of cases) {
@@ -212,32 +212,93 @@ test("Instagram identity comparison logs only safe presence, validity, and match
   }
 });
 
-test("Instagram Login rejects an unsafe numeric exchange user_id before token exchange", async () => {
-  const messages: string[] = [];
-  const originalInfo = console.info;
-  console.info = (message?: unknown) => { if (typeof message === "string") messages.push(message); };
-  let longTokenExchangeCalled = false;
-  try {
+test("lossless JSON parsing preserves large numeric and string Instagram user_id values", async () => {
+  const exactId = "900719925474099312345678901234";
+  let profileRequested = false;
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("api.instagram.com")) return new Response(`{"access_token":"short","user_id":${exactId},"permissions":["instagram_business_basic","instagram_business_content_publish"]}`, { headers: { "content-type": "application/json" } });
+    if (url.includes("/access_token")) return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+    profileRequested = true;
+    return Response.json({ user_id: exactId, username: "ada.clips", account_type: "BUSINESS" });
+  };
+  const numericResult = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl });
+  assert.equal(numericResult.ok, true);
+  if (numericResult.ok) assert.equal(numericResult.profile.externalAccountId, exactId);
+  assert.equal(profileRequested, true);
+
+  const stringResult = await exchangeInstagramCode({
+    config: CONFIG,
+    code: "good",
+    now: NOW,
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.includes("api.instagram.com")) return Response.json({ access_token: "short", user_id: exactId, permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
+      if (url.includes("/access_token")) return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+      return Response.json({ user_id: exactId, username: "ada.clips", account_type: "BUSINESS" });
+    },
+  });
+  assert.equal(stringResult.ok, true);
+  if (stringResult.ok) assert.equal(stringResult.profile.externalAccountId, exactId);
+});
+
+test("numeric identifiers fail closed when JSON.parse does not provide original source", () => {
+  const noSourceParser = (text: string, reviver: (this: unknown, key: string, value: unknown, context?: { source?: string }) => unknown): unknown =>
+    JSON.parse(text, function (this: unknown, key, value) { return reviver.call(this, key, value); });
+  const parsed = parseInstagramJson('{"user_id":9007199254740993}', noSourceParser) as Record<string, unknown>;
+  assert.equal(typeof parsed["user_id"], "symbol");
+});
+
+test("decimal, negative, and exponent numeric user_id tokens are rejected before any follow-up request", async () => {
+  for (const numericToken of ["12.5", "-1789001", "1e6"]) {
+    let followUpRequests = 0;
+    const result = await exchangeInstagramCode({
+      config: CONFIG,
+      code: "good",
+      now: NOW,
+      fetchImpl: async (input) => {
+        if (String(input).includes("api.instagram.com")) return new Response(`{"access_token":"short","user_id":${numericToken},"permissions":["instagram_business_basic","instagram_business_content_publish"]}`, { headers: { "content-type": "application/json" } });
+        followUpRequests++;
+        return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+      },
+    });
+    assert.deepEqual(result, { ok: false, reason: "authorization_code_response_invalid" }, numericToken);
+    assert.equal(followUpRequests, 0, `${numericToken}: neither long-lived exchange nor /me is called`);
+  }
+});
+
+test("authorization token response accepts top-level and single-entry data wrapper only", async () => {
+  const validToken = { access_token: "short", user_id: "1789001", permissions: ["instagram_business_basic", "instagram_business_content_publish"] };
+  const responseShapes: Array<{ name: string; body: string; success: boolean }> = [
+    { name: "top-level token response", body: JSON.stringify(validToken), success: true },
+    { name: "single-entry data wrapper", body: JSON.stringify({ data: [validToken] }), success: true },
+    { name: "empty data array", body: JSON.stringify({ data: [] }), success: false },
+    { name: "multiple data entries", body: JSON.stringify({ data: [validToken, validToken] }), success: false },
+    { name: "object data wrapper", body: JSON.stringify({ data: validToken }), success: false },
+    { name: "primitive data entry", body: JSON.stringify({ data: [null] }), success: false },
+    { name: "wrapper with competing root fields", body: JSON.stringify({ data: [validToken], access_token: "other" }), success: false },
+    { name: "top-level array", body: JSON.stringify([validToken]), success: false },
+    { name: "top-level primitive", body: JSON.stringify("token"), success: false },
+  ];
+
+  for (const shape of responseShapes) {
+    let longExchangeCalls = 0;
+    let profileCalls = 0;
     const fetchImpl: typeof fetch = async (input) => {
-      if (String(input).includes("api.instagram.com")) {
-        return new Response('{"access_token":"short","user_id":9007199254740993,"permissions":["instagram_business_basic","instagram_business_content_publish"]}', { headers: { "content-type": "application/json" } });
+      const url = String(input);
+      if (url.includes("api.instagram.com")) return new Response(shape.body, { headers: { "content-type": "application/json" } });
+      if (url.includes("/access_token")) {
+        longExchangeCalls++;
+        return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
       }
-      longTokenExchangeCalled = true;
-      return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+      profileCalls++;
+      return Response.json({ user_id: "1789001", username: "ada.clips", account_type: "BUSINESS" });
     };
     const result = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl });
-    assert.deepEqual(result, { ok: false, reason: "authorization_code_response_invalid" });
-  } finally {
-    console.info = originalInfo;
+    assert.equal(result.ok, shape.success, shape.name);
+    assert.equal(longExchangeCalls, shape.success ? 1 : 0, `${shape.name}: long-lived exchange call count`);
+    assert.equal(profileCalls, shape.success ? 1 : 0, `${shape.name}: profile call count`);
   }
-
-  assert.equal(longTokenExchangeCalled, false);
-  assert.equal(messages.length, 1);
-  const logged = JSON.parse(messages[0]!) as Record<string, unknown>;
-  assert.equal(logged["exchange_user_id_type"], "number");
-  assert.equal(logged["exchange_user_id_length"], null);
-  assert.equal(logged["exchange_number_safe_integer"], false);
-  assert.equal(JSON.stringify(logged).includes("900719925474099"), false);
 });
 
 test("start and callback require state and a session, and the stored account has no token", async () => {
