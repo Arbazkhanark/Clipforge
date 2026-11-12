@@ -5,8 +5,9 @@ import { createLocalRuntime } from "../src/server/runtime.ts";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
 import { FakePrismaClient } from "./helpers/fake-prisma.ts";
-import { buildSessionCookie } from "../src/server/auth/tokens.ts";
+import { buildSessionCookie, readSessionToken } from "../src/server/auth/tokens.ts";
 import { encryptToken, decryptToken, readInstagramTokenKey } from "../src/server/instagram/token-cipher.ts";
+import { buildInstagramDiagnosticCookie, readInstagramDiagnosticCookie } from "../src/server/instagram/instagram-diagnostic.ts";
 import { buildInstagramAuthorizationUrl, consumeInstagramOAuthState, exchangeInstagramCode, instagramStateCookieName, issueInstagramOAuthState, parseInstagramJson, readInstagramOAuthConfig, type InstagramConnectedProfile, type InstagramExchangeResult, type InstagramOAuthConfig } from "../src/server/instagram/instagram-oauth.ts";
 import { instagramCallbackRoute, instagramDisconnectRoute, instagramStartRoute } from "../src/server/instagram/instagram-routes.ts";
 
@@ -95,6 +96,73 @@ test("exchange accepts only explicit professional account types and validates re
   assert.deepEqual(expired, { ok: false, reason: "expired_code" });
 });
 
+test("authorization-code HTTP errors log only fixed provider categories and response validity", async () => {
+  const originalWarn = console.warn;
+  const logs: string[] = [];
+  console.warn = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+  let oversizedReaderCancelled = false;
+  const oversizedBody = JSON.stringify({ error: "invalid_grant", padding: "x".repeat(20_500) });
+  const cases = [
+    {
+      category: "invalid_grant", state: "valid_json",
+      response: () => new Response(JSON.stringify({ error: "invalid_grant", error_description: "do-not-log-provider-message" }), { status: 400 }),
+    },
+    {
+      category: "oauth_exception", state: "valid_json",
+      response: () => new Response(JSON.stringify({ error: { type: "OAuthException", message: "do-not-log-nested-message" } }), { status: 400 }),
+    },
+    {
+      category: "unknown", state: "valid_json",
+      response: () => new Response(JSON.stringify({ error: "provider_specific_unknown", error_message: "do-not-log-unknown-message" }), { status: 400 }),
+    },
+    { category: "unknown", state: "invalid_json", response: () => new Response("{malformed-json do-not-log", { status: 400 }) },
+    { category: "unknown", state: "invalid_json", response: () => new Response("plain-text do-not-log", { status: 400 }) },
+    {
+      category: "unknown", state: "response_too_large",
+      response: () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode(oversizedBody)); },
+        cancel() { oversizedReaderCancelled = true; },
+      }), { status: 400 }),
+    },
+    {
+      category: "unknown", state: "stream_failure",
+      response: () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.error(new Error("do-not-log-stream-error")); },
+      }), { status: 400 }),
+    },
+  ] as const;
+
+  try {
+    for (const entry of cases) {
+      const result = await exchangeInstagramCode({
+        config: CONFIG,
+        code: "synthetic-code",
+        now: NOW,
+        fetchImpl: async () => entry.response(),
+      });
+      assert.deepEqual(result, { ok: false, reason: "expired_code" });
+    }
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(logs.length, cases.length);
+  assert.equal(oversizedReaderCancelled, true);
+  logs.forEach((line, index) => {
+    const entry = cases[index]!;
+    assert.deepEqual(JSON.parse(line), {
+      event: "instagram_oauth_token_exchange_http_error",
+      stage: "authorization_code_exchange",
+      http_status: 400,
+      provider_error_category: entry.category,
+      response_state: entry.state,
+    });
+    assert.equal(line.includes("do-not-log"), false);
+    assert.equal(line.includes("synthetic-code"), false);
+    assert.equal(line.includes(CONFIG.clientSecret), false);
+  });
+});
+
 test("exchange failures report fixed stage reasons without retaining provider response details", async () => {
   const validAuth = () => Response.json({ access_token: "short", user_id: "1789001", permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
   const validLong = () => Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
@@ -144,6 +212,147 @@ test("Instagram Login profile identity requires matching user_id and never subst
 
   const correctUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: "1789001", username: "ada.clips", account_type: "BUSINESS" }) });
   assert.equal(correctUserId.ok, true);
+});
+
+test("diagnostic result cookie is short-lived, signed, and bound to the exact session", () => {
+  const result = {
+    outcome: "identity_mismatch_but_remaining_flow_succeeded",
+    tokenExchange: "succeeded",
+    identityComparison: "mismatched",
+    longLivedTokenExchange: "succeeded",
+    profileRequest: "succeeded",
+  } as const;
+  const sessionToken = "session-token-for-diagnostic-test-123456";
+  const headerCookie = buildInstagramDiagnosticCookie({ result, sessionToken, tokenKey: KEY, secure: true, now: NOW });
+  assert.match(headerCookie, /^__Host-clipforge_ig_diagnostic=/);
+  assert.match(headerCookie, /HttpOnly/);
+  assert.match(headerCookie, /Secure/);
+  assert.match(headerCookie, /SameSite=Lax/);
+  assert.match(headerCookie, /Max-Age=180/);
+  const cookieHeader = headerCookie.split(";")[0]!;
+  assert.deepEqual(readInstagramDiagnosticCookie({ cookieHeader, sessionToken, tokenKey: KEY, now: NOW }), result);
+  assert.equal(readInstagramDiagnosticCookie({ cookieHeader, sessionToken: "different-session-token-123456789", tokenKey: KEY, now: NOW }), null);
+  assert.equal(readInstagramDiagnosticCookie({ cookieHeader, sessionToken, tokenKey: KEY, now: new Date(NOW.getTime() + 181_000) }), null);
+  const tampered = `${cookieHeader.slice(0, -1)}${cookieHeader.endsWith("A") ? "B" : "A"}`;
+  assert.equal(readInstagramDiagnosticCookie({ cookieHeader: tampered, sessionToken, tokenKey: KEY, now: NOW }), null);
+});
+
+test("non-production OAuth diagnostic displays mismatch without saving account, token, or audit", async () => {
+  const { runtime, cookie } = await signedIn();
+  const ownerId = (await runtime.currentUserId(new Request("http://localhost:3000/", { headers: { cookie } })))!;
+  const states = new Map<string, string>();
+  runtime.instagramOAuthStates = {
+    async issue(state, userId) { states.set(state, userId); },
+    async consume(state) { const userId = states.get(state); states.delete(state); return userId ? { status: "consumed", userId } : { status: "not_found" }; },
+  };
+  let saveCalls = 0;
+  let auditCalls = 0;
+  const originalSave = runtime.repo.saveInstagramConnectionWithinLimit.bind(runtime.repo);
+  const originalAudit = runtime.repo.appendAudit.bind(runtime.repo);
+  runtime.repo.saveInstagramConnectionWithinLimit = async (...args) => { saveCalls++; return originalSave(...args); };
+  runtime.repo.appendAudit = async (...args) => { auditCalls++; return originalAudit(...args); };
+  const environment = { NODE_ENV: "development", INSTAGRAM_OAUTH_DIAGNOSTIC_MODE: "true" };
+  const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW, environment };
+  const start = await instagramStartRoute(routes)(form("/api/instagram/start", [], cookie));
+  const location = start.headers.get("location")!;
+  const state = new URL(location).searchParams.get("state")!;
+  const stateCookie = start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ");
+  const callback = await instagramCallbackRoute({
+    ...routes,
+    exchange: async () => ({ ok: false, reason: "profile_identity_mismatch" }),
+  })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${state}`, { headers: { cookie: `${cookie}; ${stateCookie}` } }));
+
+  assert.equal(callback.status, 303);
+  assert.equal(callback.headers.get("location"), "/instagram");
+  assert.equal(callback.headers.get("location")?.includes("state"), false);
+  const setCookies = callback.headers.getSetCookie();
+  const diagnosticCookie = setCookies.find((item) => item.startsWith("clipforge_ig_diagnostic="));
+  assert.ok(diagnosticCookie);
+  const sessionToken = readSessionToken(cookie);
+  assert.ok(sessionToken);
+  const diagnostic = readInstagramDiagnosticCookie({ cookieHeader: diagnosticCookie!.split(";")[0]!, sessionToken, tokenKey: KEY, now: NOW });
+  assert.deepEqual(diagnostic, {
+    outcome: "identity_mismatch_but_remaining_flow_succeeded",
+    tokenExchange: "succeeded",
+    identityComparison: "mismatched",
+    longLivedTokenExchange: "succeeded",
+    profileRequest: "succeeded",
+  });
+  assert.equal(saveCalls, 0);
+  assert.equal(auditCalls, 0);
+  assert.deepEqual(await runtime.repo.listSocialAccountsForOwner(ownerId), []);
+});
+
+test("non-production diagnostic mode does not persist a matching Instagram identity", async () => {
+  const { runtime, cookie } = await signedIn();
+  const ownerId = (await runtime.currentUserId(new Request("http://localhost:3000/", { headers: { cookie } })))!;
+  const states = new Map<string, string>();
+  runtime.instagramOAuthStates = {
+    async issue(state, userId) { states.set(state, userId); },
+    async consume(state) { const userId = states.get(state); states.delete(state); return userId ? { status: "consumed", userId } : { status: "not_found" }; },
+  };
+  let saveCalls = 0;
+  let auditCalls = 0;
+  const save = runtime.repo.saveInstagramConnectionWithinLimit.bind(runtime.repo);
+  const audit = runtime.repo.appendAudit.bind(runtime.repo);
+  runtime.repo.saveInstagramConnectionWithinLimit = async (...args) => { saveCalls++; return save(...args); };
+  runtime.repo.appendAudit = async (...args) => { auditCalls++; return audit(...args); };
+  const options = { runtime: () => runtime, config: CONFIG, now: () => NOW, environment: { NODE_ENV: "development", INSTAGRAM_OAUTH_DIAGNOSTIC_MODE: "true" } };
+  const start = await instagramStartRoute(options)(form("/api/instagram/start", [], cookie));
+  const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+  const stateCookie = start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ");
+  const callback = await instagramCallbackRoute({ ...options, exchange: async () => ({ ok: true, profile: profile() }) })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${state}`, { headers: { cookie: `${cookie}; ${stateCookie}` } }));
+  const diagnosticCookie = callback.headers.getSetCookie().find((item) => item.startsWith("clipforge_ig_diagnostic=") && !item.startsWith("clipforge_ig_diagnostic=;"));
+  assert.ok(diagnosticCookie);
+  assert.deepEqual(readInstagramDiagnosticCookie({ cookieHeader: diagnosticCookie!.split(";")[0]!, sessionToken: readSessionToken(cookie), tokenKey: KEY, now: NOW }), {
+    outcome: "identity_matched_diagnostic_only",
+    tokenExchange: "succeeded",
+    identityComparison: "matched",
+    longLivedTokenExchange: "succeeded",
+    profileRequest: "succeeded",
+  });
+  assert.equal(saveCalls, 0);
+  assert.equal(auditCalls, 0);
+  assert.deepEqual(await runtime.repo.listSocialAccountsForOwner(ownerId), []);
+});
+
+test("Production diagnostic flag cannot bypass mismatch and invalid state never reaches provider exchange", async () => {
+  const setup = async () => {
+    const { runtime, cookie } = await signedIn();
+    const states = new Map<string, string>();
+    runtime.instagramOAuthStates = {
+      async issue(state, userId) { states.set(state, userId); },
+      async consume(state) { const userId = states.get(state); states.delete(state); return userId ? { status: "consumed", userId } : { status: "not_found" }; },
+    };
+    const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW };
+    const start = await instagramStartRoute(routes)(form("/api/instagram/start", [], cookie));
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    const stateCookie = start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ");
+    return { runtime, cookie, state, stateCookie, routes };
+  };
+
+  const production = await setup();
+  let productionExchangeCalls = 0;
+  const productionReply = await instagramCallbackRoute({
+    ...production.routes,
+    environment: { NODE_ENV: "production", INSTAGRAM_OAUTH_DIAGNOSTIC_MODE: "true" },
+    exchange: async () => { productionExchangeCalls++; return { ok: false, reason: "profile_identity_mismatch" }; },
+  })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${production.state}`, { headers: { cookie: `${production.cookie}; ${production.stateCookie}` } }));
+  assert.match(productionReply.headers.get("location") ?? "", /error=instagram_callback_error/);
+  assert.equal(productionReply.headers.getSetCookie().some((item) => item.startsWith("clipforge_ig_diagnostic=") && !item.startsWith("clipforge_ig_diagnostic=;")), false);
+  assert.equal(productionExchangeCalls, 1);
+  assert.deepEqual(await production.runtime.repo.listSocialAccountsForOwner((await production.runtime.currentUserId(new Request("http://localhost:3000/", { headers: { cookie: production.cookie } })))!), []);
+
+  const invalidState = await setup();
+  let invalidStateExchangeCalls = 0;
+  const invalidStateReply = await instagramCallbackRoute({
+    ...invalidState.routes,
+    environment: { NODE_ENV: "development", INSTAGRAM_OAUTH_DIAGNOSTIC_MODE: "true" },
+    exchange: async () => { invalidStateExchangeCalls++; return { ok: false, reason: "profile_identity_mismatch" }; },
+  })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${invalidState.state}`, { headers: { cookie: invalidState.cookie } }));
+  assert.match(invalidStateReply.headers.get("location") ?? "", /error=instagram_invalid_state/);
+  assert.equal(invalidStateExchangeCalls, 0);
+  assert.equal(invalidStateReply.headers.getSetCookie().some((item) => item.startsWith("clipforge_ig_diagnostic=") && !item.startsWith("clipforge_ig_diagnostic=;")), false);
 });
 
 test("Instagram identity comparison logs only safe presence, validity, and match diagnostics", async () => {

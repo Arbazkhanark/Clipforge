@@ -6,8 +6,11 @@ import { checkSameOrigin } from "../http.ts";
 import { readUrlEncoded, redirectResponse } from "../form-routes.ts";
 import { getRuntime, type Runtime } from "../runtime.ts";
 import { useSecureCookies } from "../auth/auth-routes.ts";
+import { readSessionToken } from "../auth/tokens.ts";
+import type { Environment } from "../environment.ts";
 import { encryptToken } from "./token-cipher.ts";
 import { isValidInstagramConnectionProfile } from "../../lib/integrations/instagram-eligibility.ts";
+import { buildInstagramDiagnosticCookie, clearInstagramDiagnosticCookie, type InstagramDiagnosticResult } from "./instagram-diagnostic.ts";
 import {
   buildInstagramAuthorizationUrl, buildInstagramStateCookie, clearInstagramStateCookie, exchangeInstagramCode,
   instagramSafeEqual, instagramStateCookieName, readInstagramOAuthConfig, readInstagramStateCookie, createInstagramState,
@@ -22,6 +25,8 @@ export interface InstagramRouteOptions {
   config?: InstagramOAuthConfig | null;
   now?: () => Date;
   exchange?: Exchange;
+  /** Test seam; production routes use process.env and cannot override NODE_ENV. */
+  environment?: Environment;
   /** Receives only fixed event/reason labels; never state, code, cookies, or provider payloads. */
   diagnosticLogger?: { warn(entry: { event: string; reason: string }): void };
 }
@@ -46,6 +51,46 @@ function logOAuthState(options: InstagramRouteOptions, event: string, reason: st
   else console.warn(JSON.stringify(entry));
 }
 
+function diagnosticModeEnabled(environment: Environment): boolean {
+  return environment["NODE_ENV"] !== "production" && environment["INSTAGRAM_OAUTH_DIAGNOSTIC_MODE"] === "true";
+}
+
+function diagnosticResultForFailure(reason: string): InstagramDiagnosticResult | null {
+  const base = { tokenExchange: "succeeded" as const, identityComparison: "not_verified" as const };
+  if (reason === "profile_identity_mismatch") return {
+    outcome: "identity_mismatch_but_remaining_flow_succeeded",
+    ...base,
+    identityComparison: "mismatched",
+    longLivedTokenExchange: "succeeded",
+    profileRequest: "succeeded",
+  };
+  if (reason.startsWith("long_lived_token_exchange_") || reason === "long_lived_token_response_invalid") return {
+    outcome: "long_lived_token_exchange_failed",
+    ...base,
+    longLivedTokenExchange: "failed",
+    profileRequest: "not_run",
+  };
+  if (reason.startsWith("profile_lookup_") || reason === "profile_response_invalid") return {
+    outcome: "profile_request_failed",
+    ...base,
+    longLivedTokenExchange: "succeeded",
+    profileRequest: "failed",
+  };
+  if (reason === "profile_identity_missing") return {
+    outcome: "profile_identity_missing",
+    ...base,
+    longLivedTokenExchange: "succeeded",
+    profileRequest: "succeeded",
+  };
+  if (reason === "profile_identity_malformed") return {
+    outcome: "profile_identity_malformed",
+    ...base,
+    longLivedTokenExchange: "succeeded",
+    profileRequest: "succeeded",
+  };
+  return null;
+}
+
 export const instagramStartRoute = (options: InstagramRouteOptions = {}) => async (request: Request): Promise<Response> => {
   if (request.method !== "POST") return new Response("Method not allowed.", { status: 405, headers: { "Cache-Control": "no-store" } });
   if (checkSameOrigin(request)) return new Response("Cross-site requests are not allowed.", { status: 403, headers: { "Cache-Control": "no-store" } });
@@ -66,9 +111,15 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
   const runtime = (options.runtime ?? getRuntime)();
   const secure = useSecureCookies(request);
   const config = options.config === undefined ? readInstagramOAuthConfig() : options.config;
+  const environment = options.environment ?? process.env;
+  const diagnosticEnabled = diagnosticModeEnabled(environment);
   const url = new URL(request.url);
   const state = url.searchParams.get("state") ?? "";
-  const finishCallback = (code: FlashErrorCode) => finish(secure, code, state);
+  const finishCallback = (code: FlashErrorCode) => {
+    const response = finish(secure, code, state);
+    if (diagnosticEnabled) response.headers.append("Set-Cookie", clearInstagramDiagnosticCookie(secure));
+    return response;
+  };
   if (!url.searchParams.has("state")) {
     logOAuthState(options, "instagram_oauth_state_rejected", "state_parameter_missing");
     return finishCallback("instagram_invalid_state");
@@ -117,6 +168,12 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
     return finishCallback("instagram_callback_error");
   }
   if (!config) return finishCallback("instagram_not_configured");
+  const finishDiagnosticResult = (result: InstagramDiagnosticResult): Response => {
+    const sessionToken = readSessionToken(cookieHeader);
+    if (!diagnosticEnabled || !sessionToken) return finishCallback("instagram_callback_error");
+    const cookie = buildInstagramDiagnosticCookie({ result, sessionToken, tokenKey: config.tokenKey, secure, now });
+    return withCookies("/instagram", [clearInstagramStateCookie(secure, state), cookie]);
+  };
   const code = url.searchParams.get("code") ?? "";
   if (!CODE_PATTERN.test(code)) {
     logOAuthState(options, "instagram_oauth_callback_rejected", "authorization_code_missing_or_malformed");
@@ -131,6 +188,13 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
   }
   if (!exchanged.ok) {
     logOAuthState(options, "instagram_oauth_exchange_failed", exchanged.reason);
+    const diagnosticResult = diagnosticResultForFailure(exchanged.reason);
+    // This runs only after the state cookie, one-time consumption, and session
+    // binding have succeeded. exchangeInstagramCode has already completed the
+    // long-lived exchange and /me lookup before it returns an identity mismatch.
+    // No profile, account, or provider token is persisted in this branch.
+    if (diagnosticEnabled && diagnosticResult) return finishDiagnosticResult(diagnosticResult);
+    // Normal production/fail-closed mismatch handling remains unchanged below.
     const codeByReason = {
       expired_code: "instagram_expired_code",
       authorization_code_exchange_network_error: "instagram_callback_error",
@@ -152,6 +216,13 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
     } as const;
     return finishCallback(codeByReason[exchanged.reason]);
   }
+  if (diagnosticEnabled) return finishDiagnosticResult({
+    outcome: "identity_matched_diagnostic_only",
+    tokenExchange: "succeeded",
+    identityComparison: "matched",
+    longLivedTokenExchange: "succeeded",
+    profileRequest: "succeeded",
+  });
   if (!isValidInstagramConnectionProfile(exchanged.profile, now)) {
     logOAuthState(options, "instagram_oauth_profile_rejected", "profile_not_eligible");
     return finishCallback("instagram_unsupported_account");

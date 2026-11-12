@@ -192,14 +192,106 @@ export function parseInstagramJson(text: string, parser: JsonParserWithSource = 
   });
 }
 
-async function readJson(response: Response): Promise<unknown | null> {
-  const text = await response.text();
-  if (text.length > 20_000) return null;
+type JsonReadState = "valid_json" | "invalid_json" | "response_too_large" | "stream_failure";
+type JsonReadResult = { value: unknown | null; state: JsonReadState };
+const MAX_PROVIDER_RESPONSE_BYTES = 20 * 1024;
+
+function cancelProviderReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try { void reader.cancel().catch(() => undefined); } catch { /* Cancellation is best-effort. */ }
+}
+
+async function readJsonResult(response: Response): Promise<JsonReadResult> {
+  const reader = response.body?.getReader();
+  if (!reader) return { value: null, state: "invalid_json" };
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
   try {
-    return parseInstagramJson(text);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      if (value.byteLength > MAX_PROVIDER_RESPONSE_BYTES - totalBytes) {
+        cancelProviderReader(reader);
+        return { value: null, state: "response_too_large" };
+      }
+      chunks.push(value);
+      totalBytes += value.byteLength;
+    }
   } catch {
-    return null;
+    cancelProviderReader(reader);
+    return { value: null, state: "stream_failure" };
+  } finally {
+    try { reader.releaseLock(); } catch { /* The reader may already be released. */ }
   }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return { value: parseInstagramJson(text), state: "valid_json" };
+  } catch {
+    return { value: null, state: "invalid_json" };
+  }
+}
+
+async function readJson(response: Response): Promise<unknown | null> {
+  return (await readJsonResult(response)).value;
+}
+
+type AuthorizationCodeErrorCategory =
+  | "invalid_grant"
+  | "invalid_client"
+  | "invalid_request"
+  | "unauthorized_client"
+  | "unsupported_grant_type"
+  | "invalid_scope"
+  | "redirect_uri_mismatch"
+  | "oauth_exception"
+  | "unknown";
+
+function authorizationCodeErrorCategory(value: unknown): AuthorizationCodeErrorCategory {
+  const root = asRecord(value);
+  const nestedError = asRecord(root?.["error"]);
+  const candidates = [
+    root?.["error"], root?.["error_type"], root?.["error_code"],
+    nestedError?.["type"], nestedError?.["code"],
+  ];
+  const categories: Record<string, AuthorizationCodeErrorCategory> = {
+    invalid_grant: "invalid_grant",
+    invalid_client: "invalid_client",
+    invalid_request: "invalid_request",
+    unauthorized_client: "unauthorized_client",
+    unsupported_grant_type: "unsupported_grant_type",
+    invalid_scope: "invalid_scope",
+    redirect_uri_mismatch: "redirect_uri_mismatch",
+    invalid_redirect_uri: "redirect_uri_mismatch",
+    oauthexception: "oauth_exception",
+    oauthaccesstokenexception: "oauth_exception",
+  };
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const key = candidate.trim().toLowerCase();
+    if (Object.hasOwn(categories, key)) return categories[key]!;
+  }
+  return "unknown";
+}
+
+function logAuthorizationCodeExchangeHttpFailure(
+  status: number,
+  responseJson: JsonReadResult,
+): void {
+  console.warn(JSON.stringify({
+    event: "instagram_oauth_token_exchange_http_error",
+    stage: "authorization_code_exchange",
+    http_status: status,
+    provider_error_category: responseJson.state === "valid_json" ? authorizationCodeErrorCategory(responseJson.value) : "unknown",
+    response_state: responseJson.state,
+  }));
 }
 
 function parseAuthorizationCodeTokenResponse(value: unknown): Record<string, unknown> | null {
@@ -219,11 +311,15 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   let shortResponse: Response;
   try { shortResponse = await fetchImpl(TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body }); }
   catch { return { ok: false, reason: "authorization_code_exchange_network_error" }; }
-  const shortJson = await readJson(shortResponse);
+  const shortJsonResult = await readJsonResult(shortResponse);
+  const shortJson = shortJsonResult.value;
   const shortData = parseAuthorizationCodeTokenResponse(shortJson);
   const shortToken = typeof shortData?.["access_token"] === "string" ? shortData["access_token"] : "";
   const userId = shortData?.["user_id"];
-  if (!shortResponse.ok) return { ok: false, reason: shortResponse.status === 400 ? "expired_code" : "authorization_code_exchange_rejected" };
+  if (!shortResponse.ok) {
+    logAuthorizationCodeExchangeHttpFailure(shortResponse.status, shortJsonResult);
+    return { ok: false, reason: shortResponse.status === 400 ? "expired_code" : "authorization_code_exchange_rejected" };
+  }
   if (!shortToken) return { ok: false, reason: "authorization_code_response_invalid" };
   if (!isValidInstagramUserId(userId)) {
     logInstagramIdentityComparison(userId, undefined);

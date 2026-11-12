@@ -56,6 +56,7 @@
 
 
 import type { InstagramAccountCard } from "../server/queries.ts";
+import type { InstagramDiagnosticResult, InstagramDiagnosticStageStatus } from "../server/instagram/instagram-diagnostic.ts";
 
 const STATUS_LABELS = {
   connected: "Connected",
@@ -182,10 +183,21 @@ function InfoRow({
 export function InstagramAccountsView({
   configured,
   accounts,
+  diagnostic,
 }: {
   configured: boolean;
   accounts: InstagramAccountCard[];
+  diagnostic?: InstagramDiagnosticResult | null;
 }) {
+  const stageText = (status: InstagramDiagnosticStageStatus) => status === "succeeded" ? "Succeeded" : status === "failed" ? "Failed" : "Not run";
+  const outcomeText: Record<InstagramDiagnosticResult["outcome"], string> = {
+    identity_mismatch_but_remaining_flow_succeeded: "Identity mismatch; remaining verification succeeded",
+    identity_matched_diagnostic_only: "Identity matched; diagnostic completed without connecting the account",
+    long_lived_token_exchange_failed: "Long-lived token exchange failed",
+    profile_request_failed: "Profile request failed",
+    profile_identity_missing: "Profile identity was missing",
+    profile_identity_malformed: "Profile identity was malformed",
+  };
   return (
     <main className="instagram-page">
       <div className="instagram-page-inner">
@@ -204,6 +216,20 @@ export function InstagramAccountsView({
             <InstagramIcon />
           </div>
         </header>
+
+        {diagnostic && (
+          <section className="instagram-config-notice" role="status" aria-live="polite">
+            <strong>Temporary Instagram OAuth diagnostic</strong>
+            <p>{outcomeText[diagnostic.outcome]}</p>
+            <ul>
+              <li>Authorization code exchange: {stageText(diagnostic.tokenExchange)}</li>
+              <li>Identity comparison: {diagnostic.identityComparison === "matched" ? "Matched" : diagnostic.identityComparison === "mismatched" ? "Mismatched" : "Not verified"}</li>
+              <li>Long-lived token exchange: {stageText(diagnostic.longLivedTokenExchange)}</li>
+              <li>Profile request: {stageText(diagnostic.profileRequest)}</li>
+            </ul>
+            <p>No Instagram account was connected and no provider token was saved by this diagnostic.</p>
+          </section>
+        )}
 
         {/* Connection hero */}
         <section className="instagram-connect-card">
