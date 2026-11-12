@@ -178,7 +178,6 @@ test("exchange failures report fixed stage reasons without retaining provider re
     { name: "profile network", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Promise.reject(new Error(TOKEN)), reason: "profile_lookup_network_error" },
     { name: "profile rejected", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : new Response("private provider body", { status: 500 }), reason: "profile_lookup_rejected" },
     { name: "profile malformed", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : new Response("not-json"), reason: "profile_response_invalid" },
-    { name: "profile identity mismatch", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "1789002", username: "ada.clips", account_type: "BUSINESS" }), reason: "profile_identity_mismatch" },
     { name: "unsupported account", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "1789001", username: "ada.clips", account_type: "PERSONAL" }), reason: "unsupported_account" },
     { name: "invalid username", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "1789001", username: "bad username", account_type: "BUSINESS" }), reason: "profile_username_invalid" },
     { name: "invalid expiry", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? Response.json({ access_token: TOKEN, expires_in: 1e100 }) : validProfile(), reason: "token_expiry_invalid" },
@@ -190,7 +189,7 @@ test("exchange failures report fixed stage reasons without retaining provider re
   }
 });
 
-test("Instagram Login profile identity requires matching user_id and never substitutes id", async () => {
+test("validated profile user_id is canonical and never falls back to id", async () => {
   const profileReply = (payload: unknown): typeof fetch => async (input) => {
     const url = String(input);
     if (url.includes("api.instagram.com")) return Response.json({ access_token: "short", user_id: "1789001", permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
@@ -207,18 +206,28 @@ test("Instagram Login profile identity requires matching user_id and never subst
   const malformedUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: {}, username: "ada.clips", account_type: "BUSINESS" }) });
   assert.deepEqual(malformedUserId, { ok: false, reason: "profile_identity_malformed" });
 
-  const wrongUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: "1789002", username: "ada.clips", account_type: "BUSINESS" }) });
-  assert.deepEqual(wrongUserId, { ok: false, reason: "profile_identity_mismatch" });
+  const emptyUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: "", username: "ada.clips", account_type: "BUSINESS" }) });
+  assert.deepEqual(emptyUserId, { ok: false, reason: "profile_identity_malformed" });
 
-  const correctUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: "1789001", username: "ada.clips", account_type: "BUSINESS" }) });
-  assert.equal(correctUserId.ok, true);
+  const differentIds = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: "22222222222222222", username: "ada.clips", account_type: "BUSINESS" }) });
+  assert.equal(differentIds.ok, true);
+  if (differentIds.ok) assert.equal(differentIds.profile.externalAccountId, "22222222222222222");
+
+  const irrelevantExchangeId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: async (input) => {
+    const url = String(input);
+    if (url.includes("api.instagram.com")) return Response.json({ access_token: "short", user_id: {}, permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
+    if (url.includes("/access_token")) return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+    return Response.json({ user_id: "33333333333333333", username: "ada.clips", account_type: "BUSINESS" });
+  } });
+  assert.equal(irrelevantExchangeId.ok, true);
+  if (irrelevantExchangeId.ok) assert.equal(irrelevantExchangeId.profile.externalAccountId, "33333333333333333");
 });
 
 test("diagnostic result cookie is short-lived, signed, and bound to the exact session", () => {
   const result = {
-    outcome: "identity_mismatch_but_remaining_flow_succeeded",
+    outcome: "profile_identity_verified_diagnostic_only",
     tokenExchange: "succeeded",
-    identityComparison: "mismatched",
+    identityComparison: "not_verified",
     longLivedTokenExchange: "succeeded",
     profileRequest: "succeeded",
   } as const;
@@ -237,7 +246,7 @@ test("diagnostic result cookie is short-lived, signed, and bound to the exact se
   assert.equal(readInstagramDiagnosticCookie({ cookieHeader: tampered, sessionToken, tokenKey: KEY, now: NOW }), null);
 });
 
-test("non-production OAuth diagnostic displays mismatch without saving account, token, or audit", async () => {
+test("non-production OAuth diagnostic reports malformed profile identity without saving account, token, or audit", async () => {
   const { runtime, cookie } = await signedIn();
   const ownerId = (await runtime.currentUserId(new Request("http://localhost:3000/", { headers: { cookie } })))!;
   const states = new Map<string, string>();
@@ -259,7 +268,7 @@ test("non-production OAuth diagnostic displays mismatch without saving account, 
   const stateCookie = start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ");
   const callback = await instagramCallbackRoute({
     ...routes,
-    exchange: async () => ({ ok: false, reason: "profile_identity_mismatch" }),
+    exchange: async () => ({ ok: false, reason: "profile_identity_malformed" }),
   })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${state}`, { headers: { cookie: `${cookie}; ${stateCookie}` } }));
 
   assert.equal(callback.status, 303);
@@ -272,9 +281,9 @@ test("non-production OAuth diagnostic displays mismatch without saving account, 
   assert.ok(sessionToken);
   const diagnostic = readInstagramDiagnosticCookie({ cookieHeader: diagnosticCookie!.split(";")[0]!, sessionToken, tokenKey: KEY, now: NOW });
   assert.deepEqual(diagnostic, {
-    outcome: "identity_mismatch_but_remaining_flow_succeeded",
+    outcome: "profile_identity_malformed",
     tokenExchange: "succeeded",
-    identityComparison: "mismatched",
+    identityComparison: "not_verified",
     longLivedTokenExchange: "succeeded",
     profileRequest: "succeeded",
   });
@@ -283,7 +292,7 @@ test("non-production OAuth diagnostic displays mismatch without saving account, 
   assert.deepEqual(await runtime.repo.listSocialAccountsForOwner(ownerId), []);
 });
 
-test("non-production diagnostic mode does not persist a matching Instagram identity", async () => {
+test("non-production diagnostic mode does not persist a validated Instagram profile identity", async () => {
   const { runtime, cookie } = await signedIn();
   const ownerId = (await runtime.currentUserId(new Request("http://localhost:3000/", { headers: { cookie } })))!;
   const states = new Map<string, string>();
@@ -305,9 +314,9 @@ test("non-production diagnostic mode does not persist a matching Instagram ident
   const diagnosticCookie = callback.headers.getSetCookie().find((item) => item.startsWith("clipforge_ig_diagnostic=") && !item.startsWith("clipforge_ig_diagnostic=;"));
   assert.ok(diagnosticCookie);
   assert.deepEqual(readInstagramDiagnosticCookie({ cookieHeader: diagnosticCookie!.split(";")[0]!, sessionToken: readSessionToken(cookie), tokenKey: KEY, now: NOW }), {
-    outcome: "identity_matched_diagnostic_only",
+    outcome: "profile_identity_verified_diagnostic_only",
     tokenExchange: "succeeded",
-    identityComparison: "matched",
+    identityComparison: "not_verified",
     longLivedTokenExchange: "succeeded",
     profileRequest: "succeeded",
   });
@@ -316,7 +325,7 @@ test("non-production diagnostic mode does not persist a matching Instagram ident
   assert.deepEqual(await runtime.repo.listSocialAccountsForOwner(ownerId), []);
 });
 
-test("Production diagnostic flag cannot bypass mismatch and invalid state never reaches provider exchange", async () => {
+test("Production diagnostic flag cannot bypass profile validation and invalid state never reaches provider exchange", async () => {
   const setup = async () => {
     const { runtime, cookie } = await signedIn();
     const states = new Map<string, string>();
@@ -336,7 +345,7 @@ test("Production diagnostic flag cannot bypass mismatch and invalid state never 
   const productionReply = await instagramCallbackRoute({
     ...production.routes,
     environment: { NODE_ENV: "production", INSTAGRAM_OAUTH_DIAGNOSTIC_MODE: "true" },
-    exchange: async () => { productionExchangeCalls++; return { ok: false, reason: "profile_identity_mismatch" }; },
+    exchange: async () => { productionExchangeCalls++; return { ok: false, reason: "profile_identity_missing" }; },
   })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${production.state}`, { headers: { cookie: `${production.cookie}; ${production.stateCookie}` } }));
   assert.match(productionReply.headers.get("location") ?? "", /error=instagram_callback_error/);
   assert.equal(productionReply.headers.getSetCookie().some((item) => item.startsWith("clipforge_ig_diagnostic=") && !item.startsWith("clipforge_ig_diagnostic=;")), false);
@@ -348,76 +357,42 @@ test("Production diagnostic flag cannot bypass mismatch and invalid state never 
   const invalidStateReply = await instagramCallbackRoute({
     ...invalidState.routes,
     environment: { NODE_ENV: "development", INSTAGRAM_OAUTH_DIAGNOSTIC_MODE: "true" },
-    exchange: async () => { invalidStateExchangeCalls++; return { ok: false, reason: "profile_identity_mismatch" }; },
+    exchange: async () => { invalidStateExchangeCalls++; return { ok: false, reason: "profile_identity_missing" }; },
   })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${invalidState.state}`, { headers: { cookie: invalidState.cookie } }));
   assert.match(invalidStateReply.headers.get("location") ?? "", /error=instagram_invalid_state/);
   assert.equal(invalidStateExchangeCalls, 0);
   assert.equal(invalidStateReply.headers.getSetCookie().some((item) => item.startsWith("clipforge_ig_diagnostic=") && !item.startsWith("clipforge_ig_diagnostic=;")), false);
 });
 
-test("Instagram identity comparison logs only safe presence, validity, and match diagnostics", async () => {
-  const omitted = Symbol("omitted");
-  const cases: Array<{
-    name: string;
-    exchangeId: unknown | typeof omitted;
-    profileId: unknown | typeof omitted;
-    expectedReason?: string;
-    expectedLog: {
-      exchange_user_id_type: "string" | "number" | "missing" | "other";
-      profile_user_id_type: "string" | "number" | "missing" | "other";
-      exchange_user_id_length: number | null;
-      profile_user_id_length: number | null;
-      exchange_number_safe_integer: boolean | null;
-      profile_number_safe_integer: boolean | null;
-      exchange_user_id_present: boolean;
-      profile_user_id_present: boolean;
-      exchange_user_id_valid: boolean;
-      profile_user_id_valid: boolean;
-      identity_match: boolean;
-      result: string;
-    };
-  }> = [
-    { name: "matching string IDs", exchangeId: "1789001", profileId: "1789001", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: true, result: "matched" } },
-    { name: "different string IDs", exchangeId: "1789001", profileId: "1789002", expectedReason: "profile_identity_mismatch", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: false, result: "mismatch" } },
-    { name: "matching JSON numeric IDs are preserved as strings", exchangeId: 1789001, profileId: 1789001, expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: true, result: "matched" } },
-    { name: "JSON numeric and string IDs compare exactly", exchangeId: "1789001", profileId: 1789001, expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: true, result: "matched" } },
-    { name: "different JSON numeric ID mismatches", exchangeId: "1789001", profileId: 1789002, expectedReason: "profile_identity_mismatch", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 7, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: false, result: "mismatch" } },
-    { name: "missing exchange ID", exchangeId: omitted, profileId: "1789001", expectedReason: "authorization_code_response_invalid", expectedLog: { exchange_user_id_type: "missing", profile_user_id_type: "missing", exchange_user_id_length: null, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: false, profile_user_id_present: false, exchange_user_id_valid: false, profile_user_id_valid: false, identity_match: false, result: "missing" } },
-    { name: "missing profile ID", exchangeId: "1789001", profileId: omitted, expectedReason: "profile_identity_missing", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "missing", exchange_user_id_length: 7, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: false, exchange_user_id_valid: true, profile_user_id_valid: false, identity_match: false, result: "missing" } },
-    { name: "malformed exchange ID", exchangeId: { invalid: true }, profileId: "1789001", expectedReason: "authorization_code_response_invalid", expectedLog: { exchange_user_id_type: "other", profile_user_id_type: "missing", exchange_user_id_length: null, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: false, exchange_user_id_valid: false, profile_user_id_valid: false, identity_match: false, result: "malformed" } },
-    { name: "malformed profile ID", exchangeId: "1789001", profileId: { invalid: true }, expectedReason: "profile_identity_malformed", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "other", exchange_user_id_length: 7, profile_user_id_length: null, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: false, identity_match: false, result: "malformed" } },
-    { name: "large JSON numeric profile ID is not rounded", exchangeId: "1789001", profileId: 9007199254740992, expectedReason: "profile_identity_mismatch", expectedLog: { exchange_user_id_type: "string", profile_user_id_type: "string", exchange_user_id_length: 7, profile_user_id_length: 16, exchange_number_safe_integer: null, profile_number_safe_integer: null, exchange_user_id_present: true, profile_user_id_present: true, exchange_user_id_valid: true, profile_user_id_valid: true, identity_match: false, result: "mismatch" } },
-  ];
-
-  for (const entry of cases) {
-    const messages: string[] = [];
-    const originalInfo = console.info;
-    console.info = (message?: unknown) => { if (typeof message === "string") messages.push(message); };
-    let result: InstagramExchangeResult;
-    try {
-      const fetchImpl: typeof fetch = async (input) => {
+test("different OAuth response IDs use the profile ID without logging provider identifiers", async () => {
+  const messages: string[] = [];
+  const oldInfo = console.info;
+  const oldWarn = console.warn;
+  console.info = (...args: unknown[]) => { messages.push(args.map(String).join(" ")); };
+  console.warn = (...args: unknown[]) => { messages.push(args.map(String).join(" ")); };
+  let result: InstagramExchangeResult;
+  try {
+    result = await exchangeInstagramCode({
+      config: CONFIG,
+      code: "synthetic-authorization-code",
+      now: NOW,
+      fetchImpl: async (input) => {
         const url = String(input);
-        if (url.includes("api.instagram.com")) {
-          return Response.json({ access_token: "short", ...(entry.exchangeId === omitted ? {} : { user_id: entry.exchangeId }), permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
-        }
+        if (url.includes("api.instagram.com")) return Response.json({ access_token: "short", user_id: "11111111111111111", permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
         if (url.includes("/access_token")) return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
-        return Response.json({ ...(entry.profileId === omitted ? {} : { user_id: entry.profileId }), username: "ada.clips", account_type: "BUSINESS" });
-      };
-      result = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl });
-    } finally {
-      console.info = originalInfo;
-    }
+        return Response.json({ user_id: "22222222222222222", username: "ada.clips", account_type: "BUSINESS" });
+      },
+    });
+  } finally {
+    console.info = oldInfo;
+    console.warn = oldWarn;
+  }
 
-    if (entry.expectedReason) assert.deepEqual(result!, { ok: false, reason: entry.expectedReason }, entry.name);
-    else assert.equal(result!.ok, true, entry.name);
-    assert.equal(messages.length, 1, `${entry.name}: emits one identity diagnostic`);
-    const logged = JSON.parse(messages[0]!) as Record<string, unknown>;
-    assert.deepEqual(logged, { event: "instagram_oauth_identity_comparison", ...entry.expectedLog }, entry.name);
-    assert.deepEqual(Object.keys(logged).sort(), ["event", "exchange_user_id_type", "profile_user_id_type", "exchange_user_id_length", "profile_user_id_length", "exchange_number_safe_integer", "profile_number_safe_integer", "exchange_user_id_present", "profile_user_id_present", "exchange_user_id_valid", "profile_user_id_valid", "identity_match", "result"].sort());
-    assert.equal(messages.join(" ").includes("1789001"), false, `${entry.name}: no IDs logged`);
-    assert.equal(messages.join(" ").includes("1789002"), false, `${entry.name}: no IDs logged`);
-    assert.equal(messages.join(" ").includes(TOKEN), false, `${entry.name}: no token logged`);
-    assert.equal(messages.join(" ").includes(CONFIG.clientSecret), false, `${entry.name}: no secret logged`);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.profile.externalAccountId, "22222222222222222");
+  assert.deepEqual(messages, []);
+  for (const forbidden of ["11111111111111111", "22222222222222222", TOKEN, CONFIG.clientSecret, "synthetic-authorization-code"]) {
+    assert.equal(messages.join(" ").includes(forbidden), false);
   }
 });
 
@@ -458,7 +433,7 @@ test("numeric identifiers fail closed when JSON.parse does not provide original 
   assert.equal(typeof parsed["user_id"], "symbol");
 });
 
-test("decimal, negative, and exponent numeric user_id tokens are rejected before any follow-up request", async () => {
+test("malformed numeric exchange user_id values do not replace a valid profile user_id", async () => {
   for (const numericToken of ["12.5", "-1789001", "1e6"]) {
     let followUpRequests = 0;
     const result = await exchangeInstagramCode({
@@ -468,11 +443,14 @@ test("decimal, negative, and exponent numeric user_id tokens are rejected before
       fetchImpl: async (input) => {
         if (String(input).includes("api.instagram.com")) return new Response(`{"access_token":"short","user_id":${numericToken},"permissions":["instagram_business_basic","instagram_business_content_publish"]}`, { headers: { "content-type": "application/json" } });
         followUpRequests++;
-        return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+        return String(input).includes("/access_token")
+          ? Response.json({ access_token: TOKEN, expires_in: 5_184_000 })
+          : Response.json({ user_id: "55555555555555555", username: "ada.clips", account_type: "BUSINESS" });
       },
     });
-    assert.deepEqual(result, { ok: false, reason: "authorization_code_response_invalid" }, numericToken);
-    assert.equal(followUpRequests, 0, `${numericToken}: neither long-lived exchange nor /me is called`);
+    assert.equal(result.ok, true, numericToken);
+    if (result.ok) assert.equal(result.profile.externalAccountId, "55555555555555555", numericToken);
+    assert.equal(followUpRequests, 2, `${numericToken}: long-lived exchange and profile request both run`);
   }
 });
 
@@ -549,6 +527,88 @@ test("start and callback require state and a session, and the stored account has
   assert.equal(accounts[0]?.accountType, "BUSINESS");
   assert.equal(JSON.stringify(accounts).includes(TOKEN), false);
   assert.equal(JSON.stringify(accounts).includes("v1."), false);
+});
+
+test("callback persists the validated profile user_id and encrypts the long-lived token", async () => {
+  const { runtime, cookie } = await signedIn();
+  const ownerId = (await runtime.currentUserId(new Request("http://localhost:3000/", { headers: { cookie } })))!;
+  const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW };
+  const start = await instagramStartRoute(routes)(form("/api/instagram/start", [], cookie));
+  const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+  const stateCookie = start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ");
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("api.instagram.com")) return Response.json({ access_token: "short-lived-test-token", user_id: "11111111111111111", permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
+    if (url.includes("/access_token")) return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+    return Response.json({ user_id: "22222222222222222", username: "ada.clips", account_type: "BUSINESS" });
+  };
+  const response = await instagramCallbackRoute({
+    ...routes,
+    exchange: ({ code, now }) => exchangeInstagramCode({ config: CONFIG, code, now, fetchImpl }),
+  })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${state}`, { headers: { cookie: `${cookie}; ${stateCookie}` } }));
+
+  assert.match(response.headers.get("location") ?? "", /notice=instagram_connected/);
+  const accounts = await runtime.repo.listSocialAccountsForOwner(ownerId);
+  assert.equal(accounts.length, 1);
+  assert.equal(accounts[0]?.externalAccountId, "22222222222222222");
+  const stored = await runtime.repo.getInstagramTokenCiphertext(ownerId, accounts[0]!.id);
+  assert.ok(stored);
+  assert.equal(stored!.encryptedAccessToken.includes(TOKEN), false);
+  assert.equal(decryptToken(KEY, stored!.encryptedAccessToken), TOKEN);
+  assert.equal(JSON.stringify(accounts).includes(TOKEN), false);
+});
+
+test("reconnecting the same profile user_id updates one owned account instead of duplicating it", async () => {
+  const { runtime, cookie } = await signedIn();
+  const ownerId = (await runtime.currentUserId(new Request("http://localhost:3000/", { headers: { cookie } })))!;
+  const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW };
+  const connectProfile = async (username: string) => {
+    const start = await instagramStartRoute(routes)(form("/api/instagram/start", [], cookie));
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    const stateCookie = start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ");
+    const response = await instagramCallbackRoute({
+      ...routes,
+      exchange: async () => ({ ok: true, profile: profile({ externalAccountId: "44444444444444444", username }) }),
+    })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${state}`, { headers: { cookie: `${cookie}; ${stateCookie}` } }));
+    assert.match(response.headers.get("location") ?? "", /notice=instagram_connected/);
+  };
+
+  await connectProfile("ada.clips");
+  const first = await runtime.repo.listSocialAccountsForOwner(ownerId);
+  await connectProfile("ada.updated");
+  const second = await runtime.repo.listSocialAccountsForOwner(ownerId);
+  assert.equal(second.length, 1);
+  assert.equal(second[0]?.id, first[0]?.id);
+  assert.equal(second[0]?.externalAccountId, "44444444444444444");
+  assert.equal(second[0]?.username, "ada.updated");
+});
+
+test("invalid profile user_id never persists or overwrites an Instagram connection", async () => {
+  const { runtime, cookie } = await signedIn();
+  const ownerId = (await runtime.currentUserId(new Request("http://localhost:3000/", { headers: { cookie } })))!;
+  const routes = { runtime: () => runtime, config: CONFIG, now: () => NOW };
+  const fetchFor = (profilePayload: unknown): typeof fetch => async (input) => {
+    const url = String(input);
+    if (url.includes("api.instagram.com")) return Response.json({ access_token: "short-lived-test-token", user_id: "11111111111111111", permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
+    if (url.includes("/access_token")) return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+    return Response.json(profilePayload);
+  };
+
+  for (const profilePayload of [
+    { username: "ada.clips", account_type: "BUSINESS" },
+    { user_id: "", id: "33333333333333333", username: "ada.clips", account_type: "BUSINESS" },
+    { user_id: "not-an-id", id: "33333333333333333", username: "ada.clips", account_type: "BUSINESS" },
+  ]) {
+    const start = await instagramStartRoute(routes)(form("/api/instagram/start", [], cookie));
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    const stateCookie = start.headers.getSetCookie().map((item) => item.split(";")[0]).join("; ");
+    const response = await instagramCallbackRoute({
+      ...routes,
+      exchange: ({ code, now }) => exchangeInstagramCode({ config: CONFIG, code, now, fetchImpl: fetchFor(profilePayload) }),
+    })(new Request(`http://localhost:3000/api/instagram/callback?code=synthetic-code&state=${state}`, { headers: { cookie: `${cookie}; ${stateCookie}` } }));
+    assert.match(response.headers.get("location") ?? "", /error=instagram_callback_error/);
+    assert.deepEqual(await runtime.repo.listSocialAccountsForOwner(ownerId), []);
+  }
 });
 
 test("overlapping OAuth starts keep independent browser cookies and one-time states", async () => {
@@ -665,7 +725,7 @@ test("callback emits fixed diagnostics for provider, code, exchange, and persist
   const malformedCode = await invoke("?code=bad%20code", async () => ({ ok: true, profile: profile() }));
   assert.deepEqual(malformedCode.entries, [{ event: "instagram_oauth_callback_rejected", reason: "authorization_code_missing_or_malformed" }]);
 
-  const providerReasons = ["authorization_code_exchange_network_error", "authorization_code_exchange_rejected", "authorization_code_response_invalid", "authorization_code_permissions_invalid", "long_lived_token_exchange_network_error", "long_lived_token_exchange_rejected", "long_lived_token_response_invalid", "profile_lookup_network_error", "profile_lookup_rejected", "profile_response_invalid", "profile_identity_missing", "profile_identity_malformed", "profile_identity_mismatch", "unsupported_account", "profile_username_invalid", "token_expiry_invalid"] as const;
+  const providerReasons = ["authorization_code_exchange_network_error", "authorization_code_exchange_rejected", "authorization_code_response_invalid", "authorization_code_permissions_invalid", "long_lived_token_exchange_network_error", "long_lived_token_exchange_rejected", "long_lived_token_response_invalid", "profile_lookup_network_error", "profile_lookup_rejected", "profile_response_invalid", "profile_identity_missing", "profile_identity_malformed", "unsupported_account", "profile_username_invalid", "token_expiry_invalid"] as const;
   for (const reason of providerReasons) {
     const result = await invoke("?code=abc", async () => ({ ok: false, reason }));
     assert.deepEqual(result.entries, [{ event: "instagram_oauth_exchange_failed", reason }], reason);

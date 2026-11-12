@@ -57,13 +57,6 @@ function diagnosticModeEnabled(environment: Environment): boolean {
 
 function diagnosticResultForFailure(reason: string): InstagramDiagnosticResult | null {
   const base = { tokenExchange: "succeeded" as const, identityComparison: "not_verified" as const };
-  if (reason === "profile_identity_mismatch") return {
-    outcome: "identity_mismatch_but_remaining_flow_succeeded",
-    ...base,
-    identityComparison: "mismatched",
-    longLivedTokenExchange: "succeeded",
-    profileRequest: "succeeded",
-  };
   if (reason.startsWith("long_lived_token_exchange_") || reason === "long_lived_token_response_invalid") return {
     outcome: "long_lived_token_exchange_failed",
     ...base,
@@ -190,11 +183,10 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
     logOAuthState(options, "instagram_oauth_exchange_failed", exchanged.reason);
     const diagnosticResult = diagnosticResultForFailure(exchanged.reason);
     // This runs only after the state cookie, one-time consumption, and session
-    // binding have succeeded. exchangeInstagramCode has already completed the
-    // long-lived exchange and /me lookup before it returns an identity mismatch.
-    // No profile, account, or provider token is persisted in this branch.
+    // binding have succeeded. No account or provider token is persisted after
+    // any failed exchange/profile validation stage.
     if (diagnosticEnabled && diagnosticResult) return finishDiagnosticResult(diagnosticResult);
-    // Normal production/fail-closed mismatch handling remains unchanged below.
+    // Normal production/fail-closed error handling remains unchanged below.
     const codeByReason = {
       expired_code: "instagram_expired_code",
       authorization_code_exchange_network_error: "instagram_callback_error",
@@ -209,7 +201,6 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
       profile_response_invalid: "instagram_callback_error",
       profile_identity_missing: "instagram_callback_error",
       profile_identity_malformed: "instagram_callback_error",
-      profile_identity_mismatch: "instagram_callback_error",
       unsupported_account: "instagram_unsupported_account",
       profile_username_invalid: "instagram_callback_error",
       token_expiry_invalid: "instagram_callback_error",
@@ -217,9 +208,9 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
     return finishCallback(codeByReason[exchanged.reason]);
   }
   if (diagnosticEnabled) return finishDiagnosticResult({
-    outcome: "identity_matched_diagnostic_only",
+    outcome: "profile_identity_verified_diagnostic_only",
     tokenExchange: "succeeded",
-    identityComparison: "matched",
+    identityComparison: "not_verified",
     longLivedTokenExchange: "succeeded",
     profileRequest: "succeeded",
   });

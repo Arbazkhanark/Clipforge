@@ -191,8 +191,7 @@ export function InstagramAccountsView({
 }) {
   const stageText = (status: InstagramDiagnosticStageStatus) => status === "succeeded" ? "Succeeded" : status === "failed" ? "Failed" : "Not run";
   const outcomeText: Record<InstagramDiagnosticResult["outcome"], string> = {
-    identity_mismatch_but_remaining_flow_succeeded: "Identity mismatch; remaining verification succeeded",
-    identity_matched_diagnostic_only: "Identity matched; diagnostic completed without connecting the account",
+    profile_identity_verified_diagnostic_only: "Profile identity validated; diagnostic completed without connecting the account",
     long_lived_token_exchange_failed: "Long-lived token exchange failed",
     profile_request_failed: "Profile request failed",
     profile_identity_missing: "Profile identity was missing",
@@ -223,7 +222,7 @@ export function InstagramAccountsView({
             <p>{outcomeText[diagnostic.outcome]}</p>
             <ul>
               <li>Authorization code exchange: {stageText(diagnostic.tokenExchange)}</li>
-              <li>Identity comparison: {diagnostic.identityComparison === "matched" ? "Matched" : diagnostic.identityComparison === "mismatched" ? "Mismatched" : "Not verified"}</li>
+              <li>Cross-response ID comparison: {diagnostic.identityComparison === "matched" ? "Matched" : diagnostic.identityComparison === "mismatched" ? "Mismatched" : "Not performed"}</li>
               <li>Long-lived token exchange: {stageText(diagnostic.longLivedTokenExchange)}</li>
               <li>Profile request: {stageText(diagnostic.profileRequest)}</li>
             </ul>

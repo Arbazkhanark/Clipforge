@@ -6,8 +6,7 @@ const MAX_AGE_SECONDS = 180;
 const MAX_COOKIE_LENGTH = 2048;
 
 export type InstagramDiagnosticOutcome =
-  | "identity_mismatch_but_remaining_flow_succeeded"
-  | "identity_matched_diagnostic_only"
+  | "profile_identity_verified_diagnostic_only"
   | "long_lived_token_exchange_failed"
   | "profile_request_failed"
   | "profile_identity_missing"
@@ -42,8 +41,7 @@ function validResult(value: unknown): value is InstagramDiagnosticResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return [
-    "identity_mismatch_but_remaining_flow_succeeded",
-    "identity_matched_diagnostic_only",
+    "profile_identity_verified_diagnostic_only",
     "long_lived_token_exchange_failed",
     "profile_request_failed",
     "profile_identity_missing",
