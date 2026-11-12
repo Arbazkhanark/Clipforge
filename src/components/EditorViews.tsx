@@ -252,8 +252,10 @@ export function EditorForm({ data }: { data: EditorPageData }) {
         </div>
       </div>
 
-      <fieldset className="editor-section">
-        <legend><span className="editor-section-number">01</span> Trim video</legend>
+      <details className="editor-accordion" open>
+        <summary className="editor-accordion-summary"><span className="editor-section-number">01</span><span className="editor-accordion-title">Trim video</span><span className="editor-accordion-chevron" aria-hidden="true">⌄</span></summary>
+        <fieldset className="editor-section">
+        <legend className="sr-only">Trim video</legend>
         <p className="editor-section-description">
           Select the part of the video you want to keep.
         </p>
@@ -304,10 +306,13 @@ export function EditorForm({ data }: { data: EditorPageData }) {
             until it can be checked.
           </p>
         )}
-      </fieldset>
+        </fieldset>
+      </details>
 
-      <fieldset className="editor-section">
-        <legend><span className="editor-section-number">02</span> Shape & position</legend>
+      <details className="editor-accordion" open>
+        <summary className="editor-accordion-summary"><span className="editor-section-number">02</span><span className="editor-accordion-title">Shape &amp; position</span><span className="editor-accordion-chevron" aria-hidden="true">⌄</span></summary>
+        <fieldset className="editor-section">
+        <legend className="sr-only">Shape &amp; position</legend>
         <p className="editor-section-description">
           Choose your output format and adjust the video framing.
         </p>
@@ -349,10 +354,13 @@ export function EditorForm({ data }: { data: EditorPageData }) {
           <Range name="offsetX" label="Move left / right" min={-1} max={1} step={0.05} value={settings.offsetX} />
           <Range name="offsetY" label="Move up / down" min={-1} max={1} step={0.05} value={settings.offsetY} />
         </div>
-      </fieldset>
+        </fieldset>
+      </details>
 
-      <fieldset className="editor-section">
-        <legend><span className="editor-section-number">03</span> Background</legend>
+      <details className="editor-accordion">
+        <summary className="editor-accordion-summary"><span className="editor-section-number">03</span><span className="editor-accordion-title">Background</span><span className="editor-accordion-chevron" aria-hidden="true">⌄</span></summary>
+        <fieldset className="editor-section">
+        <legend className="sr-only">Background</legend>
         <p className="editor-section-description">
           Select what appears behind your video.
         </p>
@@ -413,10 +421,13 @@ export function EditorForm({ data }: { data: EditorPageData }) {
             </div>
           )}
         </div>
-      </fieldset>
+        </fieldset>
+      </details>
 
-      <fieldset className="editor-section">
-        <legend><span className="editor-section-number">04</span> Border</legend>
+      <details className="editor-accordion">
+        <summary className="editor-accordion-summary"><span className="editor-section-number">04</span><span className="editor-accordion-title">Border</span><span className="editor-accordion-chevron" aria-hidden="true">⌄</span></summary>
+        <fieldset className="editor-section">
+        <legend className="sr-only">Border</legend>
         <p className="editor-section-description">
           Add a border around the video itself.
         </p>
@@ -445,10 +456,13 @@ export function EditorForm({ data }: { data: EditorPageData }) {
             />
           </div>
         </div>
-      </fieldset>
+        </fieldset>
+      </details>
 
-      <fieldset className="editor-section">
-        <legend><span className="editor-section-number">05</span> Logo</legend>
+      <details className="editor-accordion">
+        <summary className="editor-accordion-summary"><span className="editor-section-number">05</span><span className="editor-accordion-title">Logo</span><span className="editor-accordion-chevron" aria-hidden="true">⌄</span></summary>
+        <fieldset className="editor-section">
+        <legend className="sr-only">Logo</legend>
         <p className="editor-section-description">
           Add your brand image and position it on the video.
         </p>
@@ -490,7 +504,8 @@ export function EditorForm({ data }: { data: EditorPageData }) {
             </p>
           </>
         )}
-      </fieldset>
+        </fieldset>
+      </details>
 
       <div className="editor-form-actions">
         <button type="submit" className="editor-secondary-button" formNoValidate>
@@ -638,7 +653,7 @@ export function EditorView({ data }: { data: EditorPageData }) {
               </p>
             </div>
             <a href={`/media/${encodeURIComponent(source.id)}`} className="editor-text-link">
-              View media details →
+              ← Media details
             </a>
           </section>
 

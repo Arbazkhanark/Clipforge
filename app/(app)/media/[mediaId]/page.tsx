@@ -17,6 +17,8 @@ export default async function MediaDetailPage(props: {
   return result.ok ? (
     <MediaDetailView detail={result.data} timeZone="Asia/Kolkata" />
   ) : (
-    <ErrorState error={result.error} />
+    <main className="media-page media-detail-page media-detail-error-page">
+      <ErrorState error={result.error} />
+    </main>
   );
 }

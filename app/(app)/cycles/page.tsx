@@ -27,15 +27,16 @@ export default async function CyclesPage(props: {
   ]);
   return (
     <>
-      <FlashMessage flash={parseFlash(searchParams)} />
+      <FlashMessage flash={parseFlash(searchParams)} variant="toast" />
       {overview.ok ? (
         <CyclesOverviewView cycles={overview.data} />
       ) : (
-        <ErrorState error={overview.error} />
+        <div className="cycles-error-panel"><ErrorState error={overview.error} /></div>
       )}
       {overview.ok && options.ok && (
         <CreateCycleForm accounts={options.data.accounts} />
       )}
+      {overview.ok && !options.ok && <div className="cycles-error-panel"><ErrorState error={options.error} /></div>}
     </>
   );
 }

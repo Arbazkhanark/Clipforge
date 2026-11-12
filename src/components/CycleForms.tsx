@@ -5,13 +5,14 @@ import type { CycleDetail } from "../server/queries.ts";
 
 export function CreateCycleForm({ accounts }: { accounts: { id: string; label: string }[] }) {
   return (
-    <section aria-labelledby="new-cycle-heading" className="card">
-      <h2 id="new-cycle-heading">New publishing cycle</h2>
-      {accounts.length === 0 ? <p>No Instagram account is connected. Open the Instagram page to connect one. Live publishing is not configured, so connecting an account does not send a Reel.</p> : (
-        <form method="post" action="/api/forms/cycle-create">
-          <p><label>Name<br /><input type="text" name="name" required maxLength={100} /></label></p>
-          <p><label>Account<br /><select name="socialAccountId" required>{accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}</select></label></p>
-          <button type="submit">Create cycle (nothing is published)</button>
+    <section aria-labelledby="new-cycle-heading" className="cycles-create-panel">
+      <div className="cycles-create-copy"><p className="cycles-eyebrow">GET STARTED</p><h2 id="new-cycle-heading">Create a publishing cycle</h2><p>Choose a name and Instagram account. You can add videos and plan dates after the cycle is created. Nothing is published by creating a cycle.</p></div>
+      {accounts.length === 0 ? <div className="cycles-account-empty"><strong>No Instagram account is connected</strong><p>Connect an account from Instagram settings before creating a cycle. Live publishing is not configured here, so connecting an account does not send a Reel.</p><a className="cycles-secondary-link" href="/instagram">Open Instagram settings <span aria-hidden="true">→</span></a></div> : (
+        <form method="post" action="/api/forms/cycle-create" className="cycles-create-form">
+          <label className="cycles-field">Cycle name<input type="text" name="name" required maxLength={100} placeholder="e.g. Weekly product tips" /></label>
+          <label className="cycles-field">Instagram account<select name="socialAccountId" required>{accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}</select></label>
+          <button className="cycles-primary-button" type="submit">Create cycle <span aria-hidden="true">→</span></button>
+          <p className="cycles-form-hint">You can review and schedule the videos next. No Reel is published at this step.</p>
         </form>
       )}
     </section>
@@ -20,7 +21,7 @@ export function CreateCycleForm({ accounts }: { accounts: { id: string; label: s
 
 export function RepeatModeForm({ cycleId, repeatBehavior, ended }: { cycleId: string; repeatBehavior: "never" | "ask" | "automatic"; ended: boolean }) {
   return (
-    <section aria-labelledby="repeat-heading" className="card">
+    <section aria-labelledby="repeat-heading" className="cycles-form-card">
       <h2 id="repeat-heading">Repeat mode</h2>
       <p>A repeat round can republish only eligible, unpublished items, and only under the mode you save here. Published, publishing, and processing items are left out. Automatic queues another round when this cycle finishes. Ask waits for you. Never does not start another round. Saving this does not send a Reel.</p>
       {ended ? <p>This cycle has ended, so repeat mode cannot be changed.</p> : (
@@ -42,7 +43,7 @@ export function RepeatModeForm({ cycleId, repeatBehavior, ended }: { cycleId: st
 
 export function StartCycleForm({ cycleId, readyToConfirm }: { cycleId: string; readyToConfirm: boolean }) {
   return (
-    <section aria-labelledby="start-heading" className="card">
+    <section aria-labelledby="start-heading" className="cycles-form-card cycles-start-card">
       <h2 id="start-heading">Start this cycle</h2>
       {!readyToConfirm && <p role="note">Fix the blocked or required items above first.</p>}
       <p className="muted">Starting only changes this cycle inside ClipForge. It does not upload a Reel.</p>
@@ -66,7 +67,7 @@ export function CycleEditor({ detail, timeZone }: { detail: CycleDetail; timeZon
   if (cycleEnded || detail.items.length === 0) return <CycleItemsTable items={detail.items} mediaTitles={detail.mediaTitles} timeZone={timeZone} />;
   return (
     <>
-      <form id="cycle-items-form" method="post" action="/api/forms/captions">
+      <form id="cycle-items-form" className="cycles-editor-form" method="post" action="/api/forms/captions">
         <input type="hidden" name="cycleId" value={detail.cycle.id} />
         {editableItems.map((item) => <input key={item.id} type="hidden" name={`version.${item.id}`} value={item.version} />)}
         <CycleItemsTable items={detail.items} mediaTitles={detail.mediaTitles} timeZone={timeZone} />
@@ -104,7 +105,7 @@ export function CycleEditor({ detail, timeZone }: { detail: CycleDetail; timeZon
 function CycleRenderSelectionForms({ detail }: { detail: CycleDetail }) {
   const items = detail.items.filter(isEditableItem);
   return (
-    <section className="card" aria-labelledby="render-selection-heading">
+    <section className="cycles-render-section" aria-labelledby="render-selection-heading">
       <h2 id="render-selection-heading">Rendered outputs for publishing</h2>
       <p>Choose the exact completed render for each video. Originals stay unchanged, and a newer render never replaces your selection automatically.</p>
       {items.map((item) => {
@@ -115,7 +116,7 @@ function CycleRenderSelectionForms({ detail }: { detail: CycleDetail }) {
           ? selectedAvailable && selectedIsListed ? "Selected render is available." : "The selected render is missing or stale. Choose an available render again."
           : outputs.length ? "No render selected yet; publishing preflight remains blocked." : "No successful render is available for this source yet.";
         return (
-          <form key={item.id} method="post" action="/api/forms/cycle-render-output" className="card">
+          <form key={item.id} method="post" action="/api/forms/cycle-render-output" className="cycles-render-card">
             <input type="hidden" name="cycleId" value={detail.cycle.id} />
             <input type="hidden" name="itemId" value={item.id} />
             <input type="hidden" name="expectedVersion" value={item.version} />

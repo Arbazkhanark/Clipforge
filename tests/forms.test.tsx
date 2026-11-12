@@ -279,7 +279,7 @@ test("media page: says where files go (memory vs local disk vs none), shows flas
   const memory = html(await MediaPage({}));
   assert.ok(memory.includes("Demo storage (server memory)")); assert.ok(memory.includes("discarded when the server restarts")); assert.ok(memory.includes('data-storage-kind="memory"'));
   assert.ok(memory.includes('enctype="multipart/form-data"') || memory.includes('encType="multipart/form-data"')); assert.ok(memory.includes('action="/api/forms/media-upload"')); assert.ok(memory.includes("Cloud (S3) storage is not connected"));
-  assert.ok(memory.includes("up to 5 MB per file"));
+  assert.ok(memory.includes("Up to 5 MB per file"));
   setRuntimeForTests(runtime(DEMO_USER_ID, await mediaServices({ disk: true })));
   const disk = html(await MediaPage({}));
   assert.ok(disk.includes("Private folder on this computer")); assert.ok(disk.includes("not stored in the database")); assert.ok(!disk.includes("discarded when the server restarts"));
@@ -287,7 +287,7 @@ test("media page: says where files go (memory vs local disk vs none), shows flas
   const none = html(await MediaPage({}));
   assert.ok(none.includes("Uploads are not available")); assert.ok(!none.includes('action="/api/forms/media-upload"'));
   repo.media.set("demo-media-1", { ...repo.media.get("demo-media-1")!, validation: "incomplete" });
-  assert.ok(html(await MediaPage({})).includes("Not fully checked"));
+  assert.ok(html(await MediaPage({})).includes("Incomplete"));
   const flash = html(await MediaPage({ searchParams: Promise.resolve({ notice: "upload_ok" }) })); assert.ok(flash.includes('data-flash="notice"')); assert.ok(flash.includes("Upload complete"));
   const evil = html(await MediaPage({ searchParams: Promise.resolve({ error: "<script>alert(1)</script>" }) })); assert.ok(!evil.includes("<script>")); assert.ok(!evil.includes("data-flash"));
 });

@@ -320,6 +320,11 @@ export function MediaTable({
               Clear filters
             </a>
           )}
+          {!filtered && (
+            <a href="#upload-heading" className="media-empty-upload-action">
+              Upload media
+            </a>
+          )}
         </div>
       ) : (
         <>

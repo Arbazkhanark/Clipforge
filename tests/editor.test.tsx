@@ -286,6 +286,9 @@ test("page: without a video it lists yours to choose from; templates show 'N of 
 
 test("page: the form has every control and the actual preview uses the authorized media route", async () => {
   const page = html(await EditorPage({ searchParams: Promise.resolve({ media: "v1" }) }));
+  assert.equal((page.match(/class="editor-accordion"/g) ?? []).length, 5, "all five editing groups stay reachable as native accordions");
+  for (const group of ["Trim video", "Shape &amp; position", "Background", "Border", "Logo"]) assert.ok(page.includes(group), group);
+  assert.ok(page.includes('class="editor-video-preview"') && page.includes('class="editor-video-stage"'));
   for (const name of ['name="aspect"', 'name="zoom"', 'name="offsetX"', 'name="offsetY"', 'name="trimStart"', 'name="trimEnd"', 'name="bg"', 'name="blur"', 'name="bgColor"', 'name="borderPx"', 'name="borderColor"', 'name="logoMedia"', 'name="logoWidth"', 'name="logoX"', 'name="logoY"', 'name="logoOpacity"', 'name="media"', 'name="name"']) assert.ok(page.includes(name), name);
   for (const label of ["9:16 (Reels, recommended)", "4:5", "1:1", "16:9", "Original"]) assert.ok(page.includes(label), label);
   assert.ok(/formNoValidate/i.test(page)); assert.ok(/formAction="\/api\/forms\/editor-save"/i.test(page)); assert.ok(/formMethod="post"/i.test(page)); assert.ok(page.includes('method="get"') && page.includes('action="/editor"'));

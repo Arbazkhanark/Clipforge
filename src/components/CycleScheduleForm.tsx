@@ -47,7 +47,7 @@ export function CycleScheduleForm({ cycleId, items, initialSchedule, initialStar
   const setDay = (day: number, checked: boolean) => change("daysOfWeek", checked ? [...settings.daysOfWeek, day].sort() : settings.daysOfWeek.filter((value) => value !== day));
   const formatted = (slot: Date) => formatDateTime(slot, settings.timeZone);
   return (
-    <section aria-labelledby="schedule-heading" className="card">
+    <section aria-labelledby="schedule-heading" className="cycles-form-card cycles-schedule-card">
       <h2 id="schedule-heading">Publishing schedule</h2>
       <p>Plan when these videos are scheduled in ClipForge. This is a planned schedule; it does not publish Reels to Instagram.</p>
       {!editable ? <p>This cycle is no longer a draft, so its schedule cannot be edited.</p> : (

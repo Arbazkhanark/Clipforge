@@ -17,36 +17,38 @@ export interface CycleItemsTableProps {
  */
 export function CycleItemsTable({ items, mediaTitles, timeZone }: CycleItemsTableProps) {
   const ordered = [...items].sort((a, b) => a.position - b.position);
-  if (ordered.length === 0) return <p>This cycle has no videos yet.</p>;
+  if (ordered.length === 0) return <div className="cycles-no-items"><span aria-hidden="true">▧</span><p>This cycle has no videos yet.</p><small>Add videos to review captions, covers and planned dates here.</small></div>;
   return (
-    <table className="cycle-items">
-      <caption>Videos in this cycle</caption>
-      <thead>
-        <tr><th scope="col">Select</th><th scope="col">#</th><th scope="col">Video</th><th scope="col">Source</th><th scope="col">Status</th><th scope="col">Scheduled for</th><th scope="col">Caption</th><th scope="col">Cover</th></tr>
-      </thead>
-      <tbody>
-        {ordered.map((item) => {
-          const title = mediaTitles[item.mediaAssetId] ?? "Unavailable video";
-          const editable = isEditableItem(item);
-          return (
-            <tr key={item.id} data-item-id={item.id}>
-              <td>{editable
-                ? <input type="checkbox" name="itemIds" value={item.id} aria-label={`Select ${title}`} />
-                : <span className="muted" title="This item can no longer be edited">—</span>}</td>
-              <td>{item.position}</td>
-              <td>{title}</td>
-              <td>{SOURCE_LABELS[item.sourceKind]}</td>
-              <td>
-                <StatusBadge status={item.status} />
-                {item.reviewReason && <p className="muted">{REVIEW_REASON_LABELS[item.reviewReason] ?? "Needs your attention."}</p>}
-              </td>
-              <td>{item.scheduledFor ? formatDateTime(item.scheduledFor, timeZone) : "Not scheduled"}</td>
-              <td>{item.captionText === "" ? <span className="muted">No caption</span> : item.captionText}</td>
-              <td>{COVER_LABELS[item.coverState]}</td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <div className="cycle-items-scroll" role="region" aria-label="Videos in this cycle" tabIndex={0}>
+      <table className="cycle-items">
+        <caption>Videos in this cycle</caption>
+        <thead>
+          <tr><th scope="col">Select</th><th scope="col">#</th><th scope="col">Video</th><th scope="col">Source</th><th scope="col">Status</th><th scope="col">Scheduled for</th><th scope="col">Caption</th><th scope="col">Cover</th></tr>
+        </thead>
+        <tbody>
+          {ordered.map((item) => {
+            const title = mediaTitles[item.mediaAssetId] ?? "Unavailable video";
+            const editable = isEditableItem(item);
+            return (
+              <tr key={item.id} data-item-id={item.id}>
+                <td>{editable
+                  ? <input type="checkbox" name="itemIds" value={item.id} aria-label={`Select ${title}`} />
+                  : <span className="muted" title="This item can no longer be edited">—</span>}</td>
+                <td>{item.position}</td>
+                <td>{title}</td>
+                <td>{SOURCE_LABELS[item.sourceKind]}</td>
+                <td>
+                  <StatusBadge status={item.status} />
+                  {item.reviewReason && <p className="muted">{REVIEW_REASON_LABELS[item.reviewReason] ?? "Needs your attention."}</p>}
+                </td>
+                <td>{item.scheduledFor ? formatDateTime(item.scheduledFor, timeZone) : "Not scheduled"}</td>
+                <td>{item.captionText === "" ? <span className="muted">No caption</span> : item.captionText}</td>
+                <td>{COVER_LABELS[item.coverState]}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }

@@ -19,8 +19,8 @@ export default async function CyclePage(props: { params: Promise<{ cycleId: stri
   const result = await loadPageData((ctx) => getCycleDetail(ctx, cycleId));
   return (
     <>
-      <FlashMessage flash={parseFlash(searchParams)} />
-      {result.ok ? <CycleDetailView detail={result.data} timeZone={result.data.cycle.timezone ?? "Asia/Kolkata"} instagramLoginConfigured={readInstagramOAuthConfig() !== null} /> : <ErrorState error={result.error} />}
+      <FlashMessage flash={parseFlash(searchParams)} variant="toast" />
+      {result.ok ? <CycleDetailView detail={result.data} timeZone={result.data.cycle.timezone ?? "Asia/Kolkata"} instagramLoginConfigured={readInstagramOAuthConfig() !== null} /> : <div className="cycles-error-panel"><ErrorState error={result.error} /></div>}
     </>
   );
 }

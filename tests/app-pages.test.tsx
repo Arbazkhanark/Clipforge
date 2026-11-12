@@ -143,7 +143,7 @@ test("revoked sharing disappears from the shared list and the detail page", asyn
 
 test("cycles: overview counts and detail with preflight and the items table", async () => {
   const overview = html(await CyclesPage({}));
-  assert.ok(overview.includes("Sample cycle (nothing is published)")); assert.ok(overview.includes("4 videos - 4 upcoming - 0 published"));
+  assert.ok(overview.includes("Sample cycle (nothing is published)")); assert.ok(overview.includes("4 upcoming")); assert.ok(overview.includes('aria-valuenow="0"'));
   const detail = html(await CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }) }));
   assert.ok(detail.includes("Draft (not started)")); assert.ok(detail.includes("Before you start"));
   assert.ok(detail.includes("Sample clip 01")); assert.ok(detail.includes("Shared with you"));

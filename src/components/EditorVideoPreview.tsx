@@ -202,8 +202,8 @@ export function EditorVideoPreview({
   } : undefined;
 
   return (
-    <figure>
-      <div ref={setStageElement} style={{ position: "relative", width: "100%", maxWidth: "22rem", aspectRatio: `${layout.canvas.width} / ${layout.canvas.height}`, overflow: "hidden", background: settings.background.kind === "solid" ? settings.background.colorHex : "#333", border: "1px solid var(--border)", touchAction: "none", userSelect: "none" }} aria-label="Edited video preview" aria-describedby="editor-preview-gesture-help">
+      <figure className="editor-video-preview">
+      <div ref={setStageElement} className="editor-video-stage" style={{ position: "relative", width: "100%", maxWidth: "30rem", maxHeight: "68svh", aspectRatio: `${layout.canvas.width} / ${layout.canvas.height}`, overflow: "hidden", background: settings.background.kind === "solid" ? settings.background.colorHex : "#333", border: "1px solid var(--border)", touchAction: "none", userSelect: "none" }} aria-label="Edited video preview" aria-describedby="editor-preview-gesture-help">
         {settings.background.kind === "blur" && <video ref={setBackgroundVideoElement} src={videoUrl} muted playsInline autoPlay loop aria-hidden="true" style={{ position: "absolute", inset: "-5%", width: "110%", height: "110%", objectFit: "cover", filter: `blur(${settings.background.strength * displayScale}px)`, opacity: 0.55, zIndex: 1 }} />}
         {settings.background.kind === "image" && backgroundInfo && <img src={backgroundInfo.url} alt="" aria-hidden="true" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 1 }} />}
         {settings.background.kind === "image" && !backgroundInfo && <div role="status" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", zIndex: 1 }}>Choose an available background image.</div>}
@@ -231,7 +231,7 @@ export function EditorVideoPreview({
           </svg>
         )}
       </div>
-      <p id="editor-preview-gesture-help" className="muted">Use two fingers to zoom and move, drag to reposition, or scroll over the preview to zoom. Page scrolling works outside the preview.</p>
+      <p id="editor-preview-gesture-help" className="muted editor-preview-gesture-help">Use two fingers to zoom and move, drag to reposition, or scroll over the preview to zoom. Page scrolling works outside the preview.</p>
       <div className="editor-preview-playback" aria-label="Preview playback controls">
         <button type="button" disabled={invalidRange || loading || Boolean(playbackError)} aria-label={isPlaying ? "Pause preview" : "Play preview"} onClick={() => {
           const video = videoElement;

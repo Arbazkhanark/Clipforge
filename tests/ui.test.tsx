@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { PricingTable } from "../src/components/PricingTable.tsx";
 import { UsageMeter } from "../src/components/UsageMeter.tsx";
 import { CycleItemsTable } from "../src/components/CycleItemsTable.tsx";
+import { CyclesOverviewView } from "../src/components/CycleViews.tsx";
 import { CycleScheduleForm } from "../src/components/CycleScheduleForm.tsx";
 import { PreflightPanel } from "../src/components/PreflightPanel.tsx";
 import { SchedulePreview } from "../src/components/SchedulePreview.tsx";
@@ -20,6 +21,9 @@ import { generateSlots } from "../src/lib/domain/schedule.ts";
 import { CYCLE_ITEM_STATUSES } from "../src/lib/domain/types.ts";
 import { makeItem, makeCycle, NOW } from "./helpers.ts";
 import { AuthForm } from "../src/components/AuthForm.tsx";
+import { UploadForm } from "../src/components/UploadForm.tsx";
+import { MediaTable } from "../src/components/MediaTable.tsx";
+import { MediaDetailView } from "../src/components/MediaDetailView.tsx";
 import { FLASH_ERRORS, FLASH_NOTICES } from "../src/server/flash.ts";
 import { setRuntimeForTests, type Runtime } from "../src/server/runtime.ts";
 import LoginPage from "../app/login/page.tsx";
@@ -63,6 +67,89 @@ test("usage meter: ok / warning / over states, formatted storage, and the monthl
 
 test("every cycle item status has a text label", () => {
   for (const status of CYCLE_ITEM_STATUSES) assert.match(html(<StatusBadge status={status} />), new RegExp(`data-status="${status}">[A-Z]`));
+});
+
+test("media upload offers an accessible picker and drag-drop using the existing single-file endpoint", () => {
+  const out = html(<UploadForm info={{
+    available: true,
+    storage: { label: "Private folder on this computer", persistent: true, warning: "Stored outside the database." },
+    storageKind: "local-disk",
+    maxMegabytes: 200,
+  }} />);
+  for (const text of ["Upload your media", "Drag and drop your videos or images here, or browse files from your device.", "Select Files", "MP4, MOV or WebM video", "JPEG, PNG or WebP images", "Up to 200 MB per file", "One file per upload"]) {
+    assert.ok(out.includes(text), `missing ${text}`);
+  }
+  assert.ok(out.includes('action="/api/forms/media-upload"'));
+  assert.ok(out.includes('name="file"'));
+  assert.ok(out.includes('aria-live="polite"'));
+  assert.ok(!out.includes('multiple=""'));
+  const unavailable = html(<UploadForm info={{
+    available: false,
+    storage: { label: "Private folder unavailable", persistent: false, warning: "Storage is not configured." },
+    storageKind: null,
+    maxMegabytes: 200,
+  }} />);
+  assert.ok(unavailable.includes("Uploads are not available"));
+  assert.ok(!unavailable.includes('action="/api/forms/media-upload"'));
+});
+
+test("empty media library links back to the upload section", () => {
+  const out = html(<MediaTable library={{ items: [], total: 0, page: 1, pageCount: 1, pageSize: 24, search: "", sort: "newest", kind: "all", filtered: false }} />);
+  assert.ok(out.includes("Your library is empty"));
+  assert.ok(out.includes('href="#upload-heading"'));
+  assert.ok(out.includes("Upload media"));
+});
+
+test("media detail presents the existing preview, metadata, navigation and actions without changing destinations", () => {
+  const out = html(<MediaDetailView timeZone="UTC" detail={{
+    mimeType: "video/mp4",
+    addedAt: new Date("2026-11-01T12:00:00Z"),
+    status: "active",
+    importedCopy: false,
+    media: { id: "media-test-id", title: "A very long source filename.mp4", kind: "video", sizeBytes: 5_000_000, durationMs: 12_000, status: "active", validation: "verified", hasThumbnail: true, width: 1920, height: 1080 },
+  }} />);
+  for (const text of ["Media Library", "Media Details", "A very long source filename.mp4", "Preview", "Details", "File type", "File size", "Duration", "Resolution", "Verified", "Edit video", "Download the original", "Schedule original removal"]) {
+    assert.ok(out.includes(text), `missing ${text}`);
+  }
+  assert.ok(out.includes('href="/media"'));
+  assert.ok(out.includes('href="/editor?media=media-test-id"'));
+  assert.ok(out.includes('href="/api/media/file?id=media-test-id&amp;variant=download"'));
+  assert.ok(out.includes('src="/api/media/file?id=media-test-id&amp;variant=preview"'));
+  assert.ok(out.includes('action="/api/forms/media-delete"'));
+  assert.ok(out.includes('name="confirm"'));
+  assert.ok(out.includes('required=""'));
+
+  const image = html(<MediaDetailView timeZone="UTC" detail={{
+    mimeType: "image/png", addedAt: null, status: "pending_deletion", deleteAfter: new Date("2026-11-08T00:00:00Z"), importedCopy: true,
+    media: { id: "image-id", title: "Poster.png", kind: "image", sizeBytes: 1000, durationMs: null, status: "pending_deletion", validation: "incomplete", hasThumbnail: false, width: null, height: null },
+  }} />);
+  assert.ok(image.includes('alt="Preview of Poster.png"'));
+  assert.ok(image.includes("Scheduled for removal"));
+  assert.ok(image.includes("independently imported copy"));
+  assert.ok(!image.includes('action="/api/forms/media-delete"'));
+  assert.ok(!image.includes('href="/editor?media=image-id"'));
+
+  const portrait = html(<MediaDetailView timeZone="UTC" detail={{
+    mimeType: "video/mp4", addedAt: null, status: "active", importedCopy: false,
+    media: { id: "portrait-id", title: "Portrait.mp4", kind: "video", sizeBytes: 1000, durationMs: 1000, status: "active", validation: "verified", hasThumbnail: false, width: 716, height: 1274 },
+  }} />);
+  assert.ok(portrait.includes('class="media-detail-preview-frame is-video is-portrait"'));
+  assert.ok(portrait.includes('style="aspect-ratio:716 / 1274"'));
+  assert.ok(portrait.includes('class="media-detail-primary-action"'));
+});
+
+test("cycles overview summarizes only supplied data and presents an accessible detail action", () => {
+  const out = html(<CyclesOverviewView cycles={[
+    { id: "cycle-running", name: "Weekly clips", status: "running", totalItems: 4, upcoming: 2, published: 2, needsAttention: 1 },
+    { id: "cycle-draft", name: "Launch week", status: "draft", totalItems: 0, upcoming: 0, published: 0, needsAttention: 0 },
+  ]} />);
+  for (const text of ["Publishing cycles", "All cycles", "Running", "Paused", "Completed / stopped", "Cycles needing attention", "Weekly clips", "View details", 'aria-valuenow="2"', 'aria-label="2 upcoming videos"']) assert.ok(out.includes(text), `missing ${text}`);
+  assert.ok(out.includes('role="progressbar"'));
+  assert.ok(out.includes('href="#new-cycle-heading"'));
+  assert.doesNotMatch(out, /<th scope="col">Instagram account<\/th>/); // CycleCard has no account label to show in a column.
+  const empty = html(<CyclesOverviewView cycles={[]} />);
+  assert.ok(empty.includes("Your publishing workspace starts here"));
+  assert.ok(empty.includes("Create your first cycle"));
 });
 
 test("cycle table: only upcoming/scheduled items are selectable; honest cover wording; reasons explained", () => {
