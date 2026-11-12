@@ -130,6 +130,38 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
 }
 
+function isPresentInstagramUserId(value: unknown): boolean {
+  return value !== undefined && value !== null;
+}
+
+function isValidInstagramUserId(value: unknown): boolean {
+  return (typeof value === "string" || typeof value === "number") && /^[0-9]{1,32}$/.test(String(value));
+}
+
+function logInstagramIdentityComparison(exchangeUserId: unknown, profileUserId: unknown): { result: "matched" | "mismatch" | "missing" | "malformed"; identityMatch: boolean } {
+  const exchangePresent = isPresentInstagramUserId(exchangeUserId);
+  const profilePresent = isPresentInstagramUserId(profileUserId);
+  const exchangeValid = isValidInstagramUserId(exchangeUserId);
+  const profileValid = isValidInstagramUserId(profileUserId);
+  const identityMatch = exchangeValid && profileValid && String(exchangeUserId) === String(profileUserId);
+  const result = (exchangePresent && !exchangeValid) || (profilePresent && !profileValid)
+    ? "malformed"
+    : !exchangePresent || !profilePresent
+      ? "missing"
+      : identityMatch ? "matched" : "mismatch";
+
+  console.info(JSON.stringify({
+    event: "instagram_oauth_identity_comparison",
+    exchange_user_id_present: exchangePresent,
+    profile_user_id_present: profilePresent,
+    exchange_user_id_valid: exchangeValid,
+    profile_user_id_valid: profileValid,
+    identity_match: identityMatch,
+    result,
+  }));
+  return { result, identityMatch };
+}
+
 async function readJson(response: Response): Promise<Record<string, unknown> | null> {
   const text = await response.text();
   if (text.length > 20_000) return null;
@@ -155,7 +187,11 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   const userId = shortData?.["user_id"];
   const externalAccountId = typeof userId === "string" || typeof userId === "number" ? String(userId) : "";
   if (!shortResponse.ok) return { ok: false, reason: shortResponse.status === 400 ? "expired_code" : "authorization_code_exchange_rejected" };
-  if (!shortToken || !/^[0-9]{1,32}$/.test(externalAccountId)) return { ok: false, reason: "authorization_code_response_invalid" };
+  if (!shortToken) return { ok: false, reason: "authorization_code_response_invalid" };
+  if (!isValidInstagramUserId(userId)) {
+    logInstagramIdentityComparison(userId, undefined);
+    return { ok: false, reason: "authorization_code_response_invalid" };
+  }
   const parsedScopes = normalizeInstagramScopes(shortData?.["permissions"]);
   const grantedScopes = parsedScopes.scopes;
   if (parsedScopes.malformed || missingInstagramScopes(grantedScopes).length > 0) return { ok: false, reason: "authorization_code_permissions_invalid" };
@@ -183,9 +219,10 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   if (!profileResponse.ok) return { ok: false, reason: "profile_lookup_rejected" };
   if (!profileJson) return { ok: false, reason: "profile_response_invalid" };
   const profileUserId = profileJson["user_id"];
-  if (profileUserId === undefined || profileUserId === null) return { ok: false, reason: "profile_identity_missing" };
-  if ((typeof profileUserId !== "string" && typeof profileUserId !== "number") || !/^[0-9]{1,32}$/.test(String(profileUserId))) return { ok: false, reason: "profile_identity_malformed" };
-  if (String(profileUserId) !== externalAccountId) return { ok: false, reason: "profile_identity_mismatch" };
+  const identityComparison = logInstagramIdentityComparison(userId, profileUserId);
+  if (identityComparison.result === "missing") return { ok: false, reason: "profile_identity_missing" };
+  if (identityComparison.result === "malformed") return { ok: false, reason: "profile_identity_malformed" };
+  if (!identityComparison.identityMatch) return { ok: false, reason: "profile_identity_mismatch" };
   const rawAccountType = profileJson["account_type"];
   if (!isSupportedInstagramAccountType(rawAccountType)) return { ok: false, reason: "unsupported_account" };
   const accountType: InstagramAccountType = rawAccountType;
