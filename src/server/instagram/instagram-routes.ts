@@ -143,6 +143,8 @@ export const instagramCallbackRoute = (options: InstagramRouteOptions = {}) => a
       profile_lookup_network_error: "instagram_callback_error",
       profile_lookup_rejected: "instagram_callback_error",
       profile_response_invalid: "instagram_callback_error",
+      profile_identity_missing: "instagram_callback_error",
+      profile_identity_malformed: "instagram_callback_error",
       profile_identity_mismatch: "instagram_callback_error",
       unsupported_account: "instagram_unsupported_account",
       profile_username_invalid: "instagram_callback_error",

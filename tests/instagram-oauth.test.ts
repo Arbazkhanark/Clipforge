@@ -110,7 +110,7 @@ test("exchange failures report fixed stage reasons without retaining provider re
     { name: "profile network", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Promise.reject(new Error(TOKEN)), reason: "profile_lookup_network_error" },
     { name: "profile rejected", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : new Response("private provider body", { status: 500 }), reason: "profile_lookup_rejected" },
     { name: "profile malformed", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : new Response("not-json"), reason: "profile_response_invalid" },
-    { name: "profile identity mismatch", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "other", username: "ada.clips", account_type: "BUSINESS" }), reason: "profile_identity_mismatch" },
+    { name: "profile identity mismatch", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "1789002", username: "ada.clips", account_type: "BUSINESS" }), reason: "profile_identity_mismatch" },
     { name: "unsupported account", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "1789001", username: "ada.clips", account_type: "PERSONAL" }), reason: "unsupported_account" },
     { name: "invalid username", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? validLong() : Response.json({ user_id: "1789001", username: "bad username", account_type: "BUSINESS" }), reason: "profile_username_invalid" },
     { name: "invalid expiry", fetchImpl: async (input) => String(input).includes("api.instagram.com") ? validAuth() : String(input).includes("/access_token") ? Response.json({ access_token: TOKEN, expires_in: 1e100 }) : validProfile(), reason: "token_expiry_invalid" },
@@ -120,6 +120,30 @@ test("exchange failures report fixed stage reasons without retaining provider re
     assert.deepEqual(result, { ok: false, reason: entry.reason }, entry.name);
     assert.equal(JSON.stringify(result).includes(TOKEN), false, entry.name);
   }
+});
+
+test("Instagram Login profile identity requires matching user_id and never substitutes id", async () => {
+  const profileReply = (payload: unknown): typeof fetch => async (input) => {
+    const url = String(input);
+    if (url.includes("api.instagram.com")) return Response.json({ access_token: "short", user_id: "1789001", permissions: ["instagram_business_basic", "instagram_business_content_publish"] });
+    if (url.includes("/access_token")) return Response.json({ access_token: TOKEN, expires_in: 5_184_000 });
+    return Response.json(payload);
+  };
+
+  const missingUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ username: "ada.clips", account_type: "BUSINESS" }) });
+  assert.deepEqual(missingUserId, { ok: false, reason: "profile_identity_missing" });
+
+  const idOnly = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ id: "1789001", username: "ada.clips", account_type: "BUSINESS" }) });
+  assert.deepEqual(idOnly, { ok: false, reason: "profile_identity_missing" });
+
+  const malformedUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: {}, username: "ada.clips", account_type: "BUSINESS" }) });
+  assert.deepEqual(malformedUserId, { ok: false, reason: "profile_identity_malformed" });
+
+  const wrongUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: "1789002", username: "ada.clips", account_type: "BUSINESS" }) });
+  assert.deepEqual(wrongUserId, { ok: false, reason: "profile_identity_mismatch" });
+
+  const correctUserId = await exchangeInstagramCode({ config: CONFIG, code: "good", now: NOW, fetchImpl: profileReply({ user_id: "1789001", username: "ada.clips", account_type: "BUSINESS" }) });
+  assert.equal(correctUserId.ok, true);
 });
 
 test("start and callback require state and a session, and the stored account has no token", async () => {
@@ -277,7 +301,7 @@ test("callback emits fixed diagnostics for provider, code, exchange, and persist
   const malformedCode = await invoke("?code=bad%20code", async () => ({ ok: true, profile: profile() }));
   assert.deepEqual(malformedCode.entries, [{ event: "instagram_oauth_callback_rejected", reason: "authorization_code_missing_or_malformed" }]);
 
-  const providerReasons = ["authorization_code_exchange_network_error", "authorization_code_exchange_rejected", "authorization_code_response_invalid", "authorization_code_permissions_invalid", "long_lived_token_exchange_network_error", "long_lived_token_exchange_rejected", "long_lived_token_response_invalid", "profile_lookup_network_error", "profile_lookup_rejected", "profile_response_invalid", "profile_identity_mismatch", "unsupported_account", "profile_username_invalid", "token_expiry_invalid"] as const;
+  const providerReasons = ["authorization_code_exchange_network_error", "authorization_code_exchange_rejected", "authorization_code_response_invalid", "authorization_code_permissions_invalid", "long_lived_token_exchange_network_error", "long_lived_token_exchange_rejected", "long_lived_token_response_invalid", "profile_lookup_network_error", "profile_lookup_rejected", "profile_response_invalid", "profile_identity_missing", "profile_identity_malformed", "profile_identity_mismatch", "unsupported_account", "profile_username_invalid", "token_expiry_invalid"] as const;
   for (const reason of providerReasons) {
     const result = await invoke("?code=abc", async () => ({ ok: false, reason }));
     assert.deepEqual(result.entries, [{ event: "instagram_oauth_exchange_failed", reason }], reason);

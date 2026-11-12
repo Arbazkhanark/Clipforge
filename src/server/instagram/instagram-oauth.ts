@@ -42,6 +42,8 @@ export type InstagramExchangeFailure =
   | "profile_lookup_network_error"
   | "profile_lookup_rejected"
   | "profile_response_invalid"
+  | "profile_identity_missing"
+  | "profile_identity_malformed"
   | "profile_identity_mismatch"
   | "unsupported_account"
   | "profile_username_invalid"
@@ -181,7 +183,9 @@ export async function exchangeInstagramCode(args: { config: InstagramOAuthConfig
   if (!profileResponse.ok) return { ok: false, reason: "profile_lookup_rejected" };
   if (!profileJson) return { ok: false, reason: "profile_response_invalid" };
   const profileUserId = profileJson["user_id"];
-  if ((typeof profileUserId !== "string" && typeof profileUserId !== "number") || String(profileUserId) !== externalAccountId) return { ok: false, reason: "profile_identity_mismatch" };
+  if (profileUserId === undefined || profileUserId === null) return { ok: false, reason: "profile_identity_missing" };
+  if ((typeof profileUserId !== "string" && typeof profileUserId !== "number") || !/^[0-9]{1,32}$/.test(String(profileUserId))) return { ok: false, reason: "profile_identity_malformed" };
+  if (String(profileUserId) !== externalAccountId) return { ok: false, reason: "profile_identity_mismatch" };
   const rawAccountType = profileJson["account_type"];
   if (!isSupportedInstagramAccountType(rawAccountType)) return { ok: false, reason: "unsupported_account" };
   const accountType: InstagramAccountType = rawAccountType;
