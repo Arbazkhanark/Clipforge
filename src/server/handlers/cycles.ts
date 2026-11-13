@@ -110,14 +110,34 @@ export async function mixIntoCycle(ctx: RequestContext, rawInput: unknown): Prom
   const allGrants = [...grantsByCollection.values()].flat();
 
   const mixed = mixVideosIntoCycle({ userId, candidates, existingItems, grants: allGrants, planFeatures: plan.features, confirmedDuplicateMediaIds, now: ctx.now });
-  const newItems: CycleItem[] = mixed.accepted.map((draft) => ({
-    id: ctx.newId(), cycleId, cycleOwnerId: userId, mediaAssetId: draft.mediaAssetId, selectedRenderOutputId: null, sourceKind: draft.sourceKind, sourceCollectionId: draft.sourceCollectionId,
-    status: "upcoming", position: draft.position, version: 1, scheduledFor: null, captionText: "", captionSource: "none",
-    coverMediaId: null, coverIsCustom: false, coverState: "none", lockedBy: null, lockExpiresAt: null, reviewReason: null,
-  }));
-  if (newItems.length > 0 && !(await ctx.repo.addCycleItems(newItems))) throw conflict("This cycle changed while adding videos. Reload and try again.");
+  const unavailableCovers: MixRejection[] = [];
+  const newItems: CycleItem[] = [];
+  const expectedCollectionSettingsVersions: Record<string, number> = Object.create(null);
+  for (const draft of mixed.accepted) {
+    const collection = collectionCache.get(draft.sourceCollectionId);
+    const member = collection?.items?.find((item) => item.mediaAssetId === draft.mediaAssetId);
+    expectedCollectionSettingsVersions[draft.sourceCollectionId] = collection?.settingsVersion ?? 1;
+    const captionMode = collection?.captionMode ?? "individual";
+    const coverMode = collection?.coverMode ?? "individual";
+    const captionText = captionMode === "shared" ? collection?.sharedCaptionText ?? "" : member?.captionText ?? "";
+    const coverMediaId = coverMode === "shared" ? collection?.sharedCoverMediaId ?? null : member?.coverMediaId ?? null;
+    if (coverMediaId) {
+      const cover = await ctx.repo.getMedia(coverMediaId);
+      if (!cover || cover.ownerId !== collection?.ownerId || cover.kind !== "image" || cover.status !== "active") {
+        unavailableCovers.push({ mediaAssetId: draft.mediaAssetId, reason: "This collection's saved cover is no longer available." });
+        continue;
+      }
+    }
+    newItems.push({
+      id: ctx.newId(), cycleId, cycleOwnerId: userId, mediaAssetId: draft.mediaAssetId, selectedRenderOutputId: null, sourceKind: draft.sourceKind, sourceCollectionId: draft.sourceCollectionId,
+      status: "upcoming", position: draft.position, version: 1, scheduledFor: null, captionText,
+      captionSource: captionText.length === 0 ? "none" : captionMode === "shared" ? "bulk" : "individual",
+      coverMediaId, coverIsCustom: coverMediaId !== null, coverState: coverMediaId ? "saved_internally" : "none", lockedBy: null, lockExpiresAt: null, reviewReason: null,
+    });
+  }
+  if (newItems.length > 0 && !(await ctx.repo.addCycleItems(newItems, expectedCollectionSettingsVersions))) throw conflict("This cycle or its collection settings changed while adding videos. Reload and try again.");
   await ctx.repo.appendAudit({ actorId: userId, action: "cycle.videos_mixed", entityType: "PublishingCycle", entityId: cycleId, metadata: { added: newItems.length, rejected: mixed.rejected.length + unavailable.length } });
-  return { added: newItems.length, rejected: [...unavailable, ...mixed.rejected] };
+  return { added: newItems.length, rejected: [...unavailable, ...mixed.rejected, ...unavailableCovers] };
 }
 
 export async function unmixFromCycle(ctx: RequestContext, rawInput: unknown): Promise<{ removedItemIds: string[]; blocked: { itemId: string; reason: string }[] }> {

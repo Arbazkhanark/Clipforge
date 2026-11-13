@@ -1,6 +1,6 @@
 // The concrete form routes: how each HTML form's fields become a handler input, and where the user goes next.
 import { bulkUpdateCaptions, bulkUpdateCovers, type BulkUpdateReport } from "./handlers/captions-covers.ts";
-import { createCollection, deleteCollection, replaceCollectionMedia, setCollectionArchived, updateCollection } from "./handlers/collections.ts";
+import { createCollection, deleteCollection, replaceCollectionMedia, setCollectionArchived, updateCollection, updateCollectionItemSettings, updateCollectionSharedSettings } from "./handlers/collections.ts";
 import { createGrant, decideCollectionAccessRequest, requestCollectionAccess, revokeCollectionShareLink, revokeGrant, updateCollectionShareLink } from "./handlers/sharing.ts";
 import { changeCycleStatus, createCycle, mixIntoCycle, saveCycleSchedule, selectCycleItemRenderOutput, setCycleRepeat, startPublishingCycle, unmixFromCycle } from "./handlers/cycles.ts";
 import { editorCandidateFromFields } from "../lib/domain/editing-settings.ts";
@@ -24,9 +24,23 @@ const bulkCounts = (r: BulkUpdateReport) => ({ updated: r.summary.updated, skipp
 
 export const createCollectionForm = formRoute({
   handler: createCollection,
-  toInput: (f) => ({ name: f.get("name") ?? "", description: f.get("description") ?? "", visibility: f.get("visibility") ?? "private", mediaIds: f.getAll("mediaIds") }),
+  toInput: (f) => ({ name: f.get("name") ?? "", description: f.get("description") ?? "", visibility: f.get("visibility") ?? "private", mediaIds: f.getAll("mediaIds"), itemSettings: f.get("itemSettings") ?? "", captionMode: f.get("captionMode") ?? "individual", sharedCaptionText: f.get("sharedCaptionText") ?? "", coverMode: f.get("coverMode") ?? "individual", sharedCoverMediaId: f.get("sharedCoverMediaId") ?? "", confirmSharedSettings: f.get("confirmSharedSettings") === "yes" }),
   success: (r) => ({ path: `/collections/${r.collectionId}`, code: "collection_created" }),
   failurePath: () => "/collections",
+});
+
+export const collectionItemSettingsForm = formRoute({
+  handler: updateCollectionItemSettings,
+  toInput: (f) => ({ collectionId: f.get("collectionId") ?? "", mediaAssetId: f.get("mediaAssetId") ?? "", captionText: f.get("captionText") ?? "", coverMediaId: f.get("coverMediaId") ?? "", expectedVersion: Number(f.get("expectedVersion")) }),
+  success: (_r, f) => ({ path: collectionPath(f), code: "collection_video_settings_saved" }),
+  failurePath: collectionPath,
+});
+
+export const collectionSharedSettingsForm = formRoute({
+  handler: updateCollectionSharedSettings,
+  toInput: (f) => ({ collectionId: f.get("collectionId") ?? "", expectedVersion: Number(f.get("expectedVersion")), captionMode: f.get("captionMode") ?? "individual", sharedCaptionText: f.get("sharedCaptionText") ?? "", coverMode: f.get("coverMode") ?? "individual", sharedCoverMediaId: f.get("sharedCoverMediaId") ?? "", confirmSharedSettings: f.get("confirmSharedSettings") === "yes" }),
+  success: (r) => ({ path: `/collections/${r.collectionId}`, code: "collection_shared_settings_saved", counts: { updated: r.affected } }),
+  failurePath: collectionPath,
 });
 
 export const updateCollectionForm = formRoute({

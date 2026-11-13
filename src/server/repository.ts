@@ -298,7 +298,7 @@ export interface Repository {
 
   getCycleItems(cycleId: string): Promise<CycleItem[]>;
   /** Adds items only while the parent cycle is still editable; serializes against cycle completion. */
-  addCycleItems(items: CycleItem[]): Promise<boolean>;
+  addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions?: Record<string, number>): Promise<boolean>;
   saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]>;
   /** Explicit, owner/source-checked output selection for a versioned item in an owned draft cycle. */
   selectCycleItemRenderOutput(input: SelectCycleItemRenderOutputInput): Promise<boolean>;
@@ -344,6 +344,8 @@ export interface Repository {
    * Nothing is written in those cases.
    */
   createCollection(collection: VideoCollection): Promise<boolean>;
+  saveCollectionItemSettings(input: { collectionId: string; ownerId: string; mediaAssetId: string; captionText: string; coverMediaId: string | null; expectedVersion: number }): Promise<boolean>;
+  saveCollectionSharedSettings(input: { collectionId: string; ownerId: string; actorId: string; affected: number; expectedVersion: number; captionMode?: "individual" | "shared"; sharedCaptionText?: string | null; coverMode?: "individual" | "shared"; sharedCoverMediaId?: string | null }): Promise<boolean>;
   /** Changes the name, description, visibility, and archived flag. Returns false when the collection does not exist. Items stay as they are. */
   updateCollection(collectionId: string, details: { name: string; description: string | null; visibility: CollectionVisibility; archived: boolean }): Promise<boolean>;
   /**

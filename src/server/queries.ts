@@ -99,22 +99,23 @@ function sortCollections(list: VideoCollection[], sort: CollectionSort): VideoCo
   return [...list].sort(sort === "name" ? byName : sort === "oldest" ? byTime : (a, b) => timeOnly(b, a) || idOnly(a, b));
 }
 
-export async function getCollectionsOverview(ctx: RequestContext, requested?: unknown): Promise<{ owned: CollectionCard[]; sharedWithMe: CollectionCard[]; accessRequests: { id: string; collectionId: string; requestedCapabilities: Capability[]; status: "pending" | "approved" | "rejected"; createdAt: Date; decidedAt: Date | null }[]; search: string; sort: CollectionSort; filtered: boolean }> {
+export async function getCollectionsOverview(ctx: RequestContext, requested?: unknown): Promise<{ owned: CollectionCard[]; sharedWithMe: CollectionCard[]; accessRequests: { id: string; collectionId: string; requestedCapabilities: Capability[]; status: "pending" | "approved" | "rejected"; createdAt: Date; decidedAt: Date | null }[]; libraryChoices: MediaCard[]; search: string; sort: CollectionSort; filtered: boolean }> {
   const userId = requireUser(ctx);
   const query = readCollectionListQuery(requested);
   const needle = query.search.toLocaleLowerCase();
   const matches = (collection: VideoCollection) => needle.length === 0 || (collection.name ?? "").toLocaleLowerCase().includes(needle);
   const [owned, shared] = await Promise.all([ctx.repo.listCollectionsForOwner(userId), ctx.repo.listCollectionsSharedWith(userId, ctx.now)]);
   const accessRequests = await ctx.repo.listCollectionAccessRequestsForRequester(userId);
+  const libraryChoices = (await ctx.repo.listMediaForOwner(userId, { limit: 200, offset: 0, sort: "name" })).items.map(toMediaCard);
   return {
     owned: await Promise.all(sortCollections(owned.filter(matches), query.sort).map((c) => toCollectionCard(ctx, userId, c))),
     sharedWithMe: await Promise.all(sortCollections(shared.filter(matches), query.sort).map((c) => toCollectionCard(ctx, userId, c))),
-    accessRequests: accessRequests.map((request) => ({ id: request.id, collectionId: request.collectionId, requestedCapabilities: request.requestedCapabilities, status: request.status, createdAt: request.createdAt, decidedAt: request.decidedAt })),
+    accessRequests: accessRequests.map((request) => ({ id: request.id, collectionId: request.collectionId, requestedCapabilities: request.requestedCapabilities, status: request.status, createdAt: request.createdAt, decidedAt: request.decidedAt })), libraryChoices,
     search: query.search, sort: query.sort, filtered: query.filtered,
   };
 }
 
-export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; permissions: { canUseInCycle: boolean; canImport: boolean; canRequestImport?: boolean; canDownload: boolean; isOwner: boolean }; importJobs?: { id: string; sourceMediaId: string; resultMediaAssetId: string; status: import("./repository.ts").MediaImportStatus; failureReason: string | null; createdAt: Date; updatedAt: Date }[]; pendingAccessRequests?: { id: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[]; shareLinks?: import("./repository.ts").CollectionShareLinkSummary[]; sharingManagement?: { grants: { granteeId: string; capabilities: Capability[]; status: "active" | "revoked"; expiresAt: Date | null; grantedById: string | null }[]; activeRecipients: number; recipientLimit: number; expiringGrants: boolean; delegatedManagement: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
+export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; itemSettings: { mediaAssetId: string; captionText: string; coverMediaId: string | null; version: number }[]; settingsVersion: number; captionMode: "individual" | "shared"; sharedCaptionText: string; coverMode: "individual" | "shared"; sharedCoverMediaId: string | null; coverChoices: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canRequestImport?: boolean; canDownload: boolean; isOwner: boolean }; importJobs?: { id: string; sourceMediaId: string; resultMediaAssetId: string; status: import("./repository.ts").MediaImportStatus; failureReason: string | null; createdAt: Date; updatedAt: Date }[]; pendingAccessRequests?: { id: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[]; shareLinks?: import("./repository.ts").CollectionShareLinkSummary[]; sharingManagement?: { grants: { granteeId: string; capabilities: Capability[]; status: "active" | "revoked"; expiresAt: Date | null; grantedById: string | null }[]; activeRecipients: number; recipientLimit: number; expiringGrants: boolean; delegatedManagement: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
 
 const COLLECTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -147,6 +148,7 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
   const media = members.filter((m) => videoQuery.search.length === 0 || mediaMatchesSearch(m, videoQuery.search)).sort((a, b) => compareMedia(videoQuery.sort, a, b));
   const ownCycles = capabilities.has("use_in_cycle") ? await ctx.repo.listCyclesForOwner(userId) : [];
   const library = collection.ownerId === userId ? await ctx.repo.listMediaForOwner(userId, { limit: 200, offset: 0, sort: "name" }) : { items: [], total: 0 };
+  const coverChoices = library.items.filter((item) => item.kind === "image" && item.status === "active").map(toMediaCard);
   const directImport = collection.ownerId !== userId && grants.some((grant) => grant.granteeId === userId && grant.status === "active" && grant.capabilities.includes("import_copy") && (grant.expiresAt === null || grant.expiresAt > ctx.now));
   const importJobs = directImport
     ? (await ctx.repo.listMediaImportJobsForOwner(userId)).filter((job) => job.sourceCollectionId === collection.id).map((job) => ({ id: job.id, sourceMediaId: job.sourceMediaId, resultMediaAssetId: job.resultMediaAssetId, status: job.status, failureReason: job.failureReason, createdAt: job.createdAt, updatedAt: job.updatedAt }))
@@ -155,6 +157,13 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
     cycleChoices: ownCycles.filter((c) => c.status === "draft" || c.status === "running" || c.status === "paused").map((c) => ({ id: c.id, name: c.name })),
     libraryChoices: library.items.map(toMediaCard),
     libraryTruncated: library.total > library.items.length,
+    itemSettings: collection.ownerId === userId ? collection.items ?? collection.mediaIds.map((mediaAssetId) => ({ mediaAssetId, captionText: "", coverMediaId: null, version: 1 })) : [],
+    settingsVersion: collection.ownerId === userId ? collection.settingsVersion ?? 1 : 1,
+    captionMode: collection.ownerId === userId ? collection.captionMode ?? "individual" : "individual",
+    sharedCaptionText: collection.ownerId === userId ? collection.sharedCaptionText ?? "" : "",
+    coverMode: collection.ownerId === userId ? collection.coverMode ?? "individual" : "individual",
+    sharedCoverMediaId: collection.ownerId === userId ? collection.sharedCoverMediaId ?? null : null,
+    coverChoices,
     collection: await toCollectionCard(ctx, userId, collection), videos: media.map(toMediaCard), memberIds: members.map((m) => m.id),
     videoSearch: videoQuery.search, videoSort: videoQuery.sort, videoFiltered: videoQuery.filtered,
     permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canDownload: capabilities.has("download"), isOwner: collection.ownerId === userId },
@@ -186,6 +195,7 @@ export async function getSharedCollectionDetail(ctx: RequestContext, rawToken: s
   collectionCard.capabilities = [...capabilities];
   return {
     collection: collectionCard, videos: videos.map(toMediaCard), memberIds: members.map((media) => media.id),
+    itemSettings: [], settingsVersion: 1, captionMode: "individual", sharedCaptionText: "", coverMode: "individual", sharedCoverMediaId: null, coverChoices: [],
     permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canRequestImport: false, canDownload: capabilities.has("download"), isOwner: false },
     cycleChoices: ownCycles.filter((cycle) => cycle.status === "draft" || cycle.status === "running" || cycle.status === "paused").map((cycle) => ({ id: cycle.id, name: cycle.name })),
     libraryChoices: [], videoSearch: videoQuery.search, videoSort: videoQuery.sort, videoFiltered: videoQuery.filtered,

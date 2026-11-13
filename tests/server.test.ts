@@ -427,6 +427,60 @@ test("mix: Creator may mix owned + shared (with permission); source kinds and ow
   assert.ok(items.every((i) => i.cycleOwnerId === "bob" && i.status === "upcoming" && i.version === 1));
 });
 
+test("cycle import snapshots effective collection caption and cover settings; cycle overrides stay isolated", async () => {
+  const { repo, ctxFor } = mixSetup("pro");
+  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob" }));
+  repo.media.set("coverA", makeMedia({ id: "coverA", ownerId: "bob", kind: "image" }));
+  repo.media.set("coverB", makeMedia({ id: "coverB", ownerId: "bob", kind: "image" }));
+  repo.collections.set("mine", makeCollection({ id: "mine", ownerId: "bob", mediaIds: ["own1", "own2"], items: [
+    { mediaAssetId: "own1", captionText: "Individual A", coverMediaId: "coverA", version: 1 },
+    { mediaAssetId: "own2", captionText: "Individual B", coverMediaId: "coverB", version: 1 },
+  ] }));
+  const result = await mixIntoCycle(ctxFor("bob"), { cycleId: "cycle1", videos: [{ mediaAssetId: "own1", collectionId: "mine" }, { mediaAssetId: "own2", collectionId: "mine" }] });
+  assert.equal(result.added, 2);
+  const cycleItems = [...repo.items.values()].sort((a, b) => a.position - b.position);
+  assert.deepEqual(cycleItems.map((item) => [item.captionText, item.coverMediaId]), [["Individual A", "coverA"], ["Individual B", "coverB"]]);
+  const collectionBeforeOverride = await repo.getCollection("mine");
+  const target = cycleItems[0]!;
+  await bulkUpdateCaptions(ctxFor("bob"), { cycleId: "cycle1", target: { kind: "selected", itemIds: [target.id] }, caption: "Cycle-only copy", overwriteCustomConfirmed: true, expectedVersions: { [target.id]: target.version } });
+  const latest = repo.items.get(target.id)!;
+  await bulkUpdateCovers(ctxFor("bob"), { cycleId: "cycle1", target: { kind: "selected", itemIds: [target.id] }, coverMediaId: "coverB", overwriteCustomConfirmed: true, expectedVersions: { [target.id]: latest.version } });
+  assert.deepEqual((await repo.getCollection("mine"))?.items?.map((item) => [item.captionText, item.coverMediaId]), collectionBeforeOverride?.items?.map((item) => [item.captionText, item.coverMediaId]));
+  assert.equal(repo.items.get(target.id)?.captionText, "Cycle-only copy");
+  assert.equal(repo.items.get(target.id)?.coverMediaId, "coverB");
+});
+
+test("cycle import resolves shared collection defaults without replacing individual saved settings", async () => {
+  const { repo, ctxFor } = mixSetup("pro");
+  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob" }));
+  repo.media.set("coverA", makeMedia({ id: "coverA", ownerId: "bob", kind: "image" }));
+  repo.collections.set("mine", makeCollection({ id: "mine", ownerId: "bob", mediaIds: ["own1", "own2"], captionMode: "shared", sharedCaptionText: "Shared caption", coverMode: "shared", sharedCoverMediaId: "coverA", items: [
+    { mediaAssetId: "own1", captionText: "Preserved individual A", coverMediaId: null, version: 1 },
+    { mediaAssetId: "own2", captionText: "Preserved individual B", coverMediaId: null, version: 1 },
+  ] }));
+  assert.equal((await mixIntoCycle(ctxFor("bob"), { cycleId: "cycle1", videos: [{ mediaAssetId: "own1", collectionId: "mine" }, { mediaAssetId: "own2", collectionId: "mine" }] })).added, 2);
+  const items = [...repo.items.values()].sort((a, b) => a.position - b.position);
+  assert.deepEqual(items.map((item) => [item.captionText, item.captionSource, item.coverMediaId]), [
+    ["Shared caption", "bulk", "coverA"], ["Shared caption", "bulk", "coverA"],
+  ]);
+  assert.deepEqual(repo.collections.get("mine")?.items?.map((item) => [item.captionText, item.coverMediaId]), [["Preserved individual A", null], ["Preserved individual B", null]]);
+});
+
+test("cycle import rejects a collection-settings race before inserting stale snapshots", async () => {
+  const { repo, ctxFor } = mixSetup("pro");
+  const current = repo.collections.get("mine")!;
+  repo.collections.set("mine", { ...current, settingsVersion: 4 });
+  const addCycleItems = repo.addCycleItems.bind(repo);
+  repo.addCycleItems = async (items, expectedVersions) => {
+    const latest = repo.collections.get("mine")!;
+    repo.collections.set("mine", { ...latest, settingsVersion: 5 });
+    return addCycleItems(items, expectedVersions);
+  };
+  const error = await errorOf(mixIntoCycle(ctxFor("bob"), { cycleId: "cycle1", videos: [{ mediaAssetId: "own1", collectionId: "mine" }] }));
+  assert.equal(error.status, 409);
+  assert.equal(repo.items.size, 0, "no cycle item is inserted from the stale settings snapshot");
+});
+
 test("mix: Free plan cannot use shared videos; no permission = rejected without revealing why; unknown ids look the same", async () => {
   const free = mixSetup("free");
   free.repo.grants.push(makeGrant({ granteeId: "bob" }));

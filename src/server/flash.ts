@@ -35,6 +35,8 @@ export const FLASH_NOTICES = {
   collection_created: "Collection saved in the database.",
   collection_updated: "Collection details saved.",
   collection_media_saved: "The videos in this collection were saved. The original files were not deleted.",
+  collection_video_settings_saved: "This video's collection settings were saved. Its source media was not changed.",
+  collection_shared_settings_saved: "Collection defaults were saved. Individual settings remain intact; cycle edits stay separate.",
   collection_archived: "Collection archived. The videos are still in your library.",
   collection_restored: "Collection restored.",
   collection_deleted: "Collection deleted. The videos are still in your library and in any other collection.",

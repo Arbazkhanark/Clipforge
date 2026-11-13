@@ -71,6 +71,7 @@ export function CycleEditor({ detail, timeZone }: { detail: CycleDetail; timeZon
         <input type="hidden" name="cycleId" value={detail.cycle.id} />
         {editableItems.map((item) => <input key={item.id} type="hidden" name={`version.${item.id}`} value={item.version} />)}
         <CycleItemsTable items={detail.items} mediaTitles={detail.mediaTitles} timeZone={timeZone} />
+        <p className="muted">Collection captions and covers were copied into these cycle items when they were added. Changes below are cycle-only and never update the source collection.</p>
         <fieldset>
           <legend>Apply to</legend>
           <label><input type="radio" name="scope" value="selected" defaultChecked /> Only the videos I ticked</label>{" "}

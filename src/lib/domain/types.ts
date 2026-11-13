@@ -46,6 +46,20 @@ export interface VideoCollection {
   name?: string;
   description?: string;
   createdAt?: Date;
+  /** Older in-memory fixtures default to individual settings. */
+  captionMode?: "individual" | "shared";
+  sharedCaptionText?: string | null;
+  coverMode?: "individual" | "shared";
+  sharedCoverMediaId?: string | null;
+  settingsVersion?: number;
+  items?: CollectionItemSettings[];
+}
+
+export interface CollectionItemSettings {
+  mediaAssetId: string;
+  captionText: string;
+  coverMediaId: string | null;
+  version: number;
 }
 
 /**

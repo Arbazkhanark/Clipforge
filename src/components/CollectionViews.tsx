@@ -286,10 +286,12 @@
 
 
 
-import type { CollectionCard, CollectionDetail } from "../server/queries.ts";
+import type { CollectionCard, CollectionDetail, MediaCard } from "../server/queries.ts";
 import type { CollectionSort } from "../server/library-query.ts";
 import type { Capability } from "../lib/domain/types.ts";
 import { Thumbnail } from "./MediaTable.tsx";
+import { CollectionCreateForm } from "./CollectionCreateForm.tsx";
+import { CollectionCaptionCoverEditor } from "./CollectionCaptionCoverEditor.tsx";
 import {
   CAPABILITY_LABELS,
   VISIBILITY_LABELS,
@@ -438,6 +440,7 @@ export function CollectionsOverviewView({
   search = "",
   sort = "newest",
   filtered = false,
+  libraryChoices = [],
 }: {
   owned: CollectionCard[];
   sharedWithMe: CollectionCard[];
@@ -445,6 +448,7 @@ export function CollectionsOverviewView({
   search?: string;
   sort?: CollectionSort;
   filtered?: boolean;
+  libraryChoices?: MediaCard[];
 }) {
   return (
     <main className="collections-page">
@@ -526,43 +530,7 @@ export function CollectionsOverviewView({
           </div>
         </div>
 
-        <form method="post" action="/api/forms/collection-create" className="collection-form-grid">
-          <label className="collection-form-field">
-            <span>Collection name <strong>*</strong></span>
-            <input
-              type="text"
-              name="name"
-              required
-              maxLength={100}
-              placeholder="e.g. Instagram Reels"
-            />
-          </label>
-
-          <label className="collection-form-field">
-            <span>Description</span>
-            <input
-              type="text"
-              name="description"
-              maxLength={500}
-              placeholder="What is this collection about?"
-            />
-          </label>
-
-          <label className="collection-form-field">
-            <span>Visibility</span>
-            <select name="visibility" defaultValue="private">
-              <option value="private">Private — only you</option>
-              <option value="link">Shared by link</option>
-              <option value="public_view">Public — view only</option>
-            </select>
-          </label>
-
-          <div className="collection-form-submit">
-            <button type="submit" className="collection-primary-button">
-              Create collection
-            </button>
-          </div>
-        </form>
+        <CollectionCreateForm libraryChoices={libraryChoices} />
       </section>
 
       <section className="collection-panel">
@@ -1523,6 +1491,7 @@ export function CollectionDetailView({ detail }: { detail: CollectionDetail }) {
           <SharingManagement detail={detail} />
           <ShareLinks detail={detail} />
           <PendingAccessRequests detail={detail} />
+          <CollectionCaptionCoverEditor detail={detail} />
           <CollectionSettings detail={detail} />
         </div>
       )}

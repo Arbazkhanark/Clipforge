@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createCollection, deleteCollection, replaceCollectionMedia, setCollectionArchived, updateCollection } from "../src/server/handlers/collections.ts";
+import { createCollection, deleteCollection, replaceCollectionMedia, setCollectionArchived, updateCollection, updateCollectionItemSettings, updateCollectionSharedSettings } from "../src/server/handlers/collections.ts";
 import { AppError } from "../src/server/errors.ts";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import type { RequestContext } from "../src/server/context.ts";
@@ -22,6 +22,7 @@ test("collection writes use the signed-in user and hide someone else's collectio
   const created = await createCollection(ann, { name: "Campaign", description: "Notes", visibility: "private", mediaIds: ["mine"] });
   assert.equal(created.collectionId, "col-1");
   assert.equal((await repo.getCollection("col-1"))?.ownerId, "ann");
+  assert.deepEqual([(await repo.getCollection("col-1"))?.captionMode, (await repo.getCollection("col-1"))?.coverMode, (await repo.getCollection("col-1"))?.items?.[0]?.captionText, (await repo.getCollection("col-1"))?.items?.[0]?.coverMediaId], ["individual", "individual", "", null]);
   await assert.rejects(() => createCollection(ann, { name: "Nope", visibility: "private", mediaIds: ["theirs"] }), (error: unknown) => error instanceof AppError && error.status === 404);
   await assert.rejects(() => updateCollection(context(repo, "bob"), { collectionId: "col-1", name: "Stolen", visibility: "public_view", archived: false }), (error: unknown) => error instanceof AppError && error.status === 404);
   assert.equal((await repo.getCollection("col-1"))?.name, "Campaign");
@@ -47,6 +48,79 @@ test("collection writes use the signed-in user and hide someone else's collectio
   assert.equal(await repo.getCollection("col-1"), null);
   assert.deepEqual((await repo.getCollection(second.collectionId))?.mediaIds, ["mine"]);
   assert.equal((await repo.getMedia("mine"))?.status, "active");
+});
+
+test("collection item captions and covers remain independent while shared defaults are applied and switched", async () => {
+  const repo = new MemoryRepository();
+  for (const [id, kind] of [["video-a", "video"], ["video-b", "video"], ["cover-a", "image"], ["cover-b", "image"]] as const) {
+    await repo.addMediaIfStorageWithin(makeMedia({ id, ownerId: "ann", kind }), { storageKey: `k/${id}`, thumbnailKey: null }, 10_000);
+  }
+  const ann = context(repo, "ann");
+  const created = await createCollection(ann, { name: "Launch", visibility: "private", mediaIds: ["video-a", "video-b"], itemSettings: [
+    { mediaAssetId: "video-a", captionText: "Caption A", coverMediaId: "cover-a" },
+    { mediaAssetId: "video-b", captionText: "Caption B", coverMediaId: "cover-b" },
+  ] });
+  const initial = await repo.getCollection(created.collectionId);
+  assert.deepEqual(initial?.items?.map((item) => [item.mediaAssetId, item.captionText, item.coverMediaId]), [["video-a", "Caption A", "cover-a"], ["video-b", "Caption B", "cover-b"]]);
+
+  await assert.rejects(() => updateCollectionSharedSettings(ann, { collectionId: created.collectionId, expectedVersion: 1, captionMode: "shared", sharedCaptionText: "Same caption", coverMode: "shared", sharedCoverMediaId: "cover-a", confirmSharedSettings: false }), (error: unknown) => error instanceof AppError && error.status === 422);
+  const sharedWrites = await Promise.allSettled([
+    updateCollectionSharedSettings(ann, { collectionId: created.collectionId, expectedVersion: 1, captionMode: "shared", sharedCaptionText: "Same caption", coverMode: "shared", sharedCoverMediaId: "cover-a", confirmSharedSettings: true }),
+    updateCollectionSharedSettings(ann, { collectionId: created.collectionId, expectedVersion: 1, captionMode: "shared", sharedCaptionText: "Racing caption", coverMode: "shared", sharedCoverMediaId: "cover-b", confirmSharedSettings: true }),
+  ]);
+  assert.equal(sharedWrites.filter((result) => result.status === "fulfilled").length, 1, "only one bulk write may win the collection version");
+  assert.equal(sharedWrites.filter((result) => result.status === "rejected").length, 1);
+  const bulk = sharedWrites.find((result): result is PromiseFulfilledResult<{ collectionId: string; affected: number }> => result.status === "fulfilled")!.value;
+  assert.equal(bulk.affected, 2);
+  const shared = await repo.getCollection(created.collectionId);
+  assert.equal(shared?.captionMode, "shared"); assert.ok(["Same caption", "Racing caption"].includes(shared?.sharedCaptionText ?? ""));
+  assert.equal(shared?.coverMode, "shared"); assert.ok(["cover-a", "cover-b"].includes(shared?.sharedCoverMediaId ?? ""));
+  assert.deepEqual(shared?.items?.map((item) => [item.captionText, item.coverMediaId]), [["Caption A", "cover-a"], ["Caption B", "cover-b"]], "shared defaults must not overwrite individual values");
+
+  const savedSharedCaption = shared?.sharedCaptionText;
+  const savedSharedCover = shared?.sharedCoverMediaId;
+  await updateCollectionSharedSettings(ann, { collectionId: created.collectionId, expectedVersion: 2, captionMode: "individual", sharedCaptionText: "unconfirmed dormant change", coverMode: "individual", sharedCoverMediaId: "unselected-cover", confirmSharedSettings: false });
+  const individual = await repo.getCollection(created.collectionId);
+  assert.equal(individual?.captionMode, "individual"); assert.equal(individual?.coverMode, "individual");
+  assert.equal(individual?.sharedCaptionText, savedSharedCaption); assert.equal(individual?.sharedCoverMediaId, savedSharedCover, "inactive values are preserved without accepting unconfirmed hidden-field changes");
+  assert.deepEqual(individual?.items?.map((item) => [item.captionText, item.coverMediaId]), [["Caption A", "cover-a"], ["Caption B", "cover-b"]]);
+  assert.ok(repo.audit.some((entry) => entry.action === "collection.shared_settings_applied" && (entry.metadata as Record<string, unknown>)?.["affected"] === 2));
+});
+
+test("collection settings validate image ownership and reject stale concurrent item updates", async () => {
+  const repo = new MemoryRepository();
+  for (const [id, ownerId, kind] of [["video", "ann", "video"], ["owned-image", "ann", "image"], ["other-image", "bob", "image"]] as const) await repo.addMediaIfStorageWithin(makeMedia({ id, ownerId, kind }), { storageKey: `k/${id}`, thumbnailKey: null }, 10_000);
+  const ann = context(repo, "ann");
+  const { collectionId } = await createCollection(ann, { name: "One", visibility: "private", mediaIds: ["video"] });
+  await assert.rejects(() => updateCollectionItemSettings(ann, { collectionId, mediaAssetId: "video", captionText: "No", coverMediaId: "other-image", expectedVersion: 1 }), (error: unknown) => error instanceof AppError && error.status === 422);
+  await assert.rejects(() => updateCollectionItemSettings(ann, { collectionId, mediaAssetId: "video", captionText: "No", coverMediaId: "video", expectedVersion: 1 }), (error: unknown) => error instanceof AppError && error.status === 422);
+  const concurrent = await Promise.allSettled([
+    updateCollectionItemSettings(ann, { collectionId, mediaAssetId: "video", captionText: "First", coverMediaId: "owned-image", expectedVersion: 1 }),
+    updateCollectionItemSettings(ann, { collectionId, mediaAssetId: "video", captionText: "Second", coverMediaId: "owned-image", expectedVersion: 1 }),
+  ]);
+  assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(concurrent.filter((result) => result.status === "rejected" && result.reason instanceof AppError && result.reason.status === 409).length, 1);
+  assert.ok(["First", "Second"].includes((await repo.getCollection(collectionId))?.items?.[0]?.captionText ?? ""));
+  assert.deepEqual((await repo.getCollection(collectionId))?.items?.map((item) => [item.coverMediaId, item.version]), [["owned-image", 2]]);
+});
+
+test("collection membership edits preserve retained item settings and default newly added videos", async () => {
+  const repo = new MemoryRepository();
+  for (const id of ["video-a", "video-b", "video-c", "cover"]) await repo.addMediaIfStorageWithin(makeMedia({ id, ownerId: "ann", title: id === "video-a" ? "Original title" : id, kind: id === "cover" ? "image" : "video" }), { storageKey: `k/${id}`, thumbnailKey: null }, 10_000);
+  const ann = context(repo, "ann");
+  const { collectionId } = await createCollection(ann, { name: "Preserve settings", visibility: "private", mediaIds: ["video-a", "video-b"], itemSettings: [
+    { mediaAssetId: "video-a", captionText: "Keep this", coverMediaId: "cover" },
+    { mediaAssetId: "video-b", captionText: "Remove this", coverMediaId: null },
+  ] });
+  const beforeVersion = (await repo.getCollection(collectionId))?.settingsVersion;
+  await replaceCollectionMedia(ann, { collectionId, mediaIds: ["video-a", "video-c"] });
+  const updated = await repo.getCollection(collectionId);
+  assert.deepEqual(updated?.items?.map((item) => [item.mediaAssetId, item.captionText, item.coverMediaId, item.version]), [
+    ["video-a", "Keep this", "cover", 1],
+    ["video-c", "", null, 1],
+  ]);
+  assert.equal(updated?.settingsVersion, (beforeVersion ?? 1) + 1);
+  assert.equal((await repo.getMedia("video-a"))?.title, "Original title", "collection edits do not mutate original media metadata");
 });
 
 test("collection owner sees safe sharing-management data; a recipient does not receive the management DTO", async () => {

@@ -129,6 +129,11 @@ enum CaptionChangeSource {
   individual
 }
 
+enum CollectionSettingMode {
+  individual
+  shared
+}
+
 enum RepeatBehavior {
   never
   ask
@@ -765,6 +770,8 @@ model MediaAsset {
 
   derivatives     MediaDerivative[]
   collectionItems CollectionItem[]
+  collectionItemsWithCover CollectionItem[] @relation("CollectionItemCover")
+  collectionsWithSharedCover VideoCollection[] @relation("CollectionSharedCover")
   cycleItems      CycleItem[]       @relation("CycleItemMedia")
   coverForItems   CycleItem[]       @relation("CycleItemCover")
   importJobs      MediaImportJob[]  @relation("ImportSource")
@@ -805,6 +812,12 @@ model VideoCollection {
   description String?
   visibility  CollectionVisibility @default(private)
   archived    Boolean              @default(false)
+  captionMode CollectionSettingMode @default(individual)
+  sharedCaptionText String?
+  coverMode CollectionSettingMode @default(individual)
+  sharedCoverMediaId String?
+  sharedCoverMedia MediaAsset? @relation("CollectionSharedCover", fields: [sharedCoverMediaId], references: [id], onDelete: SetNull)
+  settingsVersion Int @default(1)
   createdAt   DateTime             @default(now())
 
   items          CollectionItem[]
@@ -813,6 +826,7 @@ model VideoCollection {
   accessRequests CollectionAccessRequest[]
 
   @@index([ownerId, archived])
+  @@index([sharedCoverMediaId])
 }
 
 model CollectionItem {
@@ -822,10 +836,15 @@ model CollectionItem {
   mediaAssetId String
   mediaAsset   MediaAsset      @relation(fields: [mediaAssetId], references: [id], onDelete: Restrict)
   position     Int
+  captionText String @default("")
+  coverMediaId String?
+  coverMedia MediaAsset? @relation("CollectionItemCover", fields: [coverMediaId], references: [id], onDelete: SetNull)
+  version Int @default(1)
   addedAt      DateTime        @default(now())
 
   @@unique([collectionId, mediaAssetId])
   @@index([collectionId, position])
+  @@index([coverMediaId])
 }
 
 model CollectionShareLink {

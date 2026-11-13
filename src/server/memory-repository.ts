@@ -923,7 +923,7 @@ export class MemoryRepository implements Repository {
     await tick(); // queue order, like ORDER BY position, id
     return [...this.items.values()].filter((i) => i.cycleId === cycleId).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id)).map(clone);
   }
-  async addCycleItems(items: CycleItem[]): Promise<boolean> {
+  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}): Promise<boolean> {
     if (items.length === 0) return true;
     const cycleId = items[0]!.cycleId;
     const ownerId = items[0]!.cycleOwnerId;
@@ -932,6 +932,7 @@ export class MemoryRepository implements Repository {
       await tick();
       const cycle = this.cycles.get(cycleId);
       if (!cycle || cycle.ownerId !== ownerId || cycle.status === "completed" || cycle.status === "stopped" || items.some((item) => this.items.has(item.id))) return false;
+      if (Object.entries(expectedCollectionSettingsVersions).some(([collectionId, version]) => (this.collections.get(collectionId)?.settingsVersion ?? 1) !== version)) return false;
       for (const item of items) this.items.set(item.id, clone(item));
       return true;
     });
@@ -1137,8 +1138,28 @@ export class MemoryRepository implements Repository {
     if (this.collections.has(collection.id)) return false;
     if (new Set(collection.mediaIds).size !== collection.mediaIds.length) return false;
     if (collection.mediaIds.some((id) => !this.media.has(id))) return false;
-    this.collections.set(collection.id, clone(collection));
+    this.collections.set(collection.id, clone({ ...collection, captionMode: collection.captionMode ?? "individual", sharedCaptionText: collection.sharedCaptionText ?? null, coverMode: collection.coverMode ?? "individual", sharedCoverMediaId: collection.sharedCoverMediaId ?? null, settingsVersion: collection.settingsVersion ?? 1, items: collection.mediaIds.map((mediaAssetId) => collection.items?.find((item) => item.mediaAssetId === mediaAssetId) ?? { mediaAssetId, captionText: "", coverMediaId: null, version: 1 }) }));
     return true;
+  }
+  async saveCollectionItemSettings(input: { collectionId: string; ownerId: string; mediaAssetId: string; captionText: string; coverMediaId: string | null; expectedVersion: number }): Promise<boolean> {
+    return this.withPromotionLock(`collection:${input.collectionId}`, async () => {
+      await tick(); const collection = this.collections.get(input.collectionId);
+      if (!collection || collection.ownerId !== input.ownerId || !collection.mediaIds.includes(input.mediaAssetId)) return false;
+      const items = collection.items ?? collection.mediaIds.map((mediaAssetId) => ({ mediaAssetId, captionText: "", coverMediaId: null, version: 1 }));
+      const current = items.find((item) => item.mediaAssetId === input.mediaAssetId);
+      if (!current || current.version !== input.expectedVersion) return false;
+      this.collections.set(input.collectionId, { ...collection, settingsVersion: (collection.settingsVersion ?? 1) + 1, items: items.map((item) => item.mediaAssetId === input.mediaAssetId ? { ...item, captionText: input.captionText, coverMediaId: input.coverMediaId, version: item.version + 1 } : item) });
+      return true;
+    });
+  }
+  async saveCollectionSharedSettings(input: { collectionId: string; ownerId: string; actorId: string; affected: number; expectedVersion: number; captionMode?: "individual" | "shared"; sharedCaptionText?: string | null; coverMode?: "individual" | "shared"; sharedCoverMediaId?: string | null }): Promise<boolean> {
+    return this.withPromotionLock(`collection:${input.collectionId}`, async () => {
+      await tick(); const collection = this.collections.get(input.collectionId);
+      if (!collection || collection.ownerId !== input.ownerId || (collection.settingsVersion ?? 1) !== input.expectedVersion) return false;
+      this.collections.set(input.collectionId, { ...collection, ...(input.captionMode !== undefined ? { captionMode: input.captionMode } : {}), ...(input.sharedCaptionText !== undefined ? { sharedCaptionText: input.sharedCaptionText } : {}), ...(input.coverMode !== undefined ? { coverMode: input.coverMode } : {}), ...(input.sharedCoverMediaId !== undefined ? { sharedCoverMediaId: input.sharedCoverMediaId } : {}), settingsVersion: input.expectedVersion + 1 });
+      this.audit.push({ actorId: input.actorId, action: input.captionMode === "shared" || input.coverMode === "shared" ? "collection.shared_settings_applied" : "collection.settings_mode_changed", entityType: "VideoCollection", entityId: input.collectionId, metadata: { affected: input.affected, captionMode: input.captionMode ?? null, coverMode: input.coverMode ?? null } });
+      return true;
+    });
   }
   async deleteCollection(collectionId: string): Promise<boolean> {
     return this.withPromotionLock(`collection:${collectionId}`, async () => {
@@ -1162,7 +1183,9 @@ export class MemoryRepository implements Repository {
       if (!current || new Set(mediaIds).size !== mediaIds.length || mediaIds.some((id) => !this.media.has(id))) return false;
       const removed = current.mediaIds.filter((id) => !mediaIds.includes(id));
       if ([...this.mediaImportJobs.values()].some((job) => job.sourceCollectionId === collectionId && removed.includes(job.sourceMediaId) && ["pending", "copying", "verifying"].includes(job.status))) return false;
-      this.collections.set(collectionId, { ...current, mediaIds: [...mediaIds] });
+      const currentItems = current.items ?? current.mediaIds.map((mediaAssetId) => ({ mediaAssetId, captionText: "", coverMediaId: null, version: 1 }));
+      const retained = new Map(currentItems.filter((item) => mediaIds.includes(item.mediaAssetId)).map((item) => [item.mediaAssetId, item]));
+      this.collections.set(collectionId, { ...current, mediaIds: [...mediaIds], settingsVersion: (current.settingsVersion ?? 1) + 1, items: mediaIds.map((mediaAssetId) => retained.get(mediaAssetId) ?? { mediaAssetId, captionText: "", coverMediaId: null, version: 1 }) });
       return true;
     });
   }

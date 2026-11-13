@@ -31,8 +31,8 @@ export function rowToMedia(row: Row): MediaAsset {
   };
 }
 
-export const rowToCollection = (row: Row, mediaIds: string[]): VideoCollection =>
-  ({ id: row["id"], ownerId: row["ownerId"], visibility: row["visibility"], archived: row["archived"], mediaIds, name: row["name"], ...(row["description"] != null ? { description: row["description"] } : {}), ...(row["createdAt"] != null ? { createdAt: row["createdAt"] } : {}) });
+export const rowToCollection = (row: Row, mediaIds: string[], items: { mediaAssetId: string; captionText: string; coverMediaId: string | null; version: number }[] = []): VideoCollection =>
+  ({ id: row["id"], ownerId: row["ownerId"], visibility: row["visibility"], archived: row["archived"], mediaIds, name: row["name"], captionMode: row["captionMode"] === "shared" ? "shared" : "individual", sharedCaptionText: row["sharedCaptionText"] ?? null, coverMode: row["coverMode"] === "shared" ? "shared" : "individual", sharedCoverMediaId: row["sharedCoverMediaId"] ?? null, settingsVersion: typeof row["settingsVersion"] === "number" ? row["settingsVersion"] : 1, items, ...(row["description"] != null ? { description: row["description"] } : {}), ...(row["createdAt"] != null ? { createdAt: row["createdAt"] } : {}) });
 
 export function grantToRow(g: CollectionPermissionGrant): Row {
   return { collectionId: g.collectionId, granteeId: g.granteeId, capabilities: [...g.capabilities], status: g.status, expiresAt: g.expiresAt, grantedById: g.grantedById ?? null, revokedAt: g.status === "revoked" ? new Date() : null };
