@@ -45,12 +45,16 @@ export function buildAdminPlatformSettings(env: Environment = process.env): Admi
     `RAZORPAY_PLAN_${id.toUpperCase()}_WEEKLY`, `RAZORPAY_PLAN_${id.toUpperCase()}_MONTHLY`,
   ]);
   const planIdCount = present(env, subscriptionPlanKeys);
-  const emailProvider = (env["CLIPFORGE_EMAIL_PROVIDER"] ?? "").trim().toLowerCase();
-  const smtpKeys = ["CLIPFORGE_SMTP_HOST", "CLIPFORGE_SMTP_PORT", "CLIPFORGE_SMTP_USER", "CLIPFORGE_SMTP_PASSWORD", "CLIPFORGE_EMAIL_FROM"];
-  const smtpCount = present(env, smtpKeys);
+  const emailProvider = (env["EMAIL_PROVIDER"] ?? env["CLIPFORGE_EMAIL_PROVIDER"] ?? "").trim().toLowerCase();
+  const sesKeys = ["AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "EMAIL_FROM"];
+  const smtpKeys = ["SMTP_HOST", "SMTP_PORT", "SMTP_SECURE", "SMTP_USER", "SMTP_PASS", "EMAIL_FROM"];
+  const emailKeys = emailProvider === "ses" ? sesKeys : emailProvider === "nodemailer" ? smtpKeys : [];
+  const emailCount = present(env, emailKeys);
   const emailState: PlatformSettingState = emailProvider === "outbox" && env["NODE_ENV"] !== "production"
     ? "configured"
-    : emailProvider === "smtp" && smtpCount === smtpKeys.length ? "configured" : emailProvider ? "incomplete" : "missing";
+    : emailProvider === "ses" || emailProvider === "nodemailer"
+      ? emailCount === emailKeys.length ? "configured" : "incomplete"
+      : emailProvider ? "incomplete" : "missing";
   const publishingEnabled = env["CLIPFORGE_PUBLISHING_ENABLED"] === "true" && env["CLIPFORGE_PUBLISHING_LIVE_APPROVED"] === "true";
   const tokenSigningReady = createConfiguredTemporaryMediaAccessAdapter(env) !== null;
   const mediaOriginPresent = present(env, ["CLIPFORGE_PUBLIC_MEDIA_ORIGIN", "CLIPFORGE_TEMP_MEDIA_SIGNING_KEY"]);
@@ -86,7 +90,7 @@ export function buildAdminPlatformSettings(env: Environment = process.env): Admi
         item("FFmpeg / FFprobe", "application_default", "External executables are required for media inspection and rendering; availability was not checked here."),
       ] },
       { title: "Email & background jobs", items: [
-        item("Email delivery", emailState, emailProvider === "outbox" && env["NODE_ENV"] !== "production" ? "Local messages use an in-memory outbox; no email is sent." : emailProvider === "smtp" && smtpCount === smtpKeys.length ? "SMTP settings are present, but the code uses an unconnected adapter; no email is sent." : "Email delivery is unavailable or incompletely configured."),
+        item("Email delivery", emailState, emailProvider === "outbox" && env["NODE_ENV"] !== "production" ? "Local messages use an in-memory outbox; no email is sent." : emailProvider === "ses" && emailState === "configured" ? "SES configuration fields are present; sending was not tested." : emailProvider === "nodemailer" && emailState === "configured" ? "SMTP configuration fields are present; sending was not tested." : "Email delivery is unavailable or incompletely configured."),
         item("Automatic background scheduling", "not_implemented", "Worker entry points are explicit commands; no application scheduler starts them automatically."),
       ] },
     ],

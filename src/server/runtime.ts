@@ -40,7 +40,7 @@ import { AdminDataService } from "./admin/data-service.ts";
 import { PrismaAdminDataRepository } from "./admin/data-repository.ts";
 
 export type RuntimeMode = "demo" | "unconfigured" | "local" | "database";
-export type EmailDelivery = "outbox" | "unavailable";
+export type EmailDelivery = "ses" | "nodemailer" | "outbox" | "unavailable";
 type DatabaseConnector = (connectionString: string) => Promise<PrismaClientLike>;
 type DatabaseServices = { auth: PrismaAuthRepository; content: PrismaRepository; adminData: AdminDataService };
 
@@ -57,7 +57,7 @@ export interface Runtime {
   media?: () => Promise<MediaServices | null>;
   /** Present when registration and login are available (local memory, or the database). */
   auth?: AuthService;
-  /** Local mode only: the "emails" that would have been sent (there is no email provider). */
+  /** Local mode only: the "emails" that would have been sent (no provider is invoked). */
   outbox?: MemoryEmailOutbox;
   /** "unavailable" means no email is sent and none is pretended. */
   emailDelivery?: EmailDelivery;
@@ -68,8 +68,10 @@ export interface Runtime {
   publishingMediaAccess?: import("./storage/temporary-media-access.ts").TemporaryMediaAccessAdapter;
   /** Database-backed, read-only cross-user Admin data. Absent in memory/demo modes by design. */
   adminData?: () => Promise<AdminDataService>;
+  /** Server-side mail provider used only by API routes; values are never passed to client components. */
+  emailSender?: import("./auth/email.ts").EmailSender;
+  emailConfigurationError?: import("./auth/email.ts").EmailConfigurationError;
 }
-
 /** Default technical cap for one upload while files are buffered in memory (development only). */
 export const DEFAULT_MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 
@@ -201,8 +203,8 @@ function guardAuthRepository(load: () => Promise<DatabaseServices>): AuthReposit
 
 /**
  * DATABASE MODE: accounts, sessions, media metadata, collections, and publishing cycles use PostgreSQL.
- * Email uses CLIPFORGE_EMAIL_PROVIDER. Unset means no message is sent and unverified accounts can still sign in.
- * "outbox" keeps messages in memory for local development. SMTP placeholders do not connect to a provider.
+ * Email uses EMAIL_PROVIDER. Unset means no message is sent and normal unverified accounts follow the existing local policy.
+ * "outbox" keeps messages in memory for local development. SES and Nodemailer are initialized only when selected.
  * Video and image bytes go only to CLIPFORGE_LOCAL_MEDIA_DIR. They are never written to PostgreSQL or to memory.
  * A database error stays an error. If the private folder cannot be used, uploads fail instead of using memory.
  */
@@ -246,7 +248,8 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
   const content = guardRepository(delegateRepository(async () => (await load()).content));
   const publishingMediaAccess = createConfiguredTemporaryMediaAccessAdapter();
   return {
-    mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => guardAdminData((await load()).adminData), now, newId: () => randomUUID(),
+    mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, emailSender: email.sender, ...(email.configurationError ? { emailConfigurationError: email.configurationError } : {}), renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => guardAdminData((await load()).adminData),
+    now, newId: () => randomUUID(),
     media: databaseMediaServices(opts.mediaDir === undefined ? process.env["CLIPFORGE_LOCAL_MEDIA_DIR"] : opts.mediaDir),
     currentUserId: async (request) => auth.getSessionUserId(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
     currentPrincipal: async (request) => auth.getSessionPrincipal(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
@@ -295,7 +298,7 @@ function demoMediaServices(): Promise<MediaServices> {
 
 /**
  * LOCAL MODE (CLIPFORGE_LOCAL_AUTH=true): real registration, email confirmation, login and sessions - but everything lives in
- * server MEMORY and disappears on restart, and "emails" go to an in-memory outbox (no email provider exists). Data starts empty.
+ * server MEMORY and disappears on restart, and "emails" go to an in-memory outbox. Data starts empty.
  * It exists so the real auth flow can be developed and tested without a database. It is not a production mode.
  */
 export function createLocalRuntime(opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; media?: () => Promise<MediaServices | null> } = {}): Runtime {

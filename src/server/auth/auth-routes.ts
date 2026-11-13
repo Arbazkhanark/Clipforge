@@ -48,7 +48,7 @@ export const registerRoute = (runtime: RuntimeProvider = getRuntime) => (request
     const returnTo = safeCustomerReturnPath(f.get("returnTo"));
     const result = await auth.register({ email: f.get("email"), password: f.get("password"), name: f.get("name") });
     if (!result.ok) { const code: FlashErrorCode = result.problems.some((p) => /email/i.test(p) && /valid/i.test(p)) ? "invalid_email" : "weak_password"; return respond(withCustomerReturnPath(buildFlashLocation("/register", "error", code), returnTo)); }
-    const notice = rt.emailDelivery === "unavailable" ? "registered_no_email" : "registered";
+    const notice = rt.emailDelivery === "ses" || rt.emailDelivery === "nodemailer" ? "registered" : "registered_no_email";
     return respond(withCustomerReturnPath(buildFlashLocation("/login", "notice", notice), returnTo));   // the same answer whether or not the email already existed
   }, "/register");
 
@@ -94,7 +94,8 @@ export const adminLoginRoute = (runtime: RuntimeProvider = getRuntime) => async 
     temporarySessionToken = result.sessionToken;
 
     const principal = await rt.auth.getSessionPrincipal(temporarySessionToken);
-    if (!principal || principal.userId !== result.userId || principal.role !== "admin") {
+    const emailVerified = principal?.userId === result.userId ? await rt.auth.isEmailVerified(result.userId) : false;
+    if (!principal || principal.userId !== result.userId || principal.role !== "admin" || !emailVerified) {
       await rt.auth.logout(temporarySessionToken);
       temporarySessionToken = null;
       return failure();
@@ -125,7 +126,7 @@ export const verifyEmailRoute = (runtime: RuntimeProvider = getRuntime) => (requ
   }, "/login");
 
 export const forgotPasswordRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
-  authRoute(request, runtime, async (auth, f, rt) => { await auth.requestPasswordReset(f.get("email")); return respond(buildFlashLocation("/forgot-password", "notice", rt.emailDelivery === "unavailable" ? "reset_unavailable" : "reset_email_sent")); }, "/forgot-password");
+  authRoute(request, runtime, async (auth, f, rt) => { await auth.requestPasswordReset(f.get("email")); return respond(buildFlashLocation("/forgot-password", "notice", rt.emailDelivery === "ses" || rt.emailDelivery === "nodemailer" ? "reset_email_sent" : "reset_unavailable")); }, "/forgot-password");
 
 export const resetPasswordRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
   authRoute(request, runtime, async (auth, f) => {

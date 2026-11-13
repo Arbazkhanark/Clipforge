@@ -34,6 +34,7 @@ export function EditorVideoPreview({
   settings: EditingSettings; maxResolution: MaxResolution; images: EditorPreviewImage[]; formId: string;
 }) {
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
+  const [originalVideoElement, setOriginalVideoElement] = useState<HTMLVideoElement | null>(null);
   const [backgroundVideoElement, setBackgroundVideoElement] = useState<HTMLVideoElement | null>(null);
   const [stageElement, setStageElement] = useState<HTMLDivElement | null>(null);
   const [settings, setSettings] = useState(initialSettings);
@@ -43,6 +44,7 @@ export function EditorVideoPreview({
   const [playbackError, setPlaybackError] = useState("");
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackTime, setPlaybackTime] = useState(0);
+  const [comparisonMode, setComparisonMode] = useState<"original" | "edited">("edited");
   const [actualDuration, setActualDuration] = useState<number | null>(null);
   const [displayScale, setDisplayScale] = useState(1);
   const imageById = useMemo(() => new Map(images.map((image) => [image.id, image])), [images]);
@@ -187,12 +189,7 @@ export function EditorVideoPreview({
     left: `${(layout.video.x / layout.canvas.width) * 100}%`, top: `${(layout.video.y / layout.canvas.height) * 100}%`,
     width: `${(layout.video.width / layout.canvas.width) * 100}%`, height: `${(layout.video.height / layout.canvas.height) * 100}%`,
     objectFit: "fill" as const, zIndex: 3,
-  };
-  const borderStyle = {
-    position: "absolute" as const,
-    left: `${(layout.borderBox.x / layout.canvas.width) * 100}%`, top: `${(layout.borderBox.y / layout.canvas.height) * 100}%`,
-    width: `${(layout.borderBox.width / layout.canvas.width) * 100}%`, height: `${(layout.borderBox.height / layout.canvas.height) * 100}%`,
-    background: settings.border.colorHex, zIndex: 2,
+    ...(layout.borderPx > 0 ? { outline: `${layout.borderPx * displayScale}px solid ${settings.border.colorHex}`, outlineOffset: 0 } : {}),
   };
   const logoStyle = layout.logo ? {
     position: "absolute" as const,
@@ -203,11 +200,21 @@ export function EditorVideoPreview({
 
   return (
       <figure className="editor-video-preview">
-      <div ref={setStageElement} className="editor-video-stage" style={{ position: "relative", width: "100%", maxWidth: "30rem", maxHeight: "68svh", aspectRatio: `${layout.canvas.width} / ${layout.canvas.height}`, overflow: "hidden", background: settings.background.kind === "solid" ? settings.background.colorHex : "#333", border: "1px solid var(--border)", touchAction: "none", userSelect: "none" }} aria-label="Edited video preview" aria-describedby="editor-preview-gesture-help">
+      <div className="editor-comparison-control" role="group" aria-label="Compare original and edited video">
+        <button type="button" aria-pressed={comparisonMode === "original"} onClick={() => {
+          videoElement?.pause();
+          backgroundVideoElement?.pause();
+          setComparisonMode("original");
+        }}>Original</button>
+        <button type="button" aria-pressed={comparisonMode === "edited"} onClick={() => {
+          originalVideoElement?.pause();
+          setComparisonMode("edited");
+        }}>Edited</button>
+      </div>
+      <div ref={setStageElement} className="editor-video-stage" hidden={comparisonMode !== "edited"} style={{ position: "relative", width: "100%", maxWidth: "30rem", maxHeight: "68svh", aspectRatio: `${layout.canvas.width} / ${layout.canvas.height}`, overflow: "hidden", background: settings.background.kind === "solid" ? settings.background.colorHex : "#333", border: "1px solid var(--border)", touchAction: "none", userSelect: "none" }} aria-label="Edited video preview" aria-describedby="editor-preview-gesture-help">
         {settings.background.kind === "blur" && <video ref={setBackgroundVideoElement} src={videoUrl} muted playsInline autoPlay loop aria-hidden="true" style={{ position: "absolute", inset: "-5%", width: "110%", height: "110%", objectFit: "cover", filter: `blur(${settings.background.strength * displayScale}px)`, opacity: 0.55, zIndex: 1 }} />}
         {settings.background.kind === "image" && backgroundInfo && <img src={backgroundInfo.url} alt="" aria-hidden="true" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 1 }} />}
         {settings.background.kind === "image" && !backgroundInfo && <div role="status" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", zIndex: 1 }}>Choose an available background image.</div>}
-        {layout.borderPx > 0 && <div data-border style={borderStyle} />}
         <video
           ref={setVideoElement} src={videoUrl} controls={false} playsInline preload="metadata" aria-label="Source video preview"
           style={videoStyle}
@@ -231,8 +238,12 @@ export function EditorVideoPreview({
           </svg>
         )}
       </div>
+      <div className="editor-original-preview" hidden={comparisonMode !== "original"}>
+        <p>Original source · editing settings are not applied</p>
+        <video ref={setOriginalVideoElement} src={videoUrl} controls playsInline preload="none" aria-label="Original source video" />
+      </div>
       <p id="editor-preview-gesture-help" className="muted editor-preview-gesture-help">Use two fingers to zoom and move, drag to reposition, or scroll over the preview to zoom. Page scrolling works outside the preview.</p>
-      <div className="editor-preview-playback" aria-label="Preview playback controls">
+      {comparisonMode === "edited" && <div className="editor-preview-playback" aria-label="Preview playback controls">
         <button type="button" disabled={invalidRange || loading || Boolean(playbackError)} aria-label={isPlaying ? "Pause preview" : "Play preview"} onClick={() => {
           const video = videoElement;
           if (!video || invalidRange) return;
@@ -247,7 +258,7 @@ export function EditorVideoPreview({
           setPlaybackTime(video.currentTime);
         }} /></label>
         <output aria-label="Preview time">{playbackTime.toFixed(1)}s{Number.isFinite(trimEnd) ? ` / ${trimEnd.toFixed(1)}s` : ""}</output>
-      </div>
+      </div>}
       <figcaption className="muted">Playback of your source video with a browser preview of the current composition. {assumedSourceSize ? "The video's dimensions are unknown, so the preview assumes 16:9. " : ""}The browser preview approximates the FFmpeg export and is not pixel-identical. {layout.canvas.width} × {layout.canvas.height} canvas.</figcaption>
       {loading && !playbackError && <p role="status">Loading video preview…</p>}
       {playbackError && <p role="alert">{playbackError}</p>}

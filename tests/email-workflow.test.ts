@@ -28,25 +28,58 @@ function service(repo: MemoryAuthRepository | PrismaAuthRepository, email: Email
   });
 }
 
-test("provider selection stays local unless a real provider is approved", async () => {
+test("provider selection preserves the development outbox and initializes only configured providers", async () => {
   assert.equal(createEmailSetup({}).delivery, "unavailable");
   assert.equal(createEmailSetup({}).requireVerifiedEmail, false);
   const outbox = createEmailSetup({ CLIPFORGE_EMAIL_PROVIDER: "outbox" });
   assert.equal(outbox.delivery, "outbox");
   assert.equal(outbox.requireVerifiedEmail, true);
   assert.equal(createEmailSetup({ CLIPFORGE_EMAIL_PROVIDER: "outbox", NODE_ENV: "production" }).delivery, "unavailable");
-  const smtp = createEmailSetup({
-    CLIPFORGE_EMAIL_PROVIDER: "smtp", CLIPFORGE_SMTP_HOST: "smtp.example.com", CLIPFORGE_SMTP_PORT: "587",
-    CLIPFORGE_SMTP_USER: "mailer", CLIPFORGE_SMTP_PASSWORD: "super-secret-mail", CLIPFORGE_EMAIL_FROM: "ClipForge <mailer@example.com>",
+  let transportOptions: Record<string, unknown> | undefined;
+  let sent: unknown;
+  const smtp = createEmailSetup({ EMAIL_PROVIDER: "nodemailer", SMTP_HOST: "smtp.example.com", SMTP_PORT: "587", SMTP_SECURE: "false", SMTP_USER: "mailer", SMTP_PASS: "super-secret-mail", EMAIL_FROM: "ClipForge <mailer@example.com>" }, {
+    createSmtpTransport: (options) => { transportOptions = options; return { sendMail: async (message) => { sent = message; } }; },
   });
-  assert.equal(smtp.requireVerifiedEmail, false);
-  await assert.rejects(() => smtp.sender.send({ to: "ann@example.com", subject: "Confirm", text: "hidden" }), (error: unknown) => {
-    assert.ok(error instanceof AppError);
-    assert.equal(error.code, "email_not_configured");
-    assert.equal(error.message.includes("super-secret-mail"), false);
-    assert.equal(error.message.includes("smtp.example.com"), false);
-    return true;
+  assert.equal(smtp.delivery, "nodemailer");
+  assert.equal(smtp.requireVerifiedEmail, true);
+  assert.deepEqual(transportOptions?.["tls"], { minVersion: "TLSv1.2" });
+  assert.equal(transportOptions?.["requireTLS"], true);
+  await smtp.sender.send({ to: "ann@example.com", subject: "Confirm", text: "hidden" });
+  assert.equal((sent as { from?: string }).from, "ClipForge <mailer@example.com>");
+});
+
+test("SES provider selection sends only through the selected adapter and does not expose credentials", async () => {
+  let url = ""; let requestInit: RequestInit | undefined;
+  const ses = createEmailSetup({ EMAIL_PROVIDER: "ses", AWS_REGION: "ap-south-1", AWS_ACCESS_KEY_ID: "synthetic-access", AWS_SECRET_ACCESS_KEY: "synthetic-secret", EMAIL_FROM: "ClipForge <mail@example.com>" }, {
+    fetch: async (input, init) => { url = String(input); requestInit = init; return new Response(null, { status: 200 }); },
+    now: () => new Date("2026-11-13T00:00:00Z"),
   });
+  assert.equal(ses.delivery, "ses");
+  assert.equal(ses.requireVerifiedEmail, true);
+  await ses.sender.send({ to: "ann@example.com", subject: "Verify", text: "synthetic message" });
+  assert.equal(url, "https://email.ap-south-1.amazonaws.com/v2/email/outbound-emails");
+  assert.equal((requestInit?.headers as Record<string, string>)["authorization"]?.includes("synthetic-secret"), false);
+});
+
+test("missing SES or SMTP fields produce a fixed configuration error without revealing values", async () => {
+  const ses = createEmailSetup({ EMAIL_PROVIDER: "ses", AWS_REGION: "ap-south-1", AWS_ACCESS_KEY_ID: "present" });
+  assert.equal(ses.delivery, "unavailable");
+  assert.equal(ses.configurationError, "ses_credentials_missing");
+  const smtp = createEmailSetup({ EMAIL_PROVIDER: "nodemailer", SMTP_HOST: "smtp.example.com", SMTP_PORT: "587", SMTP_SECURE: "false", SMTP_USER: "present", SMTP_PASS: "present" });
+  assert.equal(smtp.delivery, "unavailable");
+  assert.equal(smtp.configurationError, "smtp_configuration_invalid");
+  assert.equal(smtp.sender instanceof Object, true);
+});
+
+test("provider delivery failures return a fixed error with no SMTP or SES response details", async () => {
+  const smtp = createEmailSetup({ EMAIL_PROVIDER: "nodemailer", SMTP_HOST: "smtp.private.example", SMTP_PORT: "587", SMTP_SECURE: "false", SMTP_USER: "private-user", SMTP_PASS: "private-password", EMAIL_FROM: "from@example.com" }, {
+    createSmtpTransport: () => ({ sendMail: async () => { throw new Error("private SMTP response and password"); } }),
+  });
+  await assert.rejects(() => smtp.sender.send({ to: "to@example.com", subject: "x", text: "y" }), (error: unknown) => error instanceof AppError && error.code === "email_delivery_failed" && !error.message.includes("private SMTP"));
+  const ses = createEmailSetup({ EMAIL_PROVIDER: "ses", AWS_REGION: "ap-south-1", AWS_ACCESS_KEY_ID: "private-key", AWS_SECRET_ACCESS_KEY: "private-secret", EMAIL_FROM: "from@example.com" }, {
+    fetch: async () => new Response("sensitive provider body", { status: 403 }), now: () => new Date("2026-11-13T00:00:00Z"),
+  });
+  await assert.rejects(() => ses.sender.send({ to: "to@example.com", subject: "x", text: "y" }), (error: unknown) => error instanceof AppError && error.code === "email_delivery_failed" && !error.message.includes("sensitive"));
 });
 
 test("a failed send stores no usable verification token", async () => {

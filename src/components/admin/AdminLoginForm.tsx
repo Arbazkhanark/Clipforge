@@ -29,7 +29,7 @@ export function AdminLoginForm({ available, flash }: { available: boolean; flash
         </form>
         <div className="admin-login-security-note"><span aria-hidden="true">●</span> Protected administrator access</div>
       </section>
-      <p className="admin-login-footer">ClipForge · Administrator access</p>
+      <p className="admin-login-footer">ClipForge · Administrator access · First Admin provisioning is operator-only.</p>
     </div>
   );
 }

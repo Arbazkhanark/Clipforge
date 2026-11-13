@@ -27,6 +27,8 @@ export interface PrismaClientLike {
   mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; mediaImportJob: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate; collectionAccessRequest: ModelDelegate; collectionShareLink: ModelDelegate;
   publishingCycle: ModelDelegate; cycleItem: ModelDelegate; publishingJob: ModelDelegate; processingJob: ModelDelegate; captionRevision: ModelDelegate;
   auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; razorpaySubscriptionIntent: ModelDelegate; razorpaySubscriptionContinuation: ModelDelegate; manualPaymentIntent: ModelDelegate; manualPlanAccess: ModelDelegate; promotion: ModelDelegate; promotionRedemption: ModelDelegate; promotionalAccessGrant: ModelDelegate; promotionLifecycleEvent: ModelDelegate; webhookEvent: ModelDelegate; paymentRecord: ModelDelegate; usageRecord: ModelDelegate;
+  /** Present after the forward-only first-Admin registration migration is applied. */
+  adminRegistration?: ModelDelegate;
   /** Runs `work` in a database transaction. */
   $transaction<T>(work: (tx: PrismaClientLike) => Promise<T>): Promise<T>;
   /** Tagged-template raw query (used only to lock a user row: SELECT ... FOR UPDATE). */

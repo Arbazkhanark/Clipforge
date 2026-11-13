@@ -62,7 +62,7 @@ test("collection owner sees safe sharing-management data; a recipient does not r
   assert.equal(ownerDetail.sharingManagement?.expiringGrants, false);
   const ownerHtml = renderToStaticMarkup(CollectionDetailView({ detail: ownerDetail }));
   assert.match(ownerHtml, /People with collection access/);
-  assert.match(ownerHtml, /User ID:<\/strong> <code>recipient<\/code>/);
+  assert.match(ownerHtml, /USER ID<\/span><code>recipient<\/code>/);
   assert.match(ownerHtml, /Your current plan does not include collection sharing/);
   assert.match(ownerHtml, /Revoke access/);
 
@@ -94,4 +94,41 @@ test("access-request views are owner/requester scoped and do not reveal private 
   await assert.rejects(() => getCollectionDetail(context(repo, "stranger"), "private-access-target"), (error: unknown) => error instanceof AppError && error.status === 404);
   assert.deepEqual(await repo.listPendingCollectionAccessRequests("private-access-target", "stranger"), []);
   assert.equal((await repo.listCollectionAccessRequestsForRequester("stranger")).length, 0);
+});
+
+test("collection videos render as responsive cards while retaining the authorized import form", async () => {
+  const repo = new MemoryRepository();
+  await repo.addMediaIfStorageWithin(
+    makeMedia({ id: "shared-video", ownerId: "owner", title: "Campaign reel" }),
+    { storageKey: "private/shared-video", thumbnailKey: null },
+    10_000,
+  );
+  await repo.createCollection({
+    id: "shared-collection",
+    ownerId: "owner",
+    name: "Campaign",
+    description: undefined,
+    visibility: "private",
+    archived: false,
+    mediaIds: ["shared-video"],
+    createdAt: new Date("2026-11-06T12:00:00Z"),
+  });
+  await repo.upsertGrant({
+    collectionId: "shared-collection",
+    granteeId: "recipient",
+    capabilities: ["view", "import_copy"],
+    status: "active",
+    expiresAt: null,
+    grantedById: "owner",
+  });
+
+  const detail = await getCollectionDetail(context(repo, "recipient"), "shared-collection");
+  const html = renderToStaticMarkup(CollectionDetailView({ detail }));
+
+  assert.match(html, /collection-video-grid/);
+  assert.match(html, /collection-video-card/);
+  assert.match(html, /Campaign reel/);
+  assert.match(html, /action="\/api\/forms\/media-import"/);
+  assert.match(html, /name="sourceMediaId" value="shared-video"/);
+  assert.match(html, /name="warningAcknowledged"/);
 });

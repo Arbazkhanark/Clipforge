@@ -460,6 +460,12 @@ export function CollectionsOverviewView({
         </a>
       </header>
 
+      <section className="collection-summary" aria-label="Collection overview">
+        <div><strong>{owned.length}</strong><span>Your collections</span></div>
+        <div><strong>{sharedWithMe.length}</strong><span>Shared with you</span></div>
+        <div><strong>{accessRequests.length}</strong><span>Access requests</span></div>
+      </section>
+
       <section className="collection-toolbar">
         <form method="get" action="/collections" className="collection-filter-form" role="search">
           <label className="collection-search-field">
@@ -510,6 +516,7 @@ export function CollectionsOverviewView({
         />
       </section>
 
+      <div className="collection-quick-actions">
       <section id="create-collection" className="collection-panel">
         <div className="collection-panel-heading">
           <div className="collection-panel-icon" aria-hidden="true">+</div>
@@ -604,6 +611,7 @@ export function CollectionsOverviewView({
           </button>
         </form>
       </section>
+      </div>
 
       <section className="collection-overview-section">
         <SectionHeading
@@ -784,7 +792,7 @@ function SharingManagement({ detail }: { detail: CollectionDetail }) {
     <section className="collection-panel">
       <SectionHeading
         eyebrow="ACCESS CONTROL"
-        title="People with access"
+        title="People with collection access"
         description="Manage who can access this collection and what they can do."
       />
 
@@ -1365,93 +1373,92 @@ function CollectionVideos({ detail }: { detail: CollectionDetail }) {
           }
         />
       ) : (
-        <div className="table-scroll collection-video-table-wrap">
-          <table className="data-table collection-video-table">
-            <caption>Videos in this collection</caption>
-            <thead>
-              <tr>
-                <th scope="col">Preview</th>
-                <th scope="col">Video</th>
-                <th scope="col">Duration</th>
-                <th scope="col">File size</th>
-                {permissions.canRequestImport && (
-                  <th scope="col">Import status</th>
-                )}
-              </tr>
-            </thead>
+        <div className="collection-video-grid">
+          {videos.map((video) => {
+            const job = detail.importJobs?.find(
+              (entry) => entry.sourceMediaId === video.id,
+            );
 
-            <tbody>
-              {videos.map((video) => {
-                const job = detail.importJobs?.find(
-                  (entry) => entry.sourceMediaId === video.id,
-                );
+            return (
+              <article
+                className="collection-video-card"
+                key={video.id}
+                data-media-id={video.id}
+              >
+                <div className="collection-video-preview">
+                  <Thumbnail media={video} />
+                </div>
+                <div className="collection-video-card-body">
+                  <h3 className="collection-video-title">{video.title}</h3>
+                  <div className="collection-video-meta">
+                    <span>{formatDuration(video.durationMs)}</span>
+                    <span>{formatStorage(video.sizeBytes)}</span>
+                  </div>
 
-                return (
-                  <tr key={video.id}>
-                    <td><Thumbnail media={video} /></td>
-                    <td className="collection-video-title">{video.title}</td>
-                    <td>{formatDuration(video.durationMs)}</td>
-                    <td>{formatStorage(video.sizeBytes)}</td>
+                  {permissions.canRequestImport && (
+                    <div className="collection-video-import">
+                      {job ? (
+                        <div className="collection-import-status">
+                          <span className={`collection-status collection-status-${job.status}`}>
+                            {job.status.replaceAll("_", " ")}
+                          </span>
 
-                    {permissions.canRequestImport && (
-                      <td>
-                        {job ? (
-                          <div className="collection-import-status">
-                            <span className={`collection-status collection-status-${job.status}`}>
-                              {job.status.replaceAll("_", " ")}
+                          {job.failureReason && (
+                            <p className="collection-form-hint">{job.failureReason}</p>
+                          )}
+
+                          {job.status === "succeeded" && (
+                            <a href={`/media/${job.resultMediaAssetId}`}>
+                              Open imported copy
+                            </a>
+                          )}
+
+                          {job.status === "failed" && (
+                            <form method="post" action="/api/forms/media-import-retry">
+                              <input type="hidden" name="jobId" value={job.id} />
+                              <input type="hidden" name="collectionId" value={collection.id} />
+                              <button type="submit" className="collection-secondary-button">
+                                Retry import
+                              </button>
+                            </form>
+                          )}
+
+                          <p className="collection-form-hint">
+                            Updated {job.updatedAt.toISOString()}
+                          </p>
+                        </div>
+                      ) : (
+                        <form
+                          method="post"
+                          action="/api/forms/media-import"
+                          className="collection-import-form"
+                        >
+                          <input type="hidden" name="sourceMediaId" value={video.id} />
+                          <input type="hidden" name="sourceCollectionId" value={collection.id} />
+
+                          <label className="collection-confirm-checkbox">
+                            <input
+                              type="checkbox"
+                              name="warningAcknowledged"
+                              value="yes"
+                              required
+                            />
+                            <span>
+                              I understand this creates a separate copy and uses my storage allowance.
                             </span>
+                          </label>
 
-                            {job.failureReason && (
-                              <p className="collection-form-hint">{job.failureReason}</p>
-                            )}
-
-                            {job.status === "succeeded" && (
-                              <a href={`/media/${job.resultMediaAssetId}`}>
-                                Open imported copy
-                              </a>
-                            )}
-
-                            {job.status === "failed" && (
-                              <form method="post" action="/api/forms/media-import-retry">
-                                <input type="hidden" name="jobId" value={job.id} />
-                                <input type="hidden" name="collectionId" value={collection.id} />
-                                <button type="submit" className="collection-secondary-button">
-                                  Retry import
-                                </button>
-                              </form>
-                            )}
-
-                            <p className="collection-form-hint">
-                              Updated {job.updatedAt.toISOString()}
-                            </p>
-                          </div>
-                        ) : (
-                          <form method="post" action="/api/forms/media-import" className="collection-import-form">
-                            <input type="hidden" name="sourceMediaId" value={video.id} />
-                            <input type="hidden" name="sourceCollectionId" value={collection.id} />
-
-                            <label className="collection-confirm-checkbox">
-                              <input
-                                type="checkbox"
-                                name="warningAcknowledged"
-                                value="yes"
-                                required
-                              />
-                              <span>I understand this creates a separate copy and uses my storage allowance.</span>
-                            </label>
-
-                            <button type="submit" className="collection-secondary-button">
-                              Import to my library
-                            </button>
-                          </form>
-                        )}
-                      </td>
-                    )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                          <button type="submit" className="collection-secondary-button">
+                            Import to my library
+                          </button>
+                        </form>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </article>
+            );
+          })}
         </div>
       )}
 

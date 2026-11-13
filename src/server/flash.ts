@@ -18,7 +18,7 @@ export const FLASH_NOTICES = {
   captions_applied: "Caption update finished.",
   covers_applied: "Cover update finished. Covers are saved in ClipForge; Instagram has not received them.",
   videos_added: "Videos added to the cycle.",
-  registered: "If that email address can be used, the account was saved. Email delivery is not configured, so no confirmation message was sent.",
+  registered: "If that email address can be used, the account was saved. Check the inbox for its confirmation message.",
   registered_no_email: "If that email address can be used, the account is saved in the database. Email confirmation is not available yet, so no message was sent. You can sign in, and the account stays unverified until email delivery is configured.",
   reset_unavailable: "Password reset by email is not available yet. No message was sent.",
   verified: "Your email is confirmed. You can sign in now.",
@@ -56,7 +56,7 @@ export const FLASH_NOTICES = {
 export const FLASH_ERRORS = {
   admin_login_failed: "Sign-in failed. Check your credentials and try again.",
   invalid_credentials: "Email or password is not correct.",
-  email_not_verified: "Please confirm your email first. Email delivery is not configured in this build, so no confirmation message was sent.",
+  email_not_verified: "Please confirm your email address before signing in.",
   rate_limited: "Too many attempts. Please wait a few minutes and try again.",
   invalid_token: "That link is not valid or has expired.",
   weak_password: "Choose a stronger password: at least 10 characters, not a common password, not your email address.",

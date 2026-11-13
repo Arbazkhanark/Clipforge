@@ -72,9 +72,9 @@ test("DEFAULT MODE: no authentication exists - every auth route says so and sets
 });
 
 test("REGISTER: same answer whether or not the email exists; weak passwords and bad emails are refused; nothing created for bad input", async () => {
-  const first = await post.register("Ann@Example.com"); assert.equal(where(first), "/login?notice=registered");
+  const first = await post.register("Ann@Example.com"); assert.equal(where(first), "/login?notice=registered_no_email");
   assert.equal(rt.outbox!.messages.length, 1); assert.match(rt.outbox!.messages[0]!.text, /\/verify-email\?token=/);
-  const again = await post.register("ann@example.com", "another good password"); assert.equal(where(again), "/login?notice=registered"); assert.equal(rt.outbox!.messages.length, 1);
+  const again = await post.register("ann@example.com", "another good password"); assert.equal(where(again), "/login?notice=registered_no_email"); assert.equal(rt.outbox!.messages.length, 1);
   assert.equal(where(await post.register("bob@example.com", "short")), "/register?error=weak_password");
   assert.equal(where(await post.register("not-an-email")), "/register?error=invalid_email");
   assert.equal(rt.outbox!.messages.length, 1);
@@ -193,8 +193,8 @@ test("LOGOUT ends the session everywhere that cookie is used and clears it", asy
 test("PASSWORD RESET: generic answers, link only shows a form, a typo does not burn the link, success ends ALL sessions", async () => {
   const ann = await signUp("ann@example.com"); const ann2 = (await post.login("ann@example.com")).headers.get("set-cookie")!.split(";")[0]!;
   const before = rt.outbox!.messages.length;
-  assert.equal(where(await post.forgot("ghost@example.com")), "/forgot-password?notice=reset_email_sent"); assert.equal(rt.outbox!.messages.length, before);
-  assert.equal(where(await post.forgot("ann@example.com")), "/forgot-password?notice=reset_email_sent"); assert.equal(rt.outbox!.messages.length, before + 1);
+  assert.equal(where(await post.forgot("ghost@example.com")), "/forgot-password?notice=reset_unavailable"); assert.equal(rt.outbox!.messages.length, before);
+  assert.equal(where(await post.forgot("ann@example.com")), "/forgot-password?notice=reset_unavailable"); assert.equal(rt.outbox!.messages.length, before + 1);
   const token = lastToken();
   assert.ok(html(await ResetPasswordPage({ searchParams: Promise.resolve({ token }) })).includes('action="/api/auth/reset-password"'));
   const typo = await post.reset(token, "short"); assert.equal(where(typo), `/reset-password?error=weak_password&token=${token}`);
@@ -253,7 +253,7 @@ test("getRuntime(): local mode turns on ONLY with the explicit flag, and never i
 
 test("database-mode auth notice describes configured persistence without claiming a successful save", () => {
   const markup = html(<AuthForm mode="register" demoMode={false} available persistence="database" emailDelivery="unavailable" />);
-  assert.match(markup, /configured to store accounts and sessions in PostgreSQL/);
+  assert.match(markup, /stores accounts and sessions in PostgreSQL/);
   assert.match(markup, /operation was not confirmed as saved/);
   assert.doesNotMatch(markup, /stored in the database and remain after a restart/);
 });

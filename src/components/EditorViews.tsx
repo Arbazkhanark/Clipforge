@@ -536,7 +536,7 @@ export function EditorForm({ data }: { data: EditorPageData }) {
 
       <fieldset className="editor-section editor-template-form">
         <legend>Save as template</legend>
-        <p className="editor-section-description">
+        <p className="editor-section-description" id="editor-template-help">
           Reuse these editing settings on another video.
         </p>
 
@@ -549,6 +549,7 @@ export function EditorForm({ data }: { data: EditorPageData }) {
             maxLength={100}
             required
             placeholder="e.g. Instagram Reel Style"
+            aria-describedby="editor-template-help"
           />
         </div>
 
@@ -738,6 +739,10 @@ export function EditorView({ data }: { data: EditorPageData }) {
             ))}
           </ul>
         )}
+
+        <p className="editor-template-management-note" role="note">
+          Saved templates can be applied here. Renaming and deleting templates are not available yet; sample templates have not been configured.
+        </p>
 
         <div className="editor-exports-heading">
           <div>

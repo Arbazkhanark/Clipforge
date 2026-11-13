@@ -376,6 +376,19 @@ model AuthToken {
   @@index([userId, kind])
 }
 
+/// Pending first-Admin registration. Password and verification token are stored only as hashes.
+model AdminRegistration {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String?
+  tokenHash    String   @unique
+  expiresAt    DateTime
+  usedAt       DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
 /// One Google account per ClipForge user. The subject is Google's stable account id.
 /// Access tokens and refresh tokens are not stored.
 model GoogleIdentity {

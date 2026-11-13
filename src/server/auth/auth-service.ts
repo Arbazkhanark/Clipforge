@@ -6,7 +6,7 @@
 //  - every login creates a NEW session (no session fixation); a password reset ends ALL sessions,
 //  - emailed tokens are single-use and expire (24h verification, 1h reset).
 // Google sign-in is completeGoogleSignIn. It reuses these sessions and does not store Google tokens.
-// Nothing here sends real email (see email.ts).
+// Email messages are sent through the server-only adapters in email.ts when configured.
 import { DEFAULT_SCRYPT_PARAMS, checkPasswordPolicy, hashPassword, makeDummyHash, needsRehash, verifyPassword, type ScryptParams } from "./password.ts";
 import { generateToken, hashToken } from "./tokens.ts";
 import type { AuthRepository, UserRecord } from "./auth-repository.ts";
@@ -22,7 +22,7 @@ export interface AuthConfig {
   resetTtlMs: number;
   /** Save "last used" at most this often, so every request is not a database write. */
   touchEveryMs: number;
-  /** Local mode requires a confirmation link. Database mode turns this off until a real email provider exists. */
+  /** Require a confirmation link when real delivery is configured; first-Admin activation always requires its own confirmation. */
   requireVerifiedEmail: boolean;
 }
 export const DEFAULT_AUTH_CONFIG = (baseUrl: string): AuthConfig => ({
@@ -199,6 +199,12 @@ export class AuthService {
     if (!userId) return null;
     const user = await this.deps.repo.getUserById(userId);
     return user ? { userId: user.id, role: user.role } : null;
+  }
+
+  /** Fresh persisted verification check for Admin login, even when ordinary email verification is optional. */
+  async isEmailVerified(userId: string): Promise<boolean> {
+    const user = await this.deps.repo.getUserById(userId);
+    return Boolean(user?.emailVerifiedAt);
   }
 
   async logout(token: string | null): Promise<void> {

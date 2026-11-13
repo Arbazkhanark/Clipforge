@@ -1,5 +1,7 @@
 import { AdminShell, type AdminSectionId } from "./AdminShell.tsx";
 import { requireAdminPage } from "../../server/admin/page-authorization.ts";
+import { getRuntime } from "../../server/runtime.ts";
+import type { AdminOverview } from "../../server/admin/data-repository.ts";
 
 const SECTION_COPY: Record<Exclude<AdminSectionId, "overview">, { title: string; description: string; emptyTitle: string; emptyDescription: string; icon: string }> = {
   users: {
@@ -53,34 +55,37 @@ function PageHeading({ title, description }: { title: string; description: strin
   );
 }
 
-function OverviewContent() {
-  const cards = [
-    { label: "Users", description: "Registered and active account summaries", icon: "♙" },
-    { label: "Campaigns", description: "Cycle status and scheduled publishing", icon: "▣" },
-    { label: "Plans", description: "Configured plan definitions and access records", icon: "◇" },
-    { label: "Instagram", description: "Connected account and publishing health", icon: "◎" },
-    { label: "Billing", description: "Verified billing activity and account status", icon: "◈" },
-  ];
+function OverviewContent({ overview }: { overview: AdminOverview | null }) {
+  const cards = overview ? [
+    { label: "Registered users", value: overview.users.registered.toLocaleString(), description: "User accounts in the database", icon: "♙", href: "/admin/users" },
+    { label: "Publishing cycles", value: overview.cycles.total.toLocaleString(), description: "Stored cycles across all statuses", icon: "▣", href: "/admin/campaigns" },
+    { label: "Instagram accounts", value: overview.instagram.totalStoredAccounts.toLocaleString(), description: "Stored connections; Meta not queried", icon: "◎", href: "/admin/instagram" },
+    { label: "Publishing jobs", value: overview.publishing.totalAttempts.toLocaleString(), description: "Stored job records, not live status", icon: "↗", href: "/admin/analytics" },
+    { label: "Payment records", value: overview.billing.paymentRecordCount.toLocaleString(), description: "Stored records; revenue unavailable", icon: "₹", href: "/admin/billing" },
+  ] : [];
   return (
     <>
-      <div className="admin-overview-banner" role="status">
-        <span className="admin-banner-icon" aria-hidden="true">i</span>
-        <div><strong>Live data is not connected</strong><p>This dashboard is a read-only interface preview. No live metrics or demo figures are being displayed.</p></div>
-        <span className="admin-connection-badge">Not connected</span>
+      <div className={`admin-overview-banner ${overview ? "admin-overview-connected" : ""}`} role="status">
+        <span className="admin-banner-icon" aria-hidden="true">{overview ? "✓" : "i"}</span>
+        <div><strong>{overview ? "Database connected" : "Live data is unavailable"}</strong><p>{overview ? "Counts below come from stored ClipForge records. External providers are not queried here." : "Connect an available Admin data source to show real platform totals. No sample values are displayed."}</p></div>
+        <span className="admin-connection-badge">{overview ? "Stored data" : "Unavailable"}</span>
       </div>
-      <div className="admin-summary-grid" aria-label="Overview data sections">
+      {overview ? <>
+        <div className="admin-overview-kpis" aria-label="Live platform totals">
         {cards.map((card) => (
           <article className="admin-summary-card" key={card.label}>
-            <div className="admin-summary-card-top"><span className="admin-summary-icon" aria-hidden="true">{card.icon}</span><span className="admin-summary-state">Unavailable</span></div>
-            <h2>{card.label}</h2><p>{card.description}</p>
-            <div className="admin-summary-placeholder">No live data</div>
+            <div className="admin-summary-card-top"><span className="admin-summary-icon" aria-hidden="true">{card.icon}</span><a className="admin-kpi-open" href={card.href}>View ↗</a></div>
+            <p className="admin-kpi-label">{card.label}</p><strong className="admin-kpi-value">{card.value}</strong><p>{card.description}</p>
           </article>
         ))}
-      </div>
-      <section className="admin-overview-note">
-        <div><p className="admin-eyebrow">DATA STATUS</p><h2>Waiting for a verified source</h2><p>Live summaries will remain empty until the database and migration history are reviewed and an authorized read-only data layer is added.</p></div>
-        <span className="admin-source-indicator"><span className="admin-status-dot" /> No source connected</span>
-      </section>
+        </div>
+        <div className="admin-dashboard-sections">
+          <section className="admin-dashboard-panel"><div className="admin-dashboard-panel-heading"><div><p className="admin-eyebrow">OPERATIONS</p><h2>Publishing cycles</h2></div><a href="/admin/campaigns">View campaigns →</a></div><div className="admin-status-list">{Object.entries(overview.cycles.byStatus).map(([status, count]) => <div key={status}><span>{status.replaceAll("_", " ")}</span><strong>{count.toLocaleString()}</strong></div>)}</div><p className="admin-dashboard-disclosure">Current stored status only. This is not a live worker health check.</p></section>
+          <section className="admin-dashboard-panel"><div className="admin-dashboard-panel-heading"><div><p className="admin-eyebrow">CONNECTED ACCOUNTS</p><h2>Instagram status</h2></div><a href="/admin/instagram">View accounts →</a></div><div className="admin-status-list">{Object.entries(overview.instagram.byStoredStatus).map(([status, count]) => <div key={status}><span>{status.replaceAll("_", " ")}</span><strong>{count.toLocaleString()}</strong></div>)}</div><p className="admin-dashboard-disclosure">Stored account statuses; Meta is not contacted.</p></section>
+          <section className="admin-dashboard-panel"><div className="admin-dashboard-panel-heading"><div><p className="admin-eyebrow">BILLING</p><h2>Payment records</h2></div><a href="/admin/billing">Open billing →</a></div><div className="admin-status-list">{Object.entries(overview.billing.recordsByRecognizedStoredStatus).map(([status, count]) => <div key={status}><span>{status.replaceAll("_", " ")}</span><strong>{count.toLocaleString()}</strong></div>)}</div><p className="admin-dashboard-disclosure">Revenue and monetary summaries are unavailable; no estimates are shown.</p></section>
+        </div>
+        <section className="admin-overview-note"><div><p className="admin-eyebrow">DATA LIMITATIONS</p><h2>What these totals mean</h2><p>These figures are read from stored records. Active-user, entitlement, revenue, fee, tax, and recent activity summaries are not available from the current verified overview data.</p></div><span className="admin-source-indicator"><span className="admin-status-dot" /> Updated {overview.generatedAt.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</span></section>
+      </> : <section className="admin-empty-state"><span className="admin-empty-icon" aria-hidden="true">⌁</span><span className="admin-empty-badge">Database unavailable</span><h2>Dashboard data could not be loaded</h2><p>No statistics are fabricated. Check Admin database availability and try again later.</p></section>}
     </>
   );
 }
@@ -92,7 +97,7 @@ export async function renderAdminDashboardPage(section: AdminSectionId) {
 
 export function AdminDashboardPage({ section }: { section: AdminSectionId }) {
   if (section === "overview") {
-    return <AdminShell activeSection="overview"><PageHeading title="Platform overview" description="A high-level view of ClipForge operations." /><OverviewContent /></AdminShell>;
+    return <OverviewDashboard />;
   }
 
   const copy = SECTION_COPY[section];
@@ -108,4 +113,12 @@ export function AdminDashboardPage({ section }: { section: AdminSectionId }) {
       </section>
     </AdminShell>
   );
+}
+
+async function OverviewDashboard() {
+  const runtime = getRuntime();
+  let overview: AdminOverview | null = null;
+  try { overview = runtime.adminData ? await (await runtime.adminData()).getOverview() : null; }
+  catch { overview = null; }
+  return <AdminShell activeSection="overview" dataStatus={overview ? "available" : "unavailable"}><div className="admin-dashboard-intro"><PageHeading title="Overview" description="A live snapshot of stored ClipForge operations." /><a className="admin-dashboard-refresh" href="/admin">Refresh dashboard</a></div><OverviewContent overview={overview} /></AdminShell>;
 }

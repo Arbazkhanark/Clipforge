@@ -18,6 +18,7 @@ import { setRuntimeForTests, type Runtime } from "../src/server/runtime.ts";
 import { getEditorPageData } from "../src/server/queries.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
 import EditorPage from "../app/(app)/editor/page.tsx";
+import { EditorVideoPreview } from "../src/components/EditorVideoPreview.tsx";
 import { ffmpegAvailable, makeFixtures, type Fixtures } from "./helpers/media-fixtures.ts";
 import { NOW, makeMedia } from "./helpers.ts";
 
@@ -153,6 +154,15 @@ test("preview: the border surrounds the VIDEO (not the canvas); logo is placed b
   assert.deepEqual(layout.video, { x: 0, y: 370, width: 720, height: 540 });
   assert.deepEqual(layout.logo, { width: 144, height: 72, x: 288, y: 92 });                           // centre (360, 128): 128 - 72/2
   assert.equal(computePreviewLayout(DEFAULT_EDITING_SETTINGS, { width: 320, height: 240 }).logo, null);
+});
+
+test("preview UI: border is attached to the media element and original comparison uses the authorized source", () => {
+  const settings = { ...DEFAULT_EDITING_SETTINGS, border: { thicknessPx: 8, colorHex: "#12abef" } };
+  const page = html(<EditorVideoPreview videoUrl="/api/media/file?id=owned-video&variant=preview" sourceId="owned-video" sourceWidth={720} sourceHeight={1280} durationMs={12000} settings={settings} maxResolution="720p" images={[]} formId="editor-form" />);
+  assert.ok(page.includes('aria-label="Original source video"'));
+  assert.ok(page.includes('aria-label="Compare original and edited video"'));
+  assert.ok(page.includes("outline:8px solid #12abef"));
+  assert.ok(!page.includes("data-border"));
 });
 
 test("REAL FFMPEG PROOF: pixels in a real render sit where the preview layout predicts (background, border, video, logo)", { skip: !ffmpegAvailable ? "ffmpeg not installed" : false }, async () => {
@@ -294,6 +304,8 @@ test("page: the form has every control and the actual preview uses the authorize
   assert.ok(/formNoValidate/i.test(page)); assert.ok(/formAction="\/api\/forms\/editor-save"/i.test(page)); assert.ok(/formMethod="post"/i.test(page)); assert.ok(page.includes('method="get"') && page.includes('action="/editor"'));
   assert.ok(page.includes('src="/api/media/file?id=v1&amp;variant=preview"'));
   assert.ok(page.includes('aria-label="Source video preview"') && page.includes("Playback of your source video"));
+  assert.ok(page.includes('aria-label="Original source video"') && page.includes('aria-label="Compare original and edited video"'));
+  assert.ok(page.includes('aria-pressed="false">Original</button>') && page.includes('aria-pressed="true">Edited</button>'));
   assert.ok(page.includes('aria-label="Zoom out"') && page.includes('aria-label="Zoom in"') && page.includes("Reset zoom"));
   assert.ok(page.includes('id="editor-range-zoom-value">100%</output>'));
   const zoomSlider = page.match(/<input[^>]*name="zoom"[^>]*>/)?.[0] ?? "";
@@ -312,8 +324,8 @@ test("page: the form has every control and the actual preview uses the authorize
 
 test("page: query settings drive the browser composition - border, background, and draggable logo overlay", async () => {
   const page = html(await EditorPage({ searchParams: Promise.resolve({ media: "v1", aspect: "9:16", bg: "solid", bgColor: "#ff00ff", borderPx: "10", borderColor: "#00ff00", logoMedia: "logo1", logoWidth: "0.2", logoX: "0.5", logoY: "0.1" }) }));
-  assert.ok(page.includes('viewBox="0 0 720 1280"')); assert.ok(page.includes("background:#ff00ff")); assert.ok(page.includes("data-border")); assert.ok(page.includes("data-logo-handle"));
-  assert.ok(page.includes("background:#00ff00"));
+  assert.ok(page.includes('viewBox="0 0 720 1280"')); assert.ok(page.includes("background:#ff00ff")); assert.ok(!page.includes("data-border")); assert.ok(page.includes("data-logo-handle"));
+  assert.ok(page.includes("outline:10px solid #00ff00"));
   assert.ok(page.includes('value="10"')); assert.ok(page.includes("My logo"));
   assert.ok(/<rect data-logo-handle="true"[^>]*x="288" y="92" width="144" height="72"/.test(page));
 });

@@ -255,9 +255,9 @@ test("registration and sign-in copy matches database, local memory, and unconfig
   const off = html(<AuthForm mode="register" demoMode={false} available={false} />);
   assert.ok(off.includes("not available yet"));
   assert.ok(/<button type="submit" disabled/.test(off));
-  assert.ok(FLASH_NOTICES.registered.includes("no confirmation message was sent"));
+  assert.ok(FLASH_NOTICES.registered.includes("Check the inbox"));
   assert.ok(!/we sent/i.test(FLASH_NOTICES.registered));
-  assert.ok(FLASH_ERRORS.email_not_verified.includes("no confirmation message was sent"));
+  assert.ok(FLASH_ERRORS.email_not_verified.includes("confirm your email"));
   const runtime = { mode: "database", emailDelivery: "outbox", auth: {}, currentUserId: async () => null, repo: {}, newId: () => "x", now: () => new Date(0) } as Runtime;
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(runtime);

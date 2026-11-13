@@ -140,7 +140,9 @@ export function AppShell({
                 as saved.{" "}
                 {emailDelivery === "outbox"
                   ? "A real email provider is not connected, so confirmation messages are unavailable to account holders."
-                  : "Email is not sent, so new accounts stay unverified and can still sign in."}{" "}
+                  : emailDelivery === "ses" || emailDelivery === "nodemailer"
+                    ? "Email confirmation is delivered through the configured server-side provider."
+                    : "Email is not sent, so new accounts stay unverified and can still sign in."}{" "}
                 Instagram publishing and payment availability are shown on
                 their respective pages. Cloud S3 storage is not connected.
               </p>
