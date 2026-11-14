@@ -75,7 +75,7 @@ export async function getMediaLibrary(ctx: RequestContext, requested: unknown): 
   return { items: items.map(toMediaCard), total, page: query.page, pageSize: MEDIA_PAGE_SIZE, pageCount: Math.max(1, Math.ceil(total / MEDIA_PAGE_SIZE)), search: query.search, sort: query.sort, kind: query.kind ?? "all", filtered: query.filtered };
 }
 
-export interface CollectionCard { id: string; name: string; description: string | null; videoCount: number; visibility: CollectionVisibility; archived: boolean; sharedByAnotherUser: boolean; capabilities: Capability[]; }
+export interface CollectionCard { id: string; name: string; description: string | null; videoCount: number; visibility: CollectionVisibility; archived: boolean; sharedByAnotherUser: boolean; capabilities: Capability[]; createdAt: Date | null; previewMediaId: string | null; }
 
 async function toCollectionCard(ctx: RequestContext, userId: string, collection: VideoCollection): Promise<CollectionCard> {
   const grants = await ctx.repo.getGrants(collection.id);
@@ -83,6 +83,8 @@ async function toCollectionCard(ctx: RequestContext, userId: string, collection:
     id: collection.id, name: collection.name ?? "Untitled collection", description: collection.description ?? null, videoCount: collection.mediaIds.length,
     visibility: collection.visibility, archived: collection.archived, sharedByAnotherUser: collection.ownerId !== userId,
     capabilities: [...getCollectionCapabilities(userId, collection, grants, ctx.now)],
+    createdAt: collection.createdAt ?? null,
+    previewMediaId: null,
   };
 }
 
@@ -99,19 +101,28 @@ function sortCollections(list: VideoCollection[], sort: CollectionSort): VideoCo
   return [...list].sort(sort === "name" ? byName : sort === "oldest" ? byTime : (a, b) => timeOnly(b, a) || idOnly(a, b));
 }
 
-export async function getCollectionsOverview(ctx: RequestContext, requested?: unknown): Promise<{ owned: CollectionCard[]; sharedWithMe: CollectionCard[]; accessRequests: { id: string; collectionId: string; requestedCapabilities: Capability[]; status: "pending" | "approved" | "rejected"; createdAt: Date; decidedAt: Date | null }[]; libraryChoices: MediaCard[]; search: string; sort: CollectionSort; filtered: boolean }> {
+export async function getCollectionsOverview(ctx: RequestContext, requested?: unknown): Promise<{ owned: CollectionCard[]; sharedWithMe: CollectionCard[]; accessRequests: { id: string; collectionId: string; requestedCapabilities: Capability[]; status: "pending" | "approved" | "rejected"; createdAt: Date; decidedAt: Date | null }[]; incomingAccessRequests: { id: string; collectionId: string; collectionName: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[]; libraryChoices: MediaCard[]; search: string; sort: CollectionSort; filtered: boolean; tab: "mine" | "shared" | "requests" }> {
   const userId = requireUser(ctx);
   const query = readCollectionListQuery(requested);
   const needle = query.search.toLocaleLowerCase();
   const matches = (collection: VideoCollection) => needle.length === 0 || (collection.name ?? "").toLocaleLowerCase().includes(needle);
   const [owned, shared] = await Promise.all([ctx.repo.listCollectionsForOwner(userId), ctx.repo.listCollectionsSharedWith(userId, ctx.now)]);
-  const accessRequests = await ctx.repo.listCollectionAccessRequestsForRequester(userId);
+  const [accessRequests, incomingByCollection] = await Promise.all([
+    ctx.repo.listCollectionAccessRequestsForRequester(userId),
+    Promise.all(owned.map(async (collection) => ({ collection, requests: await ctx.repo.listPendingCollectionAccessRequests(collection.id, userId) }))),
+  ]);
+  const incomingAccessRequests = incomingByCollection.flatMap(({ collection, requests }) => requests.map((request) => ({ id: request.id, collectionId: collection.id, collectionName: collection.name ?? "Untitled collection", requesterId: request.requesterId, requestedCapabilities: request.requestedCapabilities, createdAt: request.createdAt })));
+  const visibleCollections = [...owned, ...shared];
+  const previews = await ctx.repo.getMediaByIds([...new Set(visibleCollections.map((collection) => collection.mediaIds[0]).filter((id): id is string => Boolean(id)))]);
+  const previewByCollection = new Map(visibleCollections.map((collection) => [collection.id, previews.find((media) => media.id === collection.mediaIds[0] && media.kind === "video" && media.hasThumbnail)?.id ?? null]));
   const libraryChoices = (await ctx.repo.listMediaForOwner(userId, { limit: 200, offset: 0, sort: "name" })).items.map(toMediaCard);
+  const tabRaw = typeof requested === "object" && requested !== null && "tab" in requested ? (requested as { tab?: unknown }).tab : undefined;
+  const tab: "mine" | "shared" | "requests" = tabRaw === "shared" || tabRaw === "requests" ? tabRaw : "mine";
   return {
-    owned: await Promise.all(sortCollections(owned.filter(matches), query.sort).map((c) => toCollectionCard(ctx, userId, c))),
-    sharedWithMe: await Promise.all(sortCollections(shared.filter(matches), query.sort).map((c) => toCollectionCard(ctx, userId, c))),
-    accessRequests: accessRequests.map((request) => ({ id: request.id, collectionId: request.collectionId, requestedCapabilities: request.requestedCapabilities, status: request.status, createdAt: request.createdAt, decidedAt: request.decidedAt })), libraryChoices,
-    search: query.search, sort: query.sort, filtered: query.filtered,
+    owned: await Promise.all(sortCollections(owned.filter(matches), query.sort).map(async (c) => ({ ...(await toCollectionCard(ctx, userId, c)), previewMediaId: previewByCollection.get(c.id) ?? null }))),
+    sharedWithMe: await Promise.all(sortCollections(shared.filter(matches), query.sort).map(async (c) => ({ ...(await toCollectionCard(ctx, userId, c)), previewMediaId: previewByCollection.get(c.id) ?? null }))),
+    accessRequests: accessRequests.map((request) => ({ id: request.id, collectionId: request.collectionId, requestedCapabilities: request.requestedCapabilities, status: request.status, createdAt: request.createdAt, decidedAt: request.decidedAt })),
+    incomingAccessRequests, libraryChoices, search: query.search, sort: query.sort, filtered: query.filtered, tab,
   };
 }
 

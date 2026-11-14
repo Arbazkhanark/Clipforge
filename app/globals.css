@@ -7417,3 +7417,47 @@ body.clipforge-dark .admin-dashboard-refresh, body.clipforge-dark .admin-dashboa
 @media (max-width: 1200px) { .admin-overview-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .admin-dashboard-sections { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .admin-overview-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .admin-dashboard-sections { grid-template-columns: 1fr; } }
 @media (max-width: 480px) { .admin-overview-kpis { grid-template-columns: 1fr; } .admin-dashboard-intro { align-items: flex-start; flex-direction: column; } }
+
+/* Collections overview redesign: tabbed workspace and focused creation dialog. */
+.collection-tabs { display: flex; gap: .35rem; overflow-x: auto; margin: 0 0 1.1rem; padding: .35rem; border: 1px solid var(--border, #e7ded5); border-radius: 13px; background: var(--surface, #fffdfa); }
+.collection-tabs a { display: inline-flex; align-items: center; gap: .55rem; flex: 0 0 auto; padding: .7rem .95rem; border-radius: 9px; color: var(--muted, #81776e); font-size: .82rem; font-weight: 700; text-decoration: none; }
+.collection-tabs a[aria-current="page"] { color: #fff !important; -webkit-text-fill-color: #fff; background: var(--accent, #bd5633); }
+.collection-tabs a[aria-current="page"] span { color: #fff !important; -webkit-text-fill-color: #fff; background: rgb(255 255 255 / 18%); }
+.collection-tabs a span { min-width: 1.35rem; padding: .08rem .3rem; border-radius: 99px; background: rgb(127 127 127 / 13%); text-align: center; font-size: .7rem; }
+.collection-card-preview { display: block; height: 150px; margin: -19px -19px 15px; overflow: hidden; border-radius: 14px 14px 0 0; background: var(--background, #faf7f2); }
+.collection-card-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.collection-card-placeholder { display: grid; height: 100%; place-items: center; color: var(--accent, #bd5633); background: radial-gradient(circle at 75% 25%, var(--accent-soft, #f7e9e2), transparent 42%), var(--background, #faf7f2); }
+.collection-card-placeholder span { display: grid; width: 48px; height: 48px; place-items: center; border: 1px solid var(--border, #e7ded5); border-radius: 15px; background: var(--surface, #fffdfa); font-size: 1.4rem; }
+.collection-card-actions { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-top: .9rem; }
+.collection-item-card .collection-item-top { justify-content: flex-start; }
+.collection-open-link { color: var(--accent, #bd5633); font-size: .8rem; font-weight: 750; text-decoration: none; }
+.collection-open-link:hover, .collection-card-menu a:hover { text-decoration: underline; }
+.collection-card-menu { position: relative; }
+.collection-card-menu summary { display: grid; width: 2.1rem; height: 2.1rem; place-items: center; border: 1px solid var(--border, #e7ded5); border-radius: 8px; color: var(--text, #292522); cursor: pointer; list-style: none; font-size: .8rem; letter-spacing: 1px; }
+.collection-card-menu summary::-webkit-details-marker { display: none; }
+.collection-card-menu > div { position: absolute; z-index: 5; right: 0; bottom: calc(100% + .35rem); display: grid; min-width: 10rem; gap: .2rem; padding: .4rem; border: 1px solid var(--border, #e7ded5); border-radius: 10px; background: var(--surface, #fffdfa); box-shadow: 0 12px 30px rgb(30 20 12 / 14%); }
+.collection-card-menu a, .collection-card-menu span { padding: .55rem .6rem; border-radius: 6px; color: var(--text, #292522); font-size: .75rem; text-decoration: none; }
+.collection-card-menu a:hover { background: var(--background, #faf7f2); }
+.collection-dialog { width: min(760px, calc(100vw - 2rem)); max-width: 760px; max-height: min(88dvh, 900px); padding: 1.4rem; overflow-y: auto; border: 1px solid var(--border, #e7ded5); border-radius: 18px; color: var(--text, #292522); background: var(--surface, #fffdfa); box-shadow: 0 24px 90px rgb(0 0 0 / 28%); }
+.collection-dialog::backdrop { background: rgb(18 15 13 / 62%); backdrop-filter: blur(3px); }
+.collection-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.2rem; }
+.collection-dialog-heading h2 { margin: .25rem 0; font-size: 1.35rem; letter-spacing: -.03em; }
+.collection-dialog-heading p { margin: 0; color: var(--muted, #81776e); font-size: .82rem; }
+.collection-dialog-close { width: 2.4rem; height: 2.4rem; flex: 0 0 auto; border: 1px solid var(--border, #e7ded5); border-radius: 50%; color: var(--text, #292522); background: transparent; font: inherit; font-size: 1.3rem; cursor: pointer; }
+.collection-dialog-cancel { flex: 0 0 auto; padding: .55rem .8rem; border: 1px solid var(--border, #e7ded5); border-radius: 8px; color: var(--text, #292522); background: transparent; font: inherit; font-size: .78rem; font-weight: 700; cursor: pointer; }
+.collection-dialog .collection-form-grid { padding: 0; border: 0; background: transparent; }
+.collection-dialog .collection-create-videos, .collection-dialog .collection-settings-builder { max-height: 38vh; overflow-y: auto; }
+.collection-request-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 1.2rem; }
+.collection-request-group { min-width: 0; padding: 1.1rem; border: 1px solid var(--border, #e7ded5); border-radius: 15px; background: var(--surface, #fffdfa); }
+.collection-request-group-heading { display: flex; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+.collection-request-group-heading h2 { margin: .25rem 0; font-size: 1.1rem; }
+.collection-request-group-heading p { margin: 0; color: var(--muted, #81776e); font-size: .78rem; }
+.collection-request-group .collection-request-grid { grid-template-columns: minmax(0, 1fr); }
+.collection-request-form { margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border, #e7ded5); }
+.collection-request-columns .collection-empty { min-height: 140px; }
+.dark .collection-tabs, [data-theme="dark"] .collection-tabs, body.clipforge-dark .collection-tabs,
+.dark .collection-request-group, [data-theme="dark"] .collection-request-group, body.clipforge-dark .collection-request-group { background: var(--surface, #211d1a); }
+.dark .collection-card-menu > div, [data-theme="dark"] .collection-card-menu > div, body.clipforge-dark .collection-card-menu > div { background: var(--surface, #211d1a); }
+.dark .collection-card-menu a:hover, [data-theme="dark"] .collection-card-menu a:hover, body.clipforge-dark .collection-card-menu a:hover { background: var(--background, #171311); }
+@media (max-width: 900px) { .collection-request-columns { grid-template-columns: 1fr; } .collection-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .collections-page-header { align-items: flex-start; flex-direction: column; } .collection-card-grid { grid-template-columns: 1fr; } .collection-filter-form { align-items: stretch; flex-direction: column; } .collection-sort-field select, .collection-filter-button { width: 100%; } .collection-dialog { padding: 1rem; } }

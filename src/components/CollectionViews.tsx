@@ -290,7 +290,7 @@ import type { CollectionCard, CollectionDetail, MediaCard } from "../server/quer
 import type { CollectionSort } from "../server/library-query.ts";
 import type { Capability } from "../lib/domain/types.ts";
 import { Thumbnail } from "./MediaTable.tsx";
-import { CollectionCreateForm } from "./CollectionCreateForm.tsx";
+import { CollectionCreateDialog } from "./CollectionCreateDialog.tsx";
 import { CollectionCaptionCoverEditor } from "./CollectionCaptionCoverEditor.tsx";
 import {
   CAPABILITY_LABELS,
@@ -381,12 +381,10 @@ function CollectionList({
           className="collection-item-card"
           data-collection-id={collection.id}
         >
+          <a className="collection-card-preview" href={`/collections/${collection.id}`} aria-label={`Open ${collection.name}`}>
+            {collection.previewMediaId ? <Thumbnail media={{ id: collection.previewMediaId, hasThumbnail: true, kind: "video" }} /> : <div className="collection-card-placeholder" aria-hidden="true"><span>▱</span></div>}
+          </a>
           <div className="collection-item-top">
-            <div className="collection-folder-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-                <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
-              </svg>
-            </div>
             <span className={`collection-visibility collection-visibility-${collection.visibility}`}>
               {VISIBILITY_LABELS[collection.visibility]}
             </span>
@@ -408,6 +406,7 @@ function CollectionList({
               </svg>
               {formatCount(collection.videoCount)} videos
             </span>
+            {collection.createdAt && <span>Created {collection.createdAt.toLocaleDateString()}</span>}
             {collection.archived && (
               <span className="collection-archived-label">Archived</span>
             )}
@@ -424,9 +423,21 @@ function CollectionList({
             </div>
           )}
 
-          <a className="collection-open-link" href={`/collections/${collection.id}`}>
-            Open collection <span aria-hidden="true">→</span>
-          </a>
+          <div className="collection-card-actions">
+            <a className="collection-open-link" href={`/collections/${collection.id}`}>Open collection <span aria-hidden="true">→</span></a>
+            <details className="collection-card-menu">
+              <summary aria-label={`More actions for ${collection.name}`}>•••</summary>
+              <div>
+                <a href={`/collections/${collection.id}`}>Open</a>
+                {!collection.sharedByAnotherUser && <>
+                  <a href={`/collections/${collection.id}#collection-settings`}>Edit details</a>
+                  <a href={`/collections/${collection.id}#sharing-management`}>Manage sharing</a>
+                  <a href={`/collections/${collection.id}#collection-danger-zone`}>Delete collection</a>
+                </>}
+                {collection.sharedByAnotherUser && <span>Actions are limited by your access.</span>}
+              </div>
+            </details>
+          </div>
         </article>
       ))}
     </div>
@@ -441,6 +452,8 @@ export function CollectionsOverviewView({
   sort = "newest",
   filtered = false,
   libraryChoices = [],
+  incomingAccessRequests = [],
+  tab = "mine",
 }: {
   owned: CollectionCard[];
   sharedWithMe: CollectionCard[];
@@ -449,7 +462,19 @@ export function CollectionsOverviewView({
   sort?: CollectionSort;
   filtered?: boolean;
   libraryChoices?: MediaCard[];
+  incomingAccessRequests?: { id: string; collectionId: string; collectionName: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[];
+  tab?: "mine" | "shared" | "requests";
 }) {
+  const tabHref = (nextTab: "mine" | "shared" | "requests") => {
+    const params = new URLSearchParams();
+    if (search) params.set("q", search);
+    if (sort !== "newest") params.set("sort", sort);
+    params.set("tab", nextTab);
+    return `/collections?${params.toString()}`;
+  };
+  const visibleCollections = tab === "shared" ? sharedWithMe : owned;
+  const visibleLabel = tab === "shared" ? "Shared with me" : "My collections";
+  const sharedNames = new Map(sharedWithMe.map((collection) => [collection.id, collection.name]));
   return (
     <main className="collections-page">
       <header className="collections-page-header">
@@ -459,19 +484,18 @@ export function CollectionsOverviewView({
           <p>Organize your media and manage content shared with you.</p>
         </div>
 
-        <a href="#create-collection" className="collection-primary-link">
-          <span aria-hidden="true">+</span> New collection
-        </a>
+        <CollectionCreateDialog libraryChoices={libraryChoices} />
       </header>
 
-      <section className="collection-summary" aria-label="Collection overview">
-        <div><strong>{owned.length}</strong><span>Your collections</span></div>
-        <div><strong>{sharedWithMe.length}</strong><span>Shared with you</span></div>
-        <div><strong>{accessRequests.length}</strong><span>Access requests</span></div>
-      </section>
+      <nav className="collection-tabs" aria-label="Collections sections">
+        <a href={tabHref("mine")} aria-current={tab === "mine" ? "page" : undefined}>My Collections <span>{owned.length}</span></a>
+        <a href={tabHref("shared")} aria-current={tab === "shared" ? "page" : undefined}>Shared with Me <span>{sharedWithMe.length}</span></a>
+        <a href={tabHref("requests")} aria-current={tab === "requests" ? "page" : undefined}>Access Requests <span>{incomingAccessRequests.length + accessRequests.filter((request) => request.status === "pending").length}</span></a>
+      </nav>
 
-      <section className="collection-toolbar">
+      {tab !== "requests" && <section className="collection-toolbar">
         <form method="get" action="/collections" className="collection-filter-form" role="search">
+          <input type="hidden" name="tab" value={tab} />
           <label className="collection-search-field">
             <span className="sr-only">Search collections</span>
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
@@ -500,106 +524,55 @@ export function CollectionsOverviewView({
             Apply
           </button>
         </form>
-      </section>
+      </section>}
 
-      <section className="collection-overview-section">
+      {tab !== "requests" ? <section className="collection-overview-section">
         <SectionHeading
-          eyebrow="PERSONAL LIBRARY"
-          title="Your collections"
-          description="Collections you have created and manage."
-          count={owned.length}
+          eyebrow={tab === "shared" ? "COLLABORATION" : "PERSONAL LIBRARY"}
+          title={visibleLabel}
+          description={tab === "shared" ? "Collections other people have shared with you." : "Collections you have created and manage."}
+          count={visibleCollections.length}
         />
 
         <CollectionList
-          collections={owned}
+          collections={visibleCollections}
           emptyText={
             filtered
-              ? "No collections match your search"
-              : "You haven't created any collections yet"
+              ? `No ${tab === "shared" ? "shared " : ""}collections match your search`
+              : tab === "shared" ? "No collections have been shared with you yet" : "You haven't created any collections yet"
           }
         />
-      </section>
-
-      <div className="collection-quick-actions">
-      <section id="create-collection" className="collection-panel">
-        <div className="collection-panel-heading">
-          <div className="collection-panel-icon" aria-hidden="true">+</div>
-          <div>
-            <h2>Create a collection</h2>
-            <p>Group related videos together and control who can access them.</p>
-          </div>
-        </div>
-
-        <CollectionCreateForm libraryChoices={libraryChoices} />
-      </section>
-
-      <section className="collection-panel">
-        <div className="collection-panel-heading">
-          <div className="collection-panel-icon" aria-hidden="true">↗</div>
-          <div>
-            <h2>Request access</h2>
-            <p>Have a collection ID from another user? Request permission to access it.</p>
-          </div>
-        </div>
-
-        <form method="post" action="/api/forms/access-request" className="collection-access-form">
-          <label className="collection-form-field">
-            <span>Collection ID</span>
-            <input
-              name="collectionId"
-              required
-              maxLength={64}
-              pattern="[A-Za-z0-9_-]{1,64}"
-              placeholder="Enter the collection ID"
-            />
-          </label>
-
-          <fieldset className="collection-capability-fieldset">
-            <legend>What would you like to do?</legend>
-            <div className="collection-checkbox-grid">
-              {CAPABILITIES.map((capability) => (
-                <label key={capability} className="collection-checkbox">
-                  <input
-                    type="checkbox"
-                    name="requestedCapabilities"
-                    value={capability}
-                  />
-                  <span>{CAPABILITY_LABELS[capability]}</span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <p className="collection-form-hint">
-            The system will not reveal whether an unknown private collection exists.
-          </p>
-
-          <button type="submit" className="collection-secondary-button">
-            Send access request
-          </button>
-        </form>
-      </section>
-      </div>
-
-      <section className="collection-overview-section">
-        <SectionHeading
-          eyebrow="COLLABORATION"
-          title="Your access requests"
-          description="Track the status of collections you have requested access to."
-          count={accessRequests.length}
-        />
-
-        {accessRequests.length === 0 ? (
-          <EmptyState
-            title="No access requests"
-            description="Your requests to access other collections will appear here."
-          />
-        ) : (
-          <div className="collection-request-grid">
-            {accessRequests.map((request) => (
+      </section> : <section className="collection-requests-page">
+        <div className="collection-request-columns">
+          <section className="collection-request-group" aria-labelledby="incoming-requests-heading">
+            <div className="collection-request-group-heading"><div><span className="collection-eyebrow">OWNER WORKSPACE</span><h2 id="incoming-requests-heading">Incoming requests</h2><p>Requests to access collections you own.</p></div><span className="collection-count">{incomingAccessRequests.length}</span></div>
+            {incomingAccessRequests.length === 0 ? <EmptyState title="No incoming requests" description="New requests for your collections will appear here." /> : <div className="collection-request-grid">
+              {incomingAccessRequests.map((request) => <article className="collection-request-card" key={request.id}>
+                <div className="collection-request-top"><span className="collection-request-label">{request.collectionName}</span><span className="collection-status collection-status-pending">Pending</span></div>
+                <p className="collection-request-id">Requester <code>{request.requesterId}</code></p>
+                <div className="collection-request-permissions"><span>Requested permissions</span><p>{request.requestedCapabilities.map((capability) => CAPABILITY_LABELS[capability]).join(", ")}</p></div>
+                <p className="collection-form-hint">Received {request.createdAt.toLocaleDateString()}</p>
+                <form method="post" action="/api/forms/access-request-decision" className="collection-decision-actions">
+                  <input type="hidden" name="collectionId" value={request.collectionId} /><input type="hidden" name="requestId" value={request.id} />
+                  <button name="decision" value="approved" type="submit" className="collection-primary-button">Approve</button>
+                  <button name="decision" value="rejected" type="submit" className="collection-danger-button">Reject</button>
+                </form>
+              </article>)}
+            </div>}
+          </section>
+          <section className="collection-request-group" aria-labelledby="outgoing-requests-heading">
+            <div className="collection-request-group-heading"><div><span className="collection-eyebrow">YOUR REQUESTS</span><h2 id="outgoing-requests-heading">Outgoing requests</h2><p>Track requests you have sent.</p></div><span className="collection-count">{accessRequests.length}</span></div>
+            <form method="post" action="/api/forms/access-request" className="collection-access-form collection-request-form">
+              <label className="collection-form-field"><span>Collection ID</span><input name="collectionId" required maxLength={64} pattern="[A-Za-z0-9_-]{1,64}" placeholder="Paste a collection ID" /></label>
+              <fieldset className="collection-capability-fieldset"><legend>Request permissions</legend><div className="collection-checkbox-grid">{CAPABILITIES.map((capability) => <label key={capability} className="collection-checkbox"><input type="checkbox" name="requestedCapabilities" value={capability} /><span>{CAPABILITY_LABELS[capability]}</span></label>)}</div></fieldset>
+              <p className="collection-form-hint">Unknown private collections stay indistinguishable from unavailable ones.</p>
+              <button type="submit" className="collection-secondary-button">Send request</button>
+            </form>
+            {accessRequests.length === 0 ? <EmptyState title="No outgoing requests" description="Requests you send will appear here with their current status." /> : <div className="collection-request-grid">
+              {accessRequests.map((request) => (
               <article className="collection-request-card" key={request.id}>
                 <div className="collection-request-top">
-                  <span className="collection-request-label">Collection request</span>
+                  <span className="collection-request-label">{sharedNames.get(request.collectionId) ?? "Collection request"}</span>
                   <span className={`collection-status collection-status-${request.status}`}>
                     {request.status}
                   </span>
@@ -619,34 +592,18 @@ export function CollectionsOverviewView({
                 </div>
 
                 <div className="collection-request-dates">
-                  <span>Sent: {request.createdAt.toISOString()}</span>
+                  <span>Sent {request.createdAt.toLocaleDateString()}</span>
                   {request.decidedAt && (
-                    <span>Decided: {request.decidedAt.toISOString()}</span>
+                    <span>Decided {request.decidedAt.toLocaleDateString()}</span>
                   )}
                 </div>
               </article>
             ))}
-          </div>
-        )}
+            </div>}
+          </section>
+        </div>
       </section>
-
-      <section className="collection-overview-section">
-        <SectionHeading
-          eyebrow="SHARED WITH YOU"
-          title="Shared collections"
-          description="Collections other people have given you access to."
-          count={sharedWithMe.length}
-        />
-
-        <CollectionList
-          collections={sharedWithMe}
-          emptyText={
-            filtered
-              ? "No shared collections match your search"
-              : "No collections have been shared with you yet"
-          }
-        />
-      </section>
+      }
     </main>
   );
 }
@@ -666,7 +623,7 @@ function MixForm({ detail }: { detail: CollectionDetail }) {
   }
 
   return (
-    <section className="collection-panel">
+    <section id="add-to-cycle" className="collection-panel">
       <SectionHeading
         eyebrow="PUBLISHING"
         title="Add videos to a cycle"
@@ -757,7 +714,7 @@ function SharingManagement({ detail }: { detail: CollectionDetail }) {
   if (!sharingManagement) return null;
 
   return (
-    <section className="collection-panel">
+    <section id="sharing-management" className="collection-panel">
       <SectionHeading
         eyebrow="ACCESS CONTROL"
         title="People with collection access"
@@ -893,7 +850,7 @@ function ShareLinks({ detail }: { detail: CollectionDetail }) {
   if (!shareLinks || !sharingManagement) return null;
 
   return (
-    <section className="collection-panel">
+    <section id="share-links" className="collection-panel">
       <SectionHeading
         eyebrow="LINK SHARING"
         title="Secure share links"
@@ -1122,7 +1079,7 @@ function CollectionSettings({ detail }: { detail: CollectionDetail }) {
 
   return (
     <>
-      <section className="collection-panel">
+      <section id="collection-settings" className="collection-panel">
         <SectionHeading
           eyebrow="SETTINGS"
           title="Collection details"
@@ -1221,7 +1178,7 @@ function CollectionSettings({ detail }: { detail: CollectionDetail }) {
         )}
       </section>
 
-      <section className="collection-danger-panel">
+      <section id="collection-danger-zone" className="collection-danger-panel">
         <SectionHeading
           eyebrow="DANGER ZONE"
           title="Archive or delete"
@@ -1283,7 +1240,7 @@ function CollectionVideos({ detail }: { detail: CollectionDetail }) {
   const { collection, videos, permissions } = detail;
 
   return (
-    <section className="collection-videos-section">
+    <section id="collection-videos" className="collection-videos-section">
       <SectionHeading
         eyebrow="COLLECTION CONTENT"
         title="Videos"
@@ -1472,6 +1429,12 @@ export function CollectionDetailView({ detail }: { detail: CollectionDetail }) {
             )}
           </div>
         </div>
+        <nav className="collection-detail-actions" aria-label="Collection actions">
+          <a href="#collection-videos" className="collection-secondary-button">Videos</a>
+          {permissions.canUseInCycle && <a href="#add-to-cycle" className="collection-secondary-button">Add to cycle</a>}
+          {permissions.isOwner && <a href="#collection-settings" className="collection-secondary-button">Edit details</a>}
+          {permissions.isOwner && detail.sharingManagement && <a href="#sharing-management" className="collection-secondary-button">Manage sharing</a>}
+        </nav>
       </header>
 
       <PermissionOverview detail={detail} />

@@ -296,7 +296,7 @@ test("cycles page: create form lists only your connected accounts (no external i
   const withAccount = html(await CyclesPage({}));
   assert.ok(withAccount.includes('action="/api/forms/cycle-create"')); assert.ok(withAccount.includes("Connected account 1")); assert.ok(!withAccount.includes(">demo-account<")); // the internal id is only the option value, never visible text
   repo.socialAccounts.set("demo-account", { id: "demo-account", userId: DEMO_USER_ID, status: "token_expired" });
-  assert.ok(html(await CyclesPage({})).includes("Live publishing is not configured"));
+  assert.ok(html(await CyclesPage({})).includes("Scheduled Reels are handled separately by the publishing worker"));
 });
 
 test("cycle page: one form wraps the table and all actions; versions only for editable items; covers are images only; start needs readiness", async () => {
@@ -309,7 +309,7 @@ test("cycle page: one form wraps the table and all actions; versions only for ed
   assert.ok(formHtml.includes("never shown as applied on Instagram"));
   assert.ok(page.includes('action="/api/forms/cycle-start"')); assert.ok(!/<button type="submit" disabled>Start cycle/.test(page));
   assert.ok(page.includes('action="/api/forms/cycle-repeat"'));
-  assert.ok(page.includes("Live publishing is not configured"));
+  assert.ok(page.includes("Starting a cycle changes its status in ClipForge; it does not publish a Reel."));
   assert.ok(page.includes("pauses new claims after 3"));
   assert.ok(page.includes("eligible, unpublished"));
   // Blocked cycle: start button disabled.

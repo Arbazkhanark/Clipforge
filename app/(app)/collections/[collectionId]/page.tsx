@@ -23,7 +23,7 @@ export default async function CollectionPage(props: { params: Promise<{ collecti
     : flash;
   return (
     <>
-      <FlashMessage flash={shown} />
+      <FlashMessage flash={shown} variant="toast" />
       {result.ok ? <CollectionDetailView detail={result.data} /> : <ErrorState error={result.error} />}
     </>
   );

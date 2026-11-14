@@ -101,22 +101,33 @@ test("media library never shows other people's media or storage details", async 
   assert.ok(!/storageKey|s3:\/\/|amazonaws|https?:\/\/[^"]*\.(mp4|mov)/i.test(out));
 });
 
-test("collections: owned and shared-with-you are separate; permissions are explained in words", async () => {
+test("collections overview uses focused tabs and keeps creation and access requests out of the main library", async () => {
   const out = html(await CollectionsPage({}));
   assert.ok(out.includes("Sample collection - Client A")); assert.ok(out.includes("Shared by link"));
-  assert.ok(out.includes("Sample shared collection (use allowed)"));
-  assert.ok(out.includes("You can: view, use in a publishing cycle."));
-  assert.ok(out.includes("You can: view."));
+  assert.ok(!out.includes("Sample shared collection (use allowed)"));
+  assert.ok(out.includes("My Collections"));
+  assert.ok(out.includes("Shared with Me"));
+  assert.ok(out.includes("Create collection"));
+  assert.ok(out.includes("<dialog"));
+  assert.ok(!out.includes('action="/api/forms/access-request"'));
   const searched = html(await CollectionsPage({ searchParams: Promise.resolve({ q: "Podcast", sort: "name" }) }));
   assert.ok(searched.includes("Sample collection - Podcast clips"));
   assert.ok(!searched.includes("Sample collection - Client A"));
+  const shared = html(await CollectionsPage({ searchParams: Promise.resolve({ tab: "shared" }) }));
+  assert.ok(shared.includes("Sample shared collection (use allowed)"));
+  assert.ok(shared.includes("view, use in a publishing cycle"));
+  assert.ok(!shared.includes("Sample collection - Client A"));
+  const requests = html(await CollectionsPage({ searchParams: Promise.resolve({ tab: "requests" }) }));
+  assert.ok(requests.includes("Incoming requests"));
+  assert.ok(requests.includes("Outgoing requests"));
+  assert.ok(requests.includes('action="/api/forms/access-request"'));
   assert.ok(html(await CollectionsPage({ searchParams: Promise.resolve({ sort: "size" }) })).includes("sort must be newest, oldest, or name."));
 });
 
 test("collection detail: shared collection shows what you may do; a collection you cannot see looks missing", async () => {
   const shared = html(await CollectionPage({ params: Promise.resolve({ collectionId: "demo-shared-col-1" }) }));
-  assert.ok(shared.includes("Use videos in a publishing cycle without copying them: yes"));
-  assert.ok(shared.includes("Import an independent copy: no")); assert.ok(shared.includes("Download originals: no"));
+  assert.ok(shared.includes("Use in publishing cycles"));
+  assert.ok(shared.includes("Import an independent copy")); assert.ok(shared.includes("Download originals"));
   assert.ok(shared.includes("does not give you rights to redistribute"));
   assert.ok(shared.includes("Sample shared clip 1"));
   const memoryNotice = html(await CollectionPage({ params: Promise.resolve({ collectionId: "demo-col-1" }), searchParams: Promise.resolve({ notice: "collection_created" }) }));
@@ -127,7 +138,8 @@ test("collection detail: shared collection shows what you may do; a collection y
   assert.ok(databaseNotice.includes("Collection saved in the database."));
   setRuntimeForTests(runtimeFor(DEMO_USER_ID));
   const viewOnly = html(await CollectionPage({ params: Promise.resolve({ collectionId: "demo-shared-col-2" }) }));
-  assert.ok(viewOnly.includes("Use videos in a publishing cycle without copying them: no"));
+  assert.ok(viewOnly.includes("Use in publishing cycles"));
+  assert.ok(viewOnly.includes("permission-denied"));
   // A different user cannot see someone's private collection - same message as a missing one.
   setRuntimeForTests(runtimeFor("eve"));
   const hidden = html(await CollectionPage({ params: Promise.resolve({ collectionId: "demo-col-1" }) }));

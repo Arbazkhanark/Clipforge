@@ -110,7 +110,7 @@ export function CycleDetailView({ detail, timeZone, instagramLoginConfigured }: 
       </section>
       <section aria-labelledby="publishing-status-heading" className="cycles-status-panel">
         <h2 id="publishing-status-heading">Publishing status</h2>
-        <p role="status">Live publishing is not configured. ClipForge has no publishing worker, so this cycle will not send a Reel.</p>
+        <p role="status">Starting a cycle changes its status in ClipForge; it does not publish a Reel. Scheduled Reels are handled separately by the publishing worker when it is running and each item passes its publishing checks.</p>
         {!instagramLoginConfigured && <p>Instagram Login is not configured on this server. The Connect button explains that instead of opening Meta.</p>}
         <p>Account status: {publishing.accountStatus ? ACCOUNT_STATUS[publishing.accountStatus] : "No account is stored for this cycle."}</p>
         <p>Token expiry: {publishing.tokenExpiresAt ? publishing.tokenExpiresAt : "Not stored"}{publishing.tokenExpired ? ". The stored expiry is in the past. Reconnect the account." : ""}</p>

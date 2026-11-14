@@ -10,7 +10,7 @@ import { requireCustomerPage } from "../../../src/server/auth/customer-page.ts";
 export const metadata = { title: "Collections" };
 export const dynamic = "force-dynamic";
 
-type Search = { notice?: string; error?: string; q?: string; sort?: string };
+type Search = { notice?: string; error?: string; q?: string; sort?: string; tab?: string };
 
 export default async function CollectionsPage(props: { searchParams?: Promise<Search> }) {
   await requireCustomerPage("/collections");
@@ -18,7 +18,7 @@ export default async function CollectionsPage(props: { searchParams?: Promise<Se
   const result = await loadPageData((ctx) => getCollectionsOverview(ctx, searchParams));
   return (
     <>
-      <FlashMessage flash={parseFlash(searchParams)} />
+      <FlashMessage flash={parseFlash(searchParams)} variant="toast" />
       {result.ok ? <CollectionsOverviewView {...result.data} /> : <ErrorState error={result.error} />}
     </>
   );
