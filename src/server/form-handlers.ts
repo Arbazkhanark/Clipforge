@@ -169,7 +169,7 @@ export const cycleScheduleForm = formRoute({
     windowStart: f.get("windowStart") ?? "", windowEnd: f.get("windowEnd") ?? "",
     intervalMinutes: Number(f.get("intervalMinutes")), postsPerInterval: Number(f.get("postsPerInterval")),
     daysOfWeek: f.getAll("daysOfWeek").map((day) => Number(day)), dailyMax: f.get("dailyMax") === "" ? null : Number(f.get("dailyMax")),
-    endDate: f.get("endDate") === "" ? null : f.get("endDate"),
+    endDate: f.get("endDate") === "" ? null : f.get("endDate"), orderMode: f.get("orderMode") ?? "manual", shuffleSeed: f.get("shuffleSeed") ?? "",
   }),
   success: (r, f) => ({ path: cyclePath(f), code: "cycle_schedule_saved", counts: { updated: r.scheduled, skipped: r.unscheduled } }),
   failurePath: cyclePath,

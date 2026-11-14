@@ -240,7 +240,7 @@ export interface CyclePublishingStatus {
   eligibleUnpublishedCount: number;
 }
 
-export interface CycleDetail { cycle: Pick<CycleRecord, "id" | "name" | "status" | "scheduleSettings" | "timezone">; scheduleStartDate: string; items: CycleItem[]; mediaTitles: Record<string, string>; renderOutputsByItemId: Record<string, RenderOutputRecord[]>; selectedRenderOutputAvailableByItemId: Record<string, boolean>; report: PreflightReport; /** Images the user owns that can be used as covers. */ coverChoices: MediaCard[]; /** True when only the final confirmation is missing (every other check passes). */ readyToConfirm: boolean; publishing: CyclePublishingStatus; }
+export interface CycleDetail { cycle: Pick<CycleRecord, "id" | "name" | "status" | "scheduleSettings" | "timezone" | "orderMode">; scheduleStartDate: string; items: CycleItem[]; mediaTitles: Record<string, string>; mediaOrderData: Record<string, { title: string; sizeBytes: number; createdAt: string }>; renderOutputsByItemId: Record<string, RenderOutputRecord[]>; selectedRenderOutputAvailableByItemId: Record<string, boolean>; report: PreflightReport; /** Images the user owns that can be used as covers. */ coverChoices: MediaCard[]; /** True when only the final confirmation is missing (every other check passes). */ readyToConfirm: boolean; publishing: CyclePublishingStatus; }
 
 export async function getCycleDetail(ctx: RequestContext, cycleId: string): Promise<CycleDetail> {
   const userId = requireUser(ctx);
@@ -249,7 +249,11 @@ export async function getCycleDetail(ctx: RequestContext, cycleId: string): Prom
   const items = await ctx.repo.getCycleItems(cycleId);
   const media = await ctx.repo.getMediaByIds([...new Set(items.map((i) => i.mediaAssetId))]);
   const mediaTitles: Record<string, string> = {};
-  for (const m of media) mediaTitles[m.id] = m.title ?? "Untitled";
+  const mediaOrderData: CycleDetail["mediaOrderData"] = {};
+  for (const m of media) {
+    mediaTitles[m.id] = m.title ?? "Untitled";
+    mediaOrderData[m.id] = { title: m.title ?? "Untitled", sizeBytes: m.sizeBytes, createdAt: (m.createdAt ?? new Date(0)).toISOString() };
+  }
   const renderOutputsByItemId: CycleDetail["renderOutputsByItemId"] = {};
   const selectedRenderOutputAvailableByItemId: Record<string, boolean> = {};
   const renderOutputsBySource = new Map<string, Awaited<ReturnType<Repository["listRenderOutputsForOwnerAndSource"]>>>();
@@ -293,7 +297,7 @@ export async function getCycleDetail(ctx: RequestContext, cycleId: string): Prom
     eligibleUnpublishedCount: itemsEligibleForRepeat(items).length,
   };
   const timeZone = cycle.timezone ?? cycle.scheduleSettings?.timeZone ?? "Asia/Kolkata";
-  return { cycle: { id: cycle.id, name: cycle.name, status: cycle.status, scheduleSettings: cycle.scheduleSettings ?? null, timezone: timeZone }, scheduleStartDate: cycle.scheduleSettings?.startDate ?? localDateKey(localDateOf(timeZone, ctx.now)), items, mediaTitles, renderOutputsByItemId, selectedRenderOutputAvailableByItemId, report, coverChoices, readyToConfirm, publishing };
+  return { cycle: { id: cycle.id, name: cycle.name, status: cycle.status, scheduleSettings: cycle.scheduleSettings ?? null, timezone: timeZone, orderMode: cycle.orderMode ?? cycle.scheduleSettings?.orderMode ?? "manual" }, scheduleStartDate: cycle.scheduleSettings?.startDate ?? localDateKey(localDateOf(timeZone, ctx.now)), items, mediaTitles, mediaOrderData, renderOutputsByItemId, selectedRenderOutputAvailableByItemId, report, coverChoices, readyToConfirm, publishing };
 }
 
 function accountBelongsTo(account: Awaited<ReturnType<RequestContext["repo"]["getSocialAccount"]>>, userId: string) {

@@ -143,6 +143,8 @@ enum RepeatBehavior {
 enum OrderMode {
   manual
   upload_order
+  name_asc
+  name_desc
   oldest_first
   newest_first
   smallest_first

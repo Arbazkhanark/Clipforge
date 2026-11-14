@@ -10,7 +10,7 @@ import { runRepositoryContract, type RepoHarness } from "./contracts/repository.
 import { runAuthRepositoryContract } from "./contracts/auth-repository.contract.ts";
 import { DEFAULT_EDITING_SETTINGS } from "../src/lib/domain/editing-settings.ts";
 import { resolveEffectiveEntitlement } from "../src/lib/billing/entitlement-resolver.ts";
-import { makeItem, makeMedia } from "./helpers.ts";
+import { makeCycle, makeItem, makeMedia } from "./helpers.ts";
 
 test("fake Prisma bulk settings operation validates ownership and atomically writes video rows with its idempotent audit", async () => {
   const client = new FakePrismaClient(); const repo = new PrismaRepository(client);
@@ -57,6 +57,22 @@ test("fake Prisma bulk settings transaction rolls back on audit failure and seri
   assert.deepEqual(results.sort(), ["applied", "existing"]);
   assert.equal(client.editingTemplate.rows.length, 2); assert.equal(client.auditLog.rows.length, 1);
   assert.deepEqual(client.lockLog.filter((entry) => entry === "user:bob").length, 3);
+});
+
+test("cycle import unique conflict rolls back earlier order updates", async () => {
+  const client = new FakePrismaClient(); const repo = new PrismaRepository(client);
+  await repo.createCycle({ ...makeCycle({ id: "cycle-import-atomic", status: "draft", finalReviewConfirmed: false }), name: "Atomic import test", socialAccountId: "account-import-atomic" });
+  const first = makeItem({ id: "cycle-item-first", cycleId: "cycle-import-atomic", cycleOwnerId: "bob", sourceKind: "owned", sourceCollectionId: null, position: 1 });
+  const existing = makeItem({ id: "cycle-item-existing", cycleId: "cycle-import-atomic", cycleOwnerId: "bob", sourceKind: "owned", sourceCollectionId: null, position: 2 });
+  await repo.addCycleItems([first, existing]);
+
+  const duplicate = { ...existing, position: 3, version: 2 };
+  const reorderedFirst = { ...first, position: 2, version: 2 };
+  assert.equal(await repo.addCycleItems([duplicate], {}, [{ item: reorderedFirst, expectedVersion: 1 }]), false);
+  assert.deepEqual((await repo.getCycleItems("cycle-import-atomic")).map(({ id, position, version }) => ({ id, position, version })), [
+    { id: "cycle-item-first", position: 1, version: 1 },
+    { id: "cycle-item-existing", position: 2, version: 1 },
+  ]);
 });
 
 function memoryHarness(): RepoHarness {

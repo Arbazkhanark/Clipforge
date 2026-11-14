@@ -1,8 +1,8 @@
 // Queue ordering for a publishing cycle. The chosen order is SAVED as item positions, so a restart
 // never reshuffles the queue. "Shuffle" uses a stored seed, so the same seed always gives the same order.
-import type { CycleItem } from "./types.ts";
+import type { CycleItem, MediaAsset } from "./types.ts";
 
-export const ORDER_MODES = ["manual", "upload_order", "oldest_first", "newest_first", "smallest_first", "largest_first", "shuffle"] as const;
+export const ORDER_MODES = ["manual", "upload_order", "name_asc", "name_desc", "oldest_first", "newest_first", "smallest_first", "largest_first", "shuffle"] as const;
 export type OrderMode = (typeof ORDER_MODES)[number];
 
 export interface OrderableItem {
@@ -11,6 +11,8 @@ export interface OrderableItem {
   manualPosition: number;
   /** The order the user selected/uploaded the videos in (used by "upload_order"). */
   selectionIndex: number;
+  /** Original media filename. */
+  title?: string;
   /** When the media was created (used by oldest/newest). */
   mediaCreatedAt: Date;
   sizeBytes: number;
@@ -41,6 +43,8 @@ export function orderItemIds(items: OrderableItem[], mode: OrderMode, shuffleSee
   switch (mode) {
     case "manual": sorted.sort((a, b) => a.manualPosition - b.manualPosition || byId(a, b)); break;
     case "upload_order": sorted.sort((a, b) => a.selectionIndex - b.selectionIndex || byId(a, b)); break;
+    case "name_asc": sorted.sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "", "en", { numeric: true, sensitivity: "base" }) || byId(a, b)); break;
+    case "name_desc": sorted.sort((a, b) => (b.title ?? "").localeCompare(a.title ?? "", "en", { numeric: true, sensitivity: "base" }) || byId(a, b)); break;
     case "oldest_first": sorted.sort((a, b) => a.mediaCreatedAt.getTime() - b.mediaCreatedAt.getTime() || byId(a, b)); break;
     case "newest_first": sorted.sort((a, b) => b.mediaCreatedAt.getTime() - a.mediaCreatedAt.getTime() || byId(a, b)); break;
     case "smallest_first": sorted.sort((a, b) => a.sizeBytes - b.sizeBytes || byId(a, b)); break;
@@ -71,4 +75,26 @@ export function applyOrderToItems(items: CycleItem[], orderedIds: string[]): Cyc
     const position = newPosition.get(item.id);
     return position === undefined || position === item.position ? item : { ...item, position, version: item.version + 1 };
   });
+}
+
+/** Applies an ordering mode to editable queue positions using server loaded media metadata. */
+export function orderCycleItems(
+  items: CycleItem[],
+  mediaById: ReadonlyMap<string, Pick<MediaAsset, "title" | "createdAt" | "sizeBytes">>,
+  mode: OrderMode,
+  shuffleSeed = "",
+): CycleItem[] {
+  const editable = items.filter((item) => item.status === "upcoming" || item.status === "scheduled");
+  const orderables = editable.map((item) => {
+    const media = mediaById.get(item.mediaAssetId);
+    return {
+      id: item.id,
+      manualPosition: item.position,
+      selectionIndex: item.position,
+      title: media?.title ?? "",
+      mediaCreatedAt: media?.createdAt ?? new Date(0),
+      sizeBytes: media?.sizeBytes ?? 0,
+    };
+  });
+  return applyOrderToItems(items, orderItemIds(orderables, mode, shuffleSeed));
 }

@@ -1,5 +1,6 @@
 // Pure conversions between database rows and our domain types. Kept separate so they can be tested on their own.
 import type { CollectionPermissionGrant, CycleItem, MediaAsset, VideoCollection } from "../../lib/domain/types.ts";
+import { ORDER_MODES, type OrderMode } from "../../lib/domain/ordering.ts";
 import { isValidTimeZone, validateScheduleSettings, type ScheduleSettings } from "../../lib/domain/schedule.ts";
 import { INSTAGRAM_ACCOUNT_TYPES, type CycleRecord, type InstagramAccountType, type PersistedCycleSchedule, type SocialAccountRecord } from "../repository.ts";
 import { normalizeInstagramScopes } from "../../lib/integrations/instagram-eligibility.ts";
@@ -55,14 +56,17 @@ function cycleScheduleFromJson(value: unknown): PersistedCycleSchedule | null {
   };
   const startDate = row["startDate"];
   if (!validScheduleDate(startDate) || (settings.endDate !== null && !validScheduleDate(settings.endDate)) || (settings.endDate !== null && settings.endDate < startDate) || !validateScheduleSettings(settings).valid) return null;
-  return { ...settings, startDate };
+  const orderMode = typeof row["orderMode"] === "string" && (ORDER_MODES as readonly string[]).includes(row["orderMode"]) ? row["orderMode"] as OrderMode : "manual";
+  const shuffleSeed = typeof row["shuffleSeed"] === "string" && row["shuffleSeed"].length <= 128 ? row["shuffleSeed"] : null;
+  return { ...settings, startDate, orderMode, shuffleSeed };
 }
 
-export const cycleToRow = (c: CycleRecord): Row => ({ id: c.id, ownerId: c.ownerId, socialAccountId: c.socialAccountId, name: c.name, status: c.status, finalReviewConfirmed: c.finalReviewConfirmed, repeatBehavior: c.repeatBehavior ?? "never", timezone: c.scheduleSettings?.timeZone ?? c.timezone ?? "Asia/Kolkata", scheduleSettings: c.scheduleSettings ?? {}, ...(c.createdAt ? { createdAt: c.createdAt } : {}) });
+export const cycleToRow = (c: CycleRecord): Row => ({ id: c.id, ownerId: c.ownerId, socialAccountId: c.socialAccountId, name: c.name, status: c.status, finalReviewConfirmed: c.finalReviewConfirmed, orderMode: c.orderMode ?? c.scheduleSettings?.orderMode ?? "manual", repeatBehavior: c.repeatBehavior ?? "never", timezone: c.scheduleSettings?.timeZone ?? c.timezone ?? "Asia/Kolkata", scheduleSettings: c.scheduleSettings ?? {}, ...(c.createdAt ? { createdAt: c.createdAt } : {}) });
 export const rowToCycle = (row: Row): CycleRecord => {
   const scheduleSettings = cycleScheduleFromJson(row["scheduleSettings"]);
+  const orderMode = typeof row["orderMode"] === "string" && (ORDER_MODES as readonly string[]).includes(row["orderMode"]) ? row["orderMode"] as OrderMode : scheduleSettings?.orderMode ?? "manual";
   const timezone = scheduleSettings?.timeZone ?? (typeof row["timezone"] === "string" && isValidTimeZone(row["timezone"]) ? row["timezone"] : "Asia/Kolkata");
-  return { id: row["id"], ownerId: row["ownerId"], status: row["status"], finalReviewConfirmed: row["finalReviewConfirmed"], name: row["name"], socialAccountId: row["socialAccountId"], repeatBehavior: row["repeatBehavior"] === "ask" || row["repeatBehavior"] === "automatic" ? row["repeatBehavior"] : "never", timezone, scheduleSettings, ...(row["createdAt"] instanceof Date ? { createdAt: row["createdAt"] } : {}) };
+  return { id: row["id"], ownerId: row["ownerId"], status: row["status"], finalReviewConfirmed: row["finalReviewConfirmed"], orderMode, name: row["name"], socialAccountId: row["socialAccountId"], repeatBehavior: row["repeatBehavior"] === "ask" || row["repeatBehavior"] === "automatic" ? row["repeatBehavior"] : "never", timezone, scheduleSettings: scheduleSettings ? { ...scheduleSettings, orderMode } : null, ...(row["createdAt"] instanceof Date ? { createdAt: row["createdAt"] } : {}) };
 };
 
 /** The fields a version-checked update may change. Identity fields (id, cycleId, cycleOwnerId) never change. */

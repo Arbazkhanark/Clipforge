@@ -923,7 +923,7 @@ export class MemoryRepository implements Repository {
     await tick(); // queue order, like ORDER BY position, id
     return [...this.items.values()].filter((i) => i.cycleId === cycleId).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id)).map(clone);
   }
-  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}): Promise<boolean> {
+  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = []): Promise<boolean> {
     if (items.length === 0) return true;
     const cycleId = items[0]!.cycleId;
     const ownerId = items[0]!.cycleOwnerId;
@@ -933,6 +933,14 @@ export class MemoryRepository implements Repository {
       const cycle = this.cycles.get(cycleId);
       if (!cycle || cycle.ownerId !== ownerId || cycle.status === "completed" || cycle.status === "stopped" || items.some((item) => this.items.has(item.id))) return false;
       if (Object.entries(expectedCollectionSettingsVersions).some(([collectionId, version]) => (this.collections.get(collectionId)?.settingsVersion ?? 1) !== version)) return false;
+      for (const { item, expectedVersion } of orderUpdates) {
+        const stored = this.items.get(item.id);
+        if (!stored || item.cycleId !== cycleId || item.cycleOwnerId !== ownerId || stored.cycleId !== cycleId || stored.cycleOwnerId !== ownerId || stored.version !== expectedVersion || (stored.status !== "upcoming" && stored.status !== "scheduled") || (item.status !== "upcoming" && item.status !== "scheduled")) return false;
+      }
+      for (const { item } of orderUpdates) {
+        const stored = this.items.get(item.id) as CycleItem;
+        this.items.set(item.id, { ...stored, position: item.position, version: item.version });
+      }
       for (const item of items) this.items.set(item.id, clone(item));
       return true;
     });
@@ -980,7 +988,7 @@ export class MemoryRepository implements Repository {
       for (const field of MUTABLE_ITEM_FIELDS) merged[field] = clone(item[field]);
       this.items.set(item.id, merged as unknown as CycleItem);
     }
-    this.cycles.set(cycleId, { ...cycle, scheduleSettings: clone(scheduleSettings), timezone: scheduleSettings.timeZone });
+    this.cycles.set(cycleId, { ...cycle, orderMode: scheduleSettings.orderMode ?? "manual", scheduleSettings: clone(scheduleSettings), timezone: scheduleSettings.timeZone });
     return true;
   }
 

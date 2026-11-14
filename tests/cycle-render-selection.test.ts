@@ -214,6 +214,7 @@ test("CycleEditor renders render selector with available choices in draft, and h
     scheduleStartDate: "2026-11-08",
     items,
     mediaTitles: { media1: "Sample Video 1" },
+    mediaOrderData: { media1: { title: "Sample Video 1", sizeBytes: 1024, createdAt: NOW.toISOString() } },
     renderOutputsByItemId: { item1: [{ id: "valid-render", ownerId: "bob", sourceMediaId: "media1", sizeBytes: 5 * 1024 * 1024, createdAt: NOW }] },
     selectedRenderOutputAvailableByItemId: { item1: false },
     report: { overall: "blocked", canStart: false, checks: [] },

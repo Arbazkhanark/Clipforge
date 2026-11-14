@@ -148,4 +148,6 @@ export interface PublishingCycle {
   status: CycleStatus;
   /** True after the user saw and confirmed the final review screen. */
   finalReviewConfirmed: boolean;
+  /** Saved order for editable items; older fixtures and records default to manual. */
+  orderMode?: import("./ordering.ts").OrderMode;
 }

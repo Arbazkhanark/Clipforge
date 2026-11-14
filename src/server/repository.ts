@@ -12,6 +12,7 @@ import type { EditingSettings } from "../lib/domain/editing-settings.ts";
 import type { UsageRecordDraft } from "../lib/domain/usage-accounting.ts";
 import type { MediaSort } from "../lib/domain/media-list.ts";
 import type { ScheduleSettings } from "../lib/domain/schedule.ts";
+import type { OrderMode } from "../lib/domain/ordering.ts";
 import type { Capability, CollectionPermissionGrant, CollectionVisibility, CycleItem, CycleStatus, MediaAsset, PublishingCycle, VideoCollection } from "../lib/domain/types.ts";
 import type { AccessRequestStatus } from "../lib/domain/sharing-permissions.ts";
 
@@ -28,7 +29,7 @@ export interface UpdateCollectionShareLinkInput { id: string; collectionId: stri
 export type UpdateCollectionShareLinkResult = { status: "updated" | "unchanged"; link: CollectionShareLinkSummary } | { status: "not_found" | "revoked" | "invalid" | "plan_limit" | "conflict"; reason?: string };
 export type RevokeCollectionShareLinkResult = "revoked" | "already_revoked" | "not_found";
 
-export interface PersistedCycleSchedule extends ScheduleSettings { startDate: string; }
+export interface PersistedCycleSchedule extends ScheduleSettings { startDate: string; orderMode?: OrderMode; shuffleSeed?: string | null; }
 export interface CycleRecord extends PublishingCycle { name: string; socialAccountId: string; repeatBehavior?: "never" | "ask" | "automatic"; scheduleSettings?: PersistedCycleSchedule | null; timezone?: string; createdAt?: Date; }
 export type CompleteSettledCycleResult = "completed" | "repeat_queued" | "repeat_skipped_limit" | "not_ready" | "already_completed" | "not_found";
 export const INSTAGRAM_ACCOUNT_TYPES = ["BUSINESS", "MEDIA_CREATOR", "PERSONAL", "UNKNOWN"] as const;
@@ -298,7 +299,7 @@ export interface Repository {
 
   getCycleItems(cycleId: string): Promise<CycleItem[]>;
   /** Adds items only while the parent cycle is still editable; serializes against cycle completion. */
-  addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions?: Record<string, number>): Promise<boolean>;
+  addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions?: Record<string, number>, orderUpdates?: { item: CycleItem; expectedVersion: number }[]): Promise<boolean>;
   saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]>;
   /** Explicit, owner/source-checked output selection for a versioned item in an owned draft cycle. */
   selectCycleItemRenderOutput(input: SelectCycleItemRenderOutputInput): Promise<boolean>;

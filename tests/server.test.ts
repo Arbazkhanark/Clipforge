@@ -105,7 +105,7 @@ test("a __proto__ key in expectedVersions is plain data and pollutes nothing", (
 
 const scheduleInput = (over: Record<string, unknown> = {}) => ({
   cycleId: "cycle1", startDate: "2026-06-02", timeZone: "Asia/Kolkata", intervalMinutes: 60, postsPerInterval: 1,
-  daysOfWeek: [0, 1, 2, 3, 4, 5, 6], windowStart: "09:00", windowEnd: "11:00", dailyMax: null, endDate: null, ...over,
+  daysOfWeek: [0, 1, 2, 3, 4, 5, 6], windowStart: "09:00", windowEnd: "11:00", dailyMax: null, endDate: null, orderMode: "manual", shuffleSeed: "", ...over,
 });
 
 test("cycle schedule validates settings, assigns timezone-aware times, persists them, and reassigns after edits", async () => {
@@ -125,6 +125,28 @@ test("cycle schedule validates settings, assigns timezone-aware times, persists 
   const noSlots = await saveCycleSchedule(ctxFor("bob"), scheduleInput({ daysOfWeek: [1], endDate: "2026-06-02" }));
   assert.deepEqual(noSlots, { scheduled: 0, unscheduled: 3 });
   assert.ok((await repo.getCycleItems("cycle1")).every((item) => item.status === "upcoming" && item.scheduledFor === null));
+});
+
+test("cycle schedule persists name order and assigns generated slots in that order without moving published or processing history", async () => {
+  const { repo, ctxFor } = setup();
+  const earlier = new Date("2026-06-01T00:00:00Z");
+  repo.media.set("media-z", makeMedia({ id: "media-z", ownerId: "bob", title: "Zulu.mp4", sizeBytes: 900, createdAt: earlier }));
+  repo.media.set("media-a", makeMedia({ id: "media-a", ownerId: "bob", title: "Alpha.mp4", sizeBytes: 100, createdAt: new Date(earlier.getTime() + 1) }));
+  const published = own("history", { status: "published", position: 0, version: 9, scheduledFor: null });
+  const zulu = own("zulu", { mediaAssetId: "media-z", position: 1 });
+  const alpha = own("alpha", { mediaAssetId: "media-a", position: 2 });
+  const working = own("working", { status: "processing", position: 3, version: 7, scheduledFor: null });
+  addItems(repo, [published, zulu, alpha, working]);
+
+  await saveCycleSchedule(ctxFor("bob"), scheduleInput({ orderMode: "name_asc" }));
+  const saved = await repo.getCycleItems("cycle1");
+  assert.equal((await repo.getCycle("cycle1"))?.orderMode, "name_asc");
+  assert.deepEqual(saved.map((item) => [item.id, item.position, item.scheduledFor?.toISOString() ?? null]), [
+    ["history", 0, null], ["alpha", 1, "2026-06-02T03:30:00.000Z"], ["zulu", 2, "2026-06-02T04:30:00.000Z"], ["working", 3, null],
+  ]);
+  assert.equal(saved.find((item) => item.id === "history")?.version, 9);
+  assert.equal(saved.find((item) => item.id === "working")?.version, 7);
+  assert.deepEqual((await errorOf(saveCycleSchedule(ctxFor("bob"), scheduleInput({ orderMode: "not-a-mode" })))).status, 422);
 });
 
 test("cycle schedule rejects invalid settings, non-owners and non-draft cycles; empty cycles can save", async () => {
@@ -416,6 +438,16 @@ const mixSetup = (bobPlan: PlanId = "creator") => {
   s.repo.collections.set("col1", makeCollection({ id: "col1", ownerId: "owner", mediaIds: ["shared1"] }));
   return s;
 };
+
+test("collection videos added to a cycle use its persisted ordering mode", async () => {
+  const { repo, ctxFor } = mixSetup("pro");
+  repo.cycles.set("cycle1", { ...repo.cycles.get("cycle1")!, orderMode: "name_asc" });
+  repo.media.set("own1", makeMedia({ id: "own1", ownerId: "bob", title: "Zulu.mp4", sizeBytes: 800, createdAt: new Date("2026-01-02T00:00:00Z") }));
+  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob", title: "Alpha.mp4", sizeBytes: 100, createdAt: new Date("2026-01-01T00:00:00Z") }));
+  repo.collections.set("mine", makeCollection({ id: "mine", ownerId: "bob", mediaIds: ["own1", "own2"] }));
+  assert.equal((await mixIntoCycle(ctxFor("bob"), { cycleId: "cycle1", videos: [{ mediaAssetId: "own1", collectionId: "mine" }, { mediaAssetId: "own2", collectionId: "mine" }] })).added, 2);
+  assert.deepEqual((await repo.getCycleItems("cycle1")).map((item) => item.mediaAssetId), ["own2", "own1"]);
+});
 
 test("mix: Creator may mix owned + shared (with permission); source kinds and owners are recorded server-side", async () => {
   const { repo, ctxFor } = mixSetup("creator");

@@ -22,7 +22,7 @@ export interface RepoHarness {
 }
 
 const T0 = new Date("2026-06-01T12:00:00Z"); const day = 86_400_000;
-const sampleSchedule: PersistedCycleSchedule = { timeZone: "Asia/Kolkata", intervalMinutes: 1440, postsPerInterval: 1, daysOfWeek: [1, 2, 3, 4, 5], windowStart: "09:00", windowEnd: "09:00", dailyMax: 1, endDate: null, startDate: "2026-06-02" };
+const sampleSchedule: PersistedCycleSchedule = { timeZone: "Asia/Kolkata", intervalMinutes: 1440, postsPerInterval: 1, daysOfWeek: [1, 2, 3, 4, 5], windowStart: "09:00", windowEnd: "09:00", dailyMax: 1, endDate: null, startDate: "2026-06-02", orderMode: "shuffle", shuffleSeed: "stable_seed_01" };
 const media = (id: string, ownerId: string, over: Partial<MediaAsset> = {}): MediaAsset => ({ id, ownerId, status: "active", sizeBytes: 100, deleteAfter: null, title: id, kind: "video", durationMs: 1000, createdAt: new Date(T0.getTime() - day), width: 160, height: 120, validation: "verified", mimeType: "video/mp4", ...over });
 const collection = (id: string, ownerId: string, mediaIds: string[], over: Partial<VideoCollection> = {}): VideoCollection => ({ id, ownerId, visibility: "private", archived: false, mediaIds, name: id, ...over });
 const grant = (collectionId: string, granteeId: string, over: Partial<CollectionPermissionGrant> = {}): CollectionPermissionGrant => ({ collectionId, granteeId, capabilities: ["view"], status: "active", expiresAt: null, grantedById: "owner", ...over });
@@ -159,6 +159,7 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     const scheduled = { ...queued, status: "scheduled" as const, scheduledFor: new Date("2026-06-02T03:30:00Z"), version: 2 };
     assert.equal(await h.repo.saveCycleSchedule("schedule-cycle", "bob", sampleSchedule, [{ item: scheduled, expectedVersion: 1 }]), true);
     assert.deepEqual((await h.repo.getCycle("schedule-cycle"))!.scheduleSettings, sampleSchedule);
+    assert.deepEqual((await h.repo.getCycle("schedule-cycle"))!.orderMode, "shuffle");
     assert.equal((await h.repo.getCycle("schedule-cycle"))!.timezone, "Asia/Kolkata");
     assert.deepEqual([(await h.repo.getCycleItems("schedule-cycle"))[0]!.status, (await h.repo.getCycleItems("schedule-cycle"))[0]!.scheduledFor!.toISOString()], ["scheduled", "2026-06-02T03:30:00.000Z"]);
     const changed = { ...scheduled, status: "upcoming" as const, scheduledFor: null, version: 3 };

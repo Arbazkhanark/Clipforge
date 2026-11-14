@@ -1,0 +1,2 @@
+ALTER TYPE "OrderMode" ADD VALUE IF NOT EXISTS 'name_asc';
+ALTER TYPE "OrderMode" ADD VALUE IF NOT EXISTS 'name_desc';

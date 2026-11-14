@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   zonedTimeToUtc, validateScheduleSettings, generateSlots, assignSlotsToItems, maxPostsPerAllowedDay, localDateOf, PLATFORM_LIMITS_NOTE, type ScheduleSettings,
 } from "../src/lib/domain/schedule.ts";
-import { orderItemIds, applyOrderToItems, type OrderableItem } from "../src/lib/domain/ordering.ts";
+import { orderItemIds, applyOrderToItems, orderCycleItems, type OrderableItem } from "../src/lib/domain/ordering.ts";
 import { makeItem } from "./helpers.ts";
 
 const IST = "Asia/Kolkata";
@@ -112,10 +112,28 @@ const sample = [
 test("every order mode", () => {
   assert.deepEqual(orderItemIds(sample, "manual"), ["b", "c", "a"]);
   assert.deepEqual(orderItemIds(sample, "upload_order"), ["c", "a", "b"]);
+  assert.deepEqual(orderItemIds([orderable("b", { title: "Clip 10.mp4" }), orderable("a", { title: "clip 2.mp4" }), orderable("c", { title: "Alpha.mp4" })], "name_asc"), ["c", "a", "b"]);
+  assert.deepEqual(orderItemIds([orderable("b", { title: "Clip 10.mp4" }), orderable("a", { title: "clip 2.mp4" }), orderable("c", { title: "Alpha.mp4" })], "name_desc"), ["b", "a", "c"]);
   assert.deepEqual(orderItemIds(sample, "oldest_first"), ["b", "c", "a"]);
   assert.deepEqual(orderItemIds(sample, "newest_first"), ["a", "c", "b"]);
   assert.deepEqual(orderItemIds(sample, "smallest_first"), ["b", "c", "a"]);
   assert.deepEqual(orderItemIds(sample, "largest_first"), ["a", "c", "b"]);
+});
+
+test("cycle ordering uses server media metadata and only changes editable positions", () => {
+  const items = [
+    makeItem({ id: "published", status: "published", position: 0, version: 5 }),
+    makeItem({ id: "z-item", mediaAssetId: "z-media", position: 1 }),
+    makeItem({ id: "a-item", mediaAssetId: "a-media", position: 2 }),
+    makeItem({ id: "processing", status: "processing", position: 3, version: 8 }),
+  ];
+  const ordered = orderCycleItems(items, new Map([
+    ["z-media", { title: "Zulu.mp4", sizeBytes: 900, createdAt: new Date("2026-01-02T00:00:00Z") }],
+    ["a-media", { title: "Alpha.mp4", sizeBytes: 100, createdAt: new Date("2026-01-01T00:00:00Z") }],
+  ]), "name_asc");
+  assert.deepEqual(Object.fromEntries(ordered.map((item) => [item.id, [item.position, item.version]])), {
+    published: [0, 5], "z-item": [2, 2], "a-item": [1, 2], processing: [3, 8],
+  });
 });
 
 test("shuffle is persisted by its seed: same seed = same order regardless of input order; different seed can differ", () => {

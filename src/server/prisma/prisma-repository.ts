@@ -1120,12 +1120,14 @@ export class PrismaRepository implements Repository {
   async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { return (await this.db.publishingCycle.findMany({ where: { ownerId: userId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })).map(rowToCycle); }
 
   async getCycleItems(cycleId: string): Promise<CycleItem[]> { return (await this.db.cycleItem.findMany({ where: { cycleId }, orderBy: [{ position: "asc" }, { id: "asc" }] })).map(rowToItem); }
-  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}): Promise<boolean> {
+  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = []): Promise<boolean> {
     if (items.length === 0) return true;
     const cycleId = items[0]!.cycleId;
     const ownerId = items[0]!.cycleOwnerId;
     if (items.some((item) => item.cycleId !== cycleId || item.cycleOwnerId !== ownerId) || new Set(items.map((item) => item.id)).size !== items.length) return false;
-    return this.db.$transaction(async (tx) => {
+    const orderConflict = Symbol("cycle item order changed during import");
+    const insertConflict = Symbol("cycle item already exists during import");
+    try { return await this.db.$transaction(async (tx) => {
       // Lock the parent so item insertion serializes with completion/stopping.
       const lockedCycle = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${cycleId} AND "ownerId" = ${ownerId} FOR UPDATE`;
       if (!Array.isArray(lockedCycle) || lockedCycle.length === 0) return false;
@@ -1135,9 +1137,17 @@ export class PrismaRepository implements Repository {
         const lockedCollection = await tx.$queryRaw`SELECT "settingsVersion" FROM "VideoCollection" WHERE "id" = ${collectionId} FOR SHARE`;
         if (!Array.isArray(lockedCollection) || lockedCollection.length !== 1 || Number(lockedCollection[0]?.["settingsVersion"]) !== expectedCollectionSettingsVersions[collectionId]) return false;
       }
+      for (const { item, expectedVersion } of orderUpdates) {
+        if (item.cycleId !== cycleId || item.cycleOwnerId !== ownerId || (item.status !== "upcoming" && item.status !== "scheduled")) return false;
+        const saved = await tx.cycleItem.updateMany({
+          where: { id: item.id, cycleId, cycleOwnerId: ownerId, version: expectedVersion, status: { in: ["upcoming", "scheduled"] } },
+          data: { position: item.position, version: item.version },
+        });
+        if (saved.count !== 1) throw orderConflict;
+      }
       try { await tx.cycleItem.createMany({ data: items.map(itemToRow) }); return true; }
-      catch (error) { if (isUniqueViolation(error)) return false; throw error; }
-    });
+      catch (error) { if (isUniqueViolation(error)) throw insertConflict; throw error; }
+    }); } catch (error) { if (error === orderConflict || error === insertConflict) return false; throw error; }
   }
   async saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]> {
     const results: { itemId: string; saved: boolean }[] = [];
@@ -1177,7 +1187,7 @@ export class PrismaRepository implements Repository {
       return await this.db.$transaction(async (tx) => {
         const cycle = await tx.publishingCycle.updateMany({
           where: { id: cycleId, ownerId, status: "draft" },
-          data: { scheduleSettings, timezone: scheduleSettings.timeZone },
+          data: { scheduleSettings, timezone: scheduleSettings.timeZone, orderMode: scheduleSettings.orderMode ?? "manual" },
         });
         if (cycle.count !== 1) return false;
         for (const { item, expectedVersion } of updates) {

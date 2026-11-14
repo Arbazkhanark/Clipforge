@@ -3,6 +3,7 @@
 
 import { useMemo, useState, type ChangeEvent } from "react";
 import { generateSlots, localDateKey, localDateOf, validateScheduleSettings, zonedTimeToUtc, type ScheduleSettings } from "../lib/domain/schedule.ts";
+import { ORDER_MODES, orderItemIds, type OrderMode } from "../lib/domain/ordering.ts";
 import type { PersistedCycleSchedule } from "../server/repository.ts";
 import { formatDateTime } from "./format.ts";
 
@@ -10,10 +11,15 @@ const WEEKDAYS = [{ value: 0, label: "Sunday" }, { value: 1, label: "Monday" }, 
 const TIME_ZONES = ["Asia/Kolkata", "UTC", "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Paris", "Asia/Dubai", "Asia/Singapore", "Australia/Sydney"];
 
 const DEFAULT_SETTINGS: ScheduleSettings = { timeZone: "Asia/Kolkata", intervalMinutes: 1440, postsPerInterval: 1, daysOfWeek: [1, 2, 3, 4, 5], windowStart: "09:00", windowEnd: "09:00", dailyMax: 1, endDate: null };
-type PreviewItem = { id: string; position: number; title: string };
+type PreviewItem = { id: string; position: number; title: string; sizeBytes?: number; createdAt?: string };
 
-export function CycleScheduleForm({ cycleId, items, initialSchedule, initialStartDate, timeZone, editable }: {
-  cycleId: string; items: PreviewItem[]; initialSchedule: PersistedCycleSchedule | null; initialStartDate: string; timeZone: string; editable: boolean;
+function newShuffleSeed(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+export function CycleScheduleForm({ cycleId, items, initialSchedule, initialStartDate, timeZone, initialOrderMode = "manual", editable }: {
+  cycleId: string; items: PreviewItem[]; initialSchedule: PersistedCycleSchedule | null; initialStartDate: string; timeZone: string; initialOrderMode?: OrderMode; editable: boolean;
 }) {
   const [settings, setSettings] = useState<ScheduleSettings>(() => initialSchedule ? {
     timeZone: initialSchedule.timeZone, intervalMinutes: initialSchedule.intervalMinutes, postsPerInterval: initialSchedule.postsPerInterval,
@@ -21,6 +27,8 @@ export function CycleScheduleForm({ cycleId, items, initialSchedule, initialStar
     dailyMax: initialSchedule.dailyMax, endDate: initialSchedule.endDate,
   } : { ...DEFAULT_SETTINGS, timeZone });
   const [startDate, setStartDate] = useState(initialSchedule?.startDate ?? initialStartDate);
+  const [orderMode, setOrderMode] = useState<OrderMode>(initialOrderMode);
+  const [shuffleSeed, setShuffleSeed] = useState(initialSchedule?.shuffleSeed ?? cycleId);
   const [previewRequested, setPreviewRequested] = useState(false);
   const [hasSaved, setHasSaved] = useState(true);
 
@@ -36,12 +44,21 @@ export function CycleScheduleForm({ cycleId, items, initialSchedule, initialStar
       const [year, month, day] = startDate.split("-").map(Number);
       const startingTime = zonedTimeToUtc(settings.timeZone, year!, month!, day!, Number(settings.windowStart.slice(0, 2)), Number(settings.windowStart.slice(3, 5)));
       const slots = generateSlots({ settings, startFrom: new Date(Math.max(startingTime.getTime(), Date.now())), count: items.length }).slots;
-      const ordered = [...items].sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
+      const ids = orderItemIds(items.map((item) => ({
+        id: item.id,
+        manualPosition: item.position,
+        selectionIndex: item.position,
+        title: item.title,
+        mediaCreatedAt: new Date(item.createdAt ?? "1970-01-01T00:00:00.000Z"),
+        sizeBytes: item.sizeBytes ?? 0,
+      })), orderMode, shuffleSeed);
+      const byId = new Map(items.map((item) => [item.id, item]));
+      const ordered = ids.flatMap((id) => { const item = byId.get(id); return item ? [item] : []; });
       return { problems: [], assignments: ordered.map((item, index) => ({ item, slot: slots[index] ?? null })) };
     } catch {
       return { problems: ["These settings could not produce a schedule. Check the time zone, date and publishing window."], assignments: [] as { item: PreviewItem; slot: Date | null }[] };
     }
-  }, [settings, startDate, items]);
+  }, [settings, startDate, items, orderMode, shuffleSeed, cycleId]);
 
   const change = <K extends keyof ScheduleSettings>(key: K, value: ScheduleSettings[K]) => { setSettings((current) => ({ ...current, [key]: value })); setHasSaved(false); };
   const setDay = (day: number, checked: boolean) => change("daysOfWeek", checked ? [...settings.daysOfWeek, day].sort() : settings.daysOfWeek.filter((value) => value !== day));
@@ -54,6 +71,25 @@ export function CycleScheduleForm({ cycleId, items, initialSchedule, initialStar
         <>
           <form method="post" action="/api/forms/cycle-schedule" onChange={() => setHasSaved(false)}>
             <input type="hidden" name="cycleId" value={cycleId} />
+            <fieldset className="cycle-order-controls">
+              <legend>Order videos by</legend>
+              <label htmlFor="cycle-order-mode">Publishing order</label>
+              <select id="cycle-order-mode" name="orderMode" value={orderMode} onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+                const next = event.currentTarget.value as OrderMode;
+                if (!(ORDER_MODES as readonly string[]).includes(next)) return;
+                if (next === "shuffle" && orderMode !== "shuffle") setShuffleSeed(newShuffleSeed());
+                setOrderMode(next);
+                setHasSaved(false);
+              }}>
+                <optgroup label="Name"><option value="name_asc">Name A–Z</option><option value="name_desc">Name Z–A</option></optgroup>
+                <optgroup label="File size"><option value="smallest_first">Smallest first</option><option value="largest_first">Largest first</option></optgroup>
+                <optgroup label="Upload date"><option value="oldest_first">Oldest first</option><option value="newest_first">Newest first</option></optgroup>
+                <optgroup label="Other"><option value="manual">Keep current order</option><option value="upload_order">Original queue order</option><option value="shuffle">Randomized order (stable)</option></optgroup>
+              </select>
+              {orderMode === "shuffle" && <button type="button" onClick={() => { setShuffleSeed(newShuffleSeed()); setHasSaved(false); }}>Reshuffle</button>}
+              <p>Only upcoming and scheduled videos are reordered. Published or in-progress videos keep their history.</p>
+            </fieldset>
+            <input type="hidden" name="shuffleSeed" value={orderMode === "shuffle" ? shuffleSeed : ""} />
             <p><label>Start date<br /><input type="date" name="startDate" required value={startDate} onChange={(event: ChangeEvent<HTMLInputElement>) => { setStartDate(event.currentTarget.value); setHasSaved(false); }} /></label></p>
             <p><label>Time zone (IANA name)<br /><input type="text" name="timeZone" list="cycle-time-zones" required value={settings.timeZone} onChange={(event: ChangeEvent<HTMLInputElement>) => change("timeZone", event.currentTarget.value)} /></label><datalist id="cycle-time-zones">{TIME_ZONES.map((zone) => <option key={zone} value={zone} />)}</datalist></p>
             <p><label>Preferred publishing time<br /><input type="time" name="windowStart" required value={settings.windowStart} onChange={(event: ChangeEvent<HTMLInputElement>) => change("windowStart", event.currentTarget.value)} /></label></p>

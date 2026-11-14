@@ -5,6 +5,7 @@ import { monthStartUtc } from "../../lib/domain/usage-accounting.ts";
 import { mixVideosIntoCycle, unmixItems, type MixCandidate, type MixRejection } from "../../lib/domain/mix-unmix.ts";
 import type { PreflightReport } from "../../lib/domain/preflight.ts";
 import { assignSlotsToItems, generateSlots, localDateKey, localDateOf, validateScheduleSettings, zonedTimeToUtc, type ScheduleSettings } from "../../lib/domain/schedule.ts";
+import { ORDER_MODES, orderCycleItems, type OrderMode } from "../../lib/domain/ordering.ts";
 import { canCycleTransition, moveItemToStatus, pauseCycle as pauseCycleRule, resumeCycle as resumeCycleRule, stopCycle as stopCycleRule } from "../../lib/domain/cycle-state.ts";
 import { startCycle as startCycleRule } from "../../lib/domain/cycle-state.ts";
 import type { RepeatBehavior } from "../../lib/domain/publish-workflow.ts";
@@ -37,7 +38,7 @@ export async function createCycle(ctx: RequestContext, rawInput: unknown): Promi
   if (!limit.allowed) throw planLimit(limit.message);
 
   const cycleId = ctx.newId();
-  const created = await ctx.repo.createCycleWithinLimit({ id: cycleId, ownerId: userId, status: "draft", finalReviewConfirmed: false, name: name.trim(), socialAccountId, createdAt: ctx.now }, getPlan(planId).limits.activeCampaigns);
+  const created = await ctx.repo.createCycleWithinLimit({ id: cycleId, ownerId: userId, status: "draft", finalReviewConfirmed: false, orderMode: "manual", name: name.trim(), socialAccountId, createdAt: ctx.now }, getPlan(planId).limits.activeCampaigns);
   if (!created) throw planLimit("Your current plan has reached its active campaign limit.");
   await ctx.repo.appendAudit({ actorId: userId, action: "cycle.created", entityType: "PublishingCycle", entityId: cycleId });
   return { cycleId };
@@ -135,7 +136,19 @@ export async function mixIntoCycle(ctx: RequestContext, rawInput: unknown): Prom
       coverMediaId, coverIsCustom: coverMediaId !== null, coverState: coverMediaId ? "saved_internally" : "none", lockedBy: null, lockExpiresAt: null, reviewReason: null,
     });
   }
-  if (newItems.length > 0 && !(await ctx.repo.addCycleItems(newItems, expectedCollectionSettingsVersions))) throw conflict("This cycle or its collection settings changed while adding videos. Reload and try again.");
+  if (newItems.length > 0) {
+    const allItems = [...existingItems, ...newItems];
+    const mediaRows = await ctx.repo.getMediaByIds([...new Set(allItems.map((item) => item.mediaAssetId))]);
+    const mediaById = new Map(mediaRows.map((media) => [media.id, media]));
+    const orderMode = cycle.orderMode ?? "manual";
+    const orderedItems = orderCycleItems(allItems, mediaById, orderMode, cycle.scheduleSettings?.shuffleSeed ?? cycle.id);
+    const beforeById = new Map(allItems.map((item) => [item.id, item]));
+    const newIds = new Set(newItems.map((item) => item.id));
+    const additions = orderedItems.filter((item) => newIds.has(item.id));
+    const orderUpdates = orderedItems.filter((item) => !newIds.has(item.id) && item.version !== beforeById.get(item.id)?.version)
+      .map((item) => ({ item, expectedVersion: (beforeById.get(item.id) as CycleItem).version }));
+    if (!(await ctx.repo.addCycleItems(additions, expectedCollectionSettingsVersions, orderUpdates))) throw conflict("This cycle or its collection settings changed while adding videos. Reload and try again.");
+  }
   await ctx.repo.appendAudit({ actorId: userId, action: "cycle.videos_mixed", entityType: "PublishingCycle", entityId: cycleId, metadata: { added: newItems.length, rejected: mixed.rejected.length + unavailable.length } });
   return { added: newItems.length, rejected: [...unavailable, ...mixed.rejected, ...unavailableCovers] };
 }
@@ -270,6 +283,12 @@ export async function saveCycleSchedule(ctx: RequestContext, rawInput: unknown):
   const postsPerInterval = typeof input["postsPerInterval"] === "number" ? input["postsPerInterval"] : Number.NaN;
   const dailyMax = input["dailyMax"] === null ? null : typeof input["dailyMax"] === "number" ? input["dailyMax"] : Number.NaN;
   const endDate = input["endDate"] === null ? null : typeof input["endDate"] === "string" ? input["endDate"] : "invalid";
+  const rawOrderMode = input["orderMode"];
+  const orderMode = typeof rawOrderMode === "string" && (ORDER_MODES as readonly string[]).includes(rawOrderMode) ? rawOrderMode as OrderMode : "manual";
+  if (typeof rawOrderMode !== "string" || !(ORDER_MODES as readonly string[]).includes(rawOrderMode)) problems.add("Choose a supported video ordering mode.");
+  const rawShuffleSeed = input["shuffleSeed"];
+  if (rawShuffleSeed !== undefined && rawShuffleSeed !== null && rawShuffleSeed !== "" && (typeof rawShuffleSeed !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(rawShuffleSeed))) problems.add("Shuffle seed is invalid. Refresh the page and try again.");
+  const submittedShuffleSeed = typeof rawShuffleSeed === "string" && /^[A-Za-z0-9_-]{8,128}$/.test(rawShuffleSeed) ? rawShuffleSeed : null;
   const daysRaw = input["daysOfWeek"];
   const daysOfWeek = Array.isArray(daysRaw) && daysRaw.every((day) => typeof day === "number") ? daysRaw as number[] : [];
   if (!Array.isArray(daysRaw) || !daysRaw.every((day) => typeof day === "number")) problems.add("Choose one or more valid publishing days.");
@@ -283,6 +302,7 @@ export async function saveCycleSchedule(ctx: RequestContext, rawInput: unknown):
 
   const cycle = await loadOwnedCycle(ctx, userId, cycleId);
   if (cycle.status !== "draft") throw forbidden("Only draft cycles can have their schedule edited.");
+  const shuffleSeed = orderMode === "shuffle" ? submittedShuffleSeed ?? cycle.scheduleSettings?.shuffleSeed ?? cycle.id : null;
   const today = localDateKey(localDateOf(timeZone, ctx.now));
   if (startDate < today) throw conflict("Choose today or a future date for the schedule.");
 
@@ -297,13 +317,15 @@ export async function saveCycleSchedule(ctx: RequestContext, rawInput: unknown):
   const [year, month, day] = startDate.split("-").map(Number);
   const startFrom = zonedTimeToUtc(timeZone, year!, month!, day!, Number(windowStart.slice(0, 2)), Number(windowStart.slice(3, 5)));
   const now = ctx.now.getTime();
+  const mediaRows = await ctx.repo.getMediaByIds([...new Set(editable.map((item) => item.mediaAssetId))]);
+  const orderedItems = orderCycleItems(items, new Map(mediaRows.map((media) => [media.id, media])), orderMode, shuffleSeed ?? cycle.id);
   const result = generateSlots({ settings, startFrom: new Date(Math.max(startFrom.getTime(), now)), count: editable.length });
-  const assignment = assignSlotsToItems(items, result.slots);
+  const assignment = assignSlotsToItems(orderedItems, result.slots);
   const before = new Map(items.map((item) => [item.id, item]));
   const updates = assignment.items.filter((item) => item.version !== before.get(item.id)?.version)
     .map((item) => ({ item, expectedVersion: (before.get(item.id) as CycleItem).version }));
-  const saved = await ctx.repo.saveCycleSchedule(cycleId, userId, { ...settings, startDate }, updates);
+  const saved = await ctx.repo.saveCycleSchedule(cycleId, userId, { ...settings, startDate, orderMode, shuffleSeed }, updates);
   if (!saved) throw conflict("The cycle or one of its videos changed while saving. Reload and try again.");
-  await ctx.repo.appendAudit({ actorId: userId, action: "cycle.schedule_saved", entityType: "PublishingCycle", entityId: cycleId, metadata: { scheduled: editable.length - assignment.unscheduledItemIds.length, unscheduled: assignment.unscheduledItemIds.length } });
+  await ctx.repo.appendAudit({ actorId: userId, action: "cycle.schedule_saved", entityType: "PublishingCycle", entityId: cycleId, metadata: { orderMode, scheduled: editable.length - assignment.unscheduledItemIds.length, unscheduled: assignment.unscheduledItemIds.length } });
   return { scheduled: editable.length - assignment.unscheduledItemIds.length, unscheduled: assignment.unscheduledItemIds.length };
 }

@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { MEDIA_STATUSES, COLLECTION_VISIBILITIES, CAPABILITIES, GRANT_STATUSES, CYCLE_ITEM_STATUSES, CYCLE_STATUSES, SOURCE_KINDS } from "../src/lib/domain/types.ts";
+import { ORDER_MODES } from "../src/lib/domain/ordering.ts";
 import { IMPORT_STATUSES } from "../src/lib/domain/media-lifecycle.ts";
 import { PLAN_IDS } from "../src/lib/billing/catalog.ts";
 
@@ -52,6 +53,7 @@ test("Prisma enums match the TypeScript domain lists exactly", () => {
   assert.deepEqual(enums["CycleItemStatus"], [...CYCLE_ITEM_STATUSES]);
   assert.deepEqual(enums["CycleStatus"], [...CYCLE_STATUSES]);
   assert.deepEqual(enums["SourceKind"], [...SOURCE_KINDS]);
+  assert.deepEqual(enums["OrderMode"], [...ORDER_MODES]);
   assert.deepEqual(enums["ImportStatus"], [...IMPORT_STATUSES]);
   assert.deepEqual(enums["BillingInterval"], ["weekly", "monthly"]);
   assert.deepEqual(enums["SubscriptionStatus"], ["created", "authenticated", "active", "pending", "halted", "paused", "cancelled", "completed", "expired"]);
