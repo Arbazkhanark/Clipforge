@@ -230,6 +230,7 @@ test("CycleEditor renders render selector with available choices in draft, and h
   assert.ok(draftHtml.includes("value=\"valid-render\""));
   assert.ok(draftHtml.includes("5.0 MB"));
   assert.ok(draftHtml.includes("No render selected yet; publishing preflight remains blocked."));
+  assert.ok(draftHtml.includes('href="/editor?media=media1"'));
 
   // With selection available
   const selectedDetail: CycleDetail = {
@@ -287,6 +288,34 @@ test("publishing preflight checks the selected render size, while existing unsel
   repo.items.set("item1", { ...repo.items.get("item1")!, selectedRenderOutputId: null });
   const unselected = await buildPreflightReport(ctx, "bob", cycle!, await repo.getCycleItems("cycle1"), true);
   assert.equal(unselected.checks.find((check) => check.id === "publishing_media_ineligible")?.level, "blocked");
+  assert.equal(unselected.checks.find((check) => check.id === "instagram_media"), undefined, "a valid source video without a chosen derivative is not a non-video");
+});
+
+test("preflight classifies the actual source MIME and defers configured URL minting to the worker", async () => {
+  const { repo, save } = await memorySetup();
+  repo.socialAccounts.set("account1", { id: "account1", userId: "bob", status: "connected", platform: "instagram", hasToken: true, accountType: "BUSINESS", grantedScopes: ["instagram_business_basic", "instagram_business_content_publish"], tokenExpiresAt: new Date("2027-01-01T00:00:00Z") });
+  const cycle = await repo.getCycle("cycle1");
+  const storage = new MemoryMediaStorage();
+  const access = { mode: "provider" as const, createTemporaryAccess: async () => { throw new Error("preflight must not mint URLs"); }, validateTemporaryAccess: async () => false, createTemporaryCoverAccess: async () => { throw new Error("not used"); }, validateTemporaryCoverAccess: async () => false };
+  const ctx: RequestContext = { userId: "bob", now: NOW, repo, newId: () => "unused", config: { coverSupport: "supported" }, media: { storage, probe: null, maxUploadBytes: 1000 }, publishingMediaAccess: access };
+
+  const noOutput = await buildPreflightReport(ctx, "bob", cycle!, await repo.getCycleItems("cycle1"), true);
+  assert.equal(noOutput.checks.find((check) => check.id === "instagram_media"), undefined);
+  assert.equal(noOutput.checks.find((check) => check.id === "publishing_media_ineligible")?.level, "blocked");
+
+  repo.media.set("media1", makeMedia({ id: "media1", ownerId: "bob", kind: "image", mimeType: "image/png" }));
+  const actualImage = await buildPreflightReport(ctx, "bob", cycle!, await repo.getCycleItems("cycle1"), true);
+  assert.equal(actualImage.checks.find((check) => check.id === "instagram_media")?.level, "blocked");
+  repo.media.set("media1", makeMedia({ id: "media1", ownerId: "bob", kind: "video", mimeType: "video/mp4", durationMs: 10_000 }));
+
+  await save("valid");
+  const outputKey = "render/bob/valid";
+  const originalMetadata = storage.getPrivateMetadata.bind(storage);
+  storage.getPrivateMetadata = async (key) => key === outputKey ? { sizeBytes: 400, storageKind: "memory" } : originalMetadata(key);
+  repo.items.set("item1", { ...repo.items.get("item1")!, selectedRenderOutputId: "valid" });
+  const readyToMint = await buildPreflightReport(ctx, "bob", cycle!, await repo.getCycleItems("cycle1"), true);
+  assert.equal(readyToMint.checks.find((check) => check.id === "temporary_access_deferred")?.level, "recommendation");
+  assert.equal(readyToMint.checks.find((check) => check.id === "temporary_access_not_configured"), undefined);
 });
 
 test("a missing selected render row and original source data are not rewritten", async () => {

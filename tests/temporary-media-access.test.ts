@@ -4,7 +4,7 @@ import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { makeCycle, makeItem, makeMedia, NOW } from "./helpers.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
 import { renderKeyFor } from "../src/server/storage/media-storage.ts";
-import { authorizePublishingCover, authorizeRenderedPublishingOutput, HmacTemporaryMediaAccessAdapter, MockTemporaryMediaAccessAdapter, prepareTemporaryPublishingAccess, prepareTemporaryPublishingCoverAccess } from "../src/server/storage/temporary-media-access.ts";
+import { authorizePublishingCover, authorizeRenderedPublishingOutput, createConfiguredTemporaryMediaAccessAdapter, HmacTemporaryMediaAccessAdapter, MockTemporaryMediaAccessAdapter, prepareTemporaryPublishingAccess, prepareTemporaryPublishingCoverAccess } from "../src/server/storage/temporary-media-access.ts";
 
 const BYTES = new Uint8Array([0, 1, 2, 3, 4]);
 
@@ -89,6 +89,15 @@ test("provider URL is signed, HTTPS, single-output scoped, and expires; untruste
   assert.equal(await adapter.validateTemporaryAccess(`${grant.url}x`, auth.output, NOW), false);
   assert.throws(() => new HmacTemporaryMediaAccessAdapter("http://clipforge.example.test", Buffer.alloc(32, 4)));
   assert.throws(() => new HmacTemporaryMediaAccessAdapter("https://localhost", Buffer.alloc(32, 4)));
+});
+
+test("configured temporary-media access requires a public HTTPS origin and a canonical 32-byte signing key", () => {
+  const key = Buffer.alloc(32, 7).toString("base64url");
+  assert.equal(createConfiguredTemporaryMediaAccessAdapter({}), null);
+  assert.equal(createConfiguredTemporaryMediaAccessAdapter({ CLIPFORGE_PUBLIC_MEDIA_ORIGIN: "https://clipforge.example" }), null);
+  assert.equal(createConfiguredTemporaryMediaAccessAdapter({ CLIPFORGE_TEMP_MEDIA_SIGNING_KEY: key }), null);
+  assert.equal(createConfiguredTemporaryMediaAccessAdapter({ CLIPFORGE_PUBLIC_MEDIA_ORIGIN: "http://clipforge.example", CLIPFORGE_TEMP_MEDIA_SIGNING_KEY: key }), null);
+  assert.ok(createConfiguredTemporaryMediaAccessAdapter({ CLIPFORGE_PUBLIC_MEDIA_ORIGIN: "https://clipforge.example", CLIPFORGE_TEMP_MEDIA_SIGNING_KEY: key }));
 });
 
 test("preparation distinguishes missing storage, ineligible originals, unconfigured adapter, and mock-ready access", async () => {

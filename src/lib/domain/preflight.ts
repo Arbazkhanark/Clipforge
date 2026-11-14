@@ -19,7 +19,7 @@ export interface PreflightCheck {
   itemIds: string[];
 }
 
-export type PublishingMediaAccessStatus = "media_not_available" | "media_not_eligible" | "temporary_access_not_configured" | "temporary_access_expired" | "temporary_media_access_ready";
+export type PublishingMediaAccessStatus = "media_not_available" | "media_not_eligible" | "temporary_access_not_configured" | "temporary_access_deferred" | "temporary_access_expired" | "temporary_media_access_ready";
 export interface PublishingMediaAccessState { status: PublishingMediaAccessStatus; publiclyReachable?: boolean; }
 
 export interface PreflightInput {
@@ -136,7 +136,7 @@ export function runPreflight(input: PreflightInput): PreflightReport {
     if (instagram.hasStoredToken) {
       const wrongMedia = upcomingItems.filter((item) => {
         const media = instagram.mediaByItemId[item.id];
-        if (!media) return true;
+        if (!media) return false; // Missing sources are reported by source_access, not mislabeled as images.
         if (media.kind !== "video") return true;
         return media.mimeType !== undefined && !media.mimeType.startsWith("video/");
       });
@@ -166,6 +166,7 @@ export function runPreflight(input: PreflightInput): PreflightReport {
     const mediaIneligible: string[] = [];
     const accessExpired: string[] = [];
     const accessNotConfigured: string[] = [];
+    const accessDeferred: string[] = [];
     const temporaryReady: string[] = [];
     const notPubliclyReachable: string[] = [];
     const publiclyReachable: string[] = [];
@@ -174,6 +175,7 @@ export function runPreflight(input: PreflightInput): PreflightReport {
       if (state.status === "media_not_available") mediaUnavailable.push(item.id);
       else if (state.status === "media_not_eligible") mediaIneligible.push(item.id);
       else if (state.status === "temporary_access_not_configured") accessNotConfigured.push(item.id);
+      else if (state.status === "temporary_access_deferred") accessDeferred.push(item.id);
       else if (state.status === "temporary_access_expired") accessExpired.push(item.id);
       else {
         temporaryReady.push(item.id);
@@ -183,6 +185,7 @@ export function runPreflight(input: PreflightInput): PreflightReport {
     if (mediaUnavailable.length) add("publishing_media_unavailable", "blocked", `${mediaUnavailable.length} selected media file(s) are missing from private storage.`, mediaUnavailable);
     if (mediaIneligible.length) add("publishing_media_ineligible", "blocked", `${mediaIneligible.length} selected item(s) do not have an authorized rendered publishing output. Original uploads remain private.`, mediaIneligible);
     if (accessNotConfigured.length && instagram.temporaryMediaAccessConfigured === true) add("temporary_access_not_configured", "blocked", "Temporary media access is not configured for the selected output.", accessNotConfigured);
+    if (accessDeferred.length) add("temporary_access_deferred", "recommendation", "A short-lived URL will be created and checked by the publishing worker immediately before it sends the selected rendered video.", accessDeferred);
     if (accessExpired.length) add("temporary_access_expired", "blocked", `${accessExpired.length} temporary media access URL(s) expired. A fresh authorized URL is required.`, accessExpired);
     if (temporaryReady.length) add("temporary_media_access_ready", "ready", "Temporary access is ready for the selected rendered output.", temporaryReady);
     if (notPubliclyReachable.length) add("instagram_public_url", "blocked", "The temporary URL is a mock or otherwise not publicly reachable by Instagram. It cannot be used for publishing.", notPubliclyReachable);

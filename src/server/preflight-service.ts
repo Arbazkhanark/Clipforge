@@ -35,8 +35,19 @@ export async function buildPreflightReport(ctx: RequestContext, userId: string, 
           ? { status: "media_not_eligible" }
           : !storedMetadata || storedMetadata.sizeBytes !== selectedOutput.sizeBytes
             ? { status: "media_not_available" }
-            : { status: "temporary_access_not_configured" };
-    if (media && selectedOutput && outputMatchesItem) mediaByItemId[item.id] = { kind: "video", mimeType: "video/mp4", ...(media.durationMs != null ? { durationMs: media.durationMs } : {}), sizeBytes: selectedOutput.sizeBytes };
+            : ctx.publishingMediaAccess
+              ? { status: "temporary_access_deferred" }
+              : { status: "temporary_access_not_configured" };
+    // Source eligibility is independent of whether a user has selected a render yet. Without this,
+    // every valid video with no selected derivative was misreported as a non-video.
+    if (media) mediaByItemId[item.id] = {
+      kind: media.kind,
+      mimeType: media.mimeType,
+      ...(selectedOutput && outputMatchesItem ? {
+        ...(media.durationMs != null ? { durationMs: media.durationMs } : {}),
+        sizeBytes: selectedOutput.sizeBytes,
+      } : {}),
+    };
   }
   const ownedAccount = account && account.userId === userId ? account : null;
   const failureJobs = ownedAccount ? await ctx.repo.listPublishingJobsForAccount(userId, cycle.socialAccountId) : [];

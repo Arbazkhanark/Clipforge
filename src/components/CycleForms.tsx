@@ -123,6 +123,7 @@ function CycleRenderSelectionForms({ detail }: { detail: CycleDetail }) {
             <input type="hidden" name="expectedVersion" value={item.version} />
             <p><strong>Original source:</strong> {detail.mediaTitles[item.mediaAssetId] ?? "Unavailable video"}</p>
             <p role="status">{status}</p>
+            <p><a href={`/editor?media=${encodeURIComponent(item.mediaAssetId)}`}>Open video editor to create a rendered output</a></p>
             <label>Rendered output<br />
               <select name="renderOutputId" defaultValue={selectedAvailable && selectedIsListed ? item.selectedRenderOutputId ?? "" : ""}>
                 <option value="">No rendered output selected</option>
