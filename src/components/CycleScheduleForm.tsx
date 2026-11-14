@@ -69,7 +69,7 @@ export function CycleScheduleForm({ cycleId, items, initialSchedule, initialStar
       <p>Plan when these videos are scheduled in ClipForge. This is a planned schedule; it does not publish Reels to Instagram.</p>
       {!editable ? <p>This cycle is no longer a draft, so its schedule cannot be edited.</p> : (
         <>
-          <form method="post" action="/api/forms/cycle-schedule" onChange={() => setHasSaved(false)}>
+          <form method="post" action="/api/forms/cycle-schedule" className="cycle-schedule-form" onChange={() => setHasSaved(false)}>
             <input type="hidden" name="cycleId" value={cycleId} />
             <fieldset className="cycle-order-controls">
               <legend>Order videos by</legend>
@@ -90,26 +90,32 @@ export function CycleScheduleForm({ cycleId, items, initialSchedule, initialStar
               <p>Only upcoming and scheduled videos are reordered. Published or in-progress videos keep their history.</p>
             </fieldset>
             <input type="hidden" name="shuffleSeed" value={orderMode === "shuffle" ? shuffleSeed : ""} />
-            <p><label>Start date<br /><input type="date" name="startDate" required value={startDate} onChange={(event: ChangeEvent<HTMLInputElement>) => { setStartDate(event.currentTarget.value); setHasSaved(false); }} /></label></p>
-            <p><label>Time zone (IANA name)<br /><input type="text" name="timeZone" list="cycle-time-zones" required value={settings.timeZone} onChange={(event: ChangeEvent<HTMLInputElement>) => change("timeZone", event.currentTarget.value)} /></label><datalist id="cycle-time-zones">{TIME_ZONES.map((zone) => <option key={zone} value={zone} />)}</datalist></p>
-            <p><label>Preferred publishing time<br /><input type="time" name="windowStart" required value={settings.windowStart} onChange={(event: ChangeEvent<HTMLInputElement>) => change("windowStart", event.currentTarget.value)} /></label></p>
-            <p><label>Window ends<br /><input type="time" name="windowEnd" required value={settings.windowEnd} onChange={(event: ChangeEvent<HTMLInputElement>) => change("windowEnd", event.currentTarget.value)} /></label></p>
-            <p><label>Interval between publishing times (minutes)<br /><input type="number" name="intervalMinutes" min={1} max={1440} required value={settings.intervalMinutes} onChange={(event: ChangeEvent<HTMLInputElement>) => change("intervalMinutes", Number(event.currentTarget.value))} /></label></p>
-            <p><label>Reels per publishing time<br /><input type="number" name="postsPerInterval" min={1} required value={settings.postsPerInterval} onChange={(event: ChangeEvent<HTMLInputElement>) => change("postsPerInterval", Number(event.currentTarget.value))} /></label></p>
-            <fieldset>
+            <div className="cycle-schedule-fields">
+              <label>Start date<input type="date" name="startDate" required value={startDate} onChange={(event: ChangeEvent<HTMLInputElement>) => { setStartDate(event.currentTarget.value); setHasSaved(false); }} /></label>
+              <label>Time zone<input type="text" name="timeZone" list="cycle-time-zones" required value={settings.timeZone} onChange={(event: ChangeEvent<HTMLInputElement>) => change("timeZone", event.currentTarget.value)} /><datalist id="cycle-time-zones">{TIME_ZONES.map((zone) => <option key={zone} value={zone} />)}</datalist></label>
+              <label>Preferred publishing time<input type="time" name="windowStart" required value={settings.windowStart} onChange={(event: ChangeEvent<HTMLInputElement>) => change("windowStart", event.currentTarget.value)} /></label>
+              <label>Window ends<input type="time" name="windowEnd" required value={settings.windowEnd} onChange={(event: ChangeEvent<HTMLInputElement>) => change("windowEnd", event.currentTarget.value)} /></label>
+              <label>Interval (minutes)<input type="number" name="intervalMinutes" min={1} max={1440} required value={settings.intervalMinutes} onChange={(event: ChangeEvent<HTMLInputElement>) => change("intervalMinutes", Number(event.currentTarget.value))} /></label>
+              <label>Reels per publishing time<input type="number" name="postsPerInterval" min={1} required value={settings.postsPerInterval} onChange={(event: ChangeEvent<HTMLInputElement>) => change("postsPerInterval", Number(event.currentTarget.value))} /></label>
+            </div>
+            <fieldset className="cycle-publishing-days">
               <legend>Publishing days</legend>
               {WEEKDAYS.map((day) => <label key={day.value}><input type="checkbox" name="daysOfWeek" value={day.value} checked={settings.daysOfWeek.includes(day.value)} onChange={(event: ChangeEvent<HTMLInputElement>) => setDay(day.value, event.currentTarget.checked)} /> {day.label} </label>)}
             </fieldset>
-            <p><label>Maximum per day (optional)<br /><input type="number" name="dailyMax" min={1} value={settings.dailyMax ?? ""} onChange={(event: ChangeEvent<HTMLInputElement>) => change("dailyMax", event.currentTarget.value === "" ? null : Number(event.currentTarget.value))} /></label></p>
-            <p><label>Stop scheduling after (optional)<br /><input type="date" name="endDate" value={settings.endDate ?? ""} onChange={(event: ChangeEvent<HTMLInputElement>) => change("endDate", event.currentTarget.value || null)} /></label></p>
-            <button type="button" onClick={() => setPreviewRequested(true)}>Preview schedule</button>{" "}
-            <button type="submit" disabled={preview.problems.length > 0}>Save Schedule</button>
+            <details className="cycle-schedule-advanced">
+              <summary>Advanced limits <span>Optional</span></summary>
+              <div className="cycle-schedule-fields">
+                <label>Maximum per day<input type="number" name="dailyMax" min={1} value={settings.dailyMax ?? ""} onChange={(event: ChangeEvent<HTMLInputElement>) => change("dailyMax", event.currentTarget.value === "" ? null : Number(event.currentTarget.value))} /></label>
+                <label>Stop scheduling after<input type="date" name="endDate" value={settings.endDate ?? ""} onChange={(event: ChangeEvent<HTMLInputElement>) => change("endDate", event.currentTarget.value || null)} /></label>
+              </div>
+            </details>
+            <div className="cycle-schedule-actions"><button type="button" onClick={() => setPreviewRequested(true)}>Preview schedule</button><button type="submit" disabled={preview.problems.length > 0}>Save Schedule</button></div>
             {hasSaved && initialSchedule ? <p role="status">Schedule saved. No Reel has been published.</p> : !hasSaved ? <p role="status">Schedule has unsaved changes.</p> : null}
           </form>
           {previewRequested && preview.problems.length > 0 && <div role="alert"><p>Check the schedule settings:</p><ul>{preview.problems.map((problem) => <li key={problem}>{problem}</li>)}</ul></div>}
         </>
       )}
-      <h3>Upcoming Reels preview</h3>
+      <h3 className="cycle-upcoming-heading">Upcoming Reels preview</h3>
       {items.length === 0 ? <p>This cycle has no editable videos to schedule yet.</p> : (
         <ol>
           {preview.assignments.map(({ item, slot }, index) => <li key={item.id}><strong>{index + 1}. {item.title}</strong> — {slot ? <time dateTime={slot.toISOString()}>{formatted(slot)} ({settings.timeZone})</time> : <span>Not scheduled — no available time</span>}</li>)}

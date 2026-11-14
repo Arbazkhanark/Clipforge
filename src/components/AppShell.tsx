@@ -1,5 +1,8 @@
-import type { ReactNode } from "react";
-import type { EmailDelivery, RuntimeMode } from "../server/runtime.ts";
+"use client";
+
+import { useEffect, useState, type ReactNode } from "react";
+import type { RuntimeMode } from "../server/runtime.ts";
+import { TrialReminder } from "./TrialReminder.tsx";
 
 const LINKS: [string, string, string][] = [
   ["/dashboard", "Overview", "⌂"],
@@ -46,20 +49,42 @@ function SessionActions({
 
 export function AppShell({
   mode,
-  emailDelivery,
   signedIn,
   googleConfigured,
+  activeTrialEndsAt,
   children,
 }: {
   mode: RuntimeMode;
-  emailDelivery?: EmailDelivery;
   signedIn: boolean;
   googleConfigured: boolean;
+  activeTrialEndsAt: number | null;
   children: ReactNode;
 }) {
+  const [pathname, setPathname] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const updatePath = () => setPathname(window.location.pathname);
+    updatePath();
+    window.addEventListener("popstate", updatePath);
+    return () => window.removeEventListener("popstate", updatePath);
+  }, []);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 760px)");
+    const update = () => setIsMobile(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => setMenuOpen(false), [pathname]);
+
   return (
     <div className="app-shell workspace-shell">
-      <aside className="workspace-sidebar">
+      {menuOpen && <button className="workspace-nav-backdrop" type="button" aria-label="Close workspace navigation" onClick={() => setMenuOpen(false)} />}
+      <aside id="workspace-navigation" className="workspace-sidebar" data-open={menuOpen} inert={isMobile && !menuOpen}>
         <a href="/dashboard" className="workspace-brand">
           <span className="site-brand-mark" aria-hidden="true">
             C
@@ -78,10 +103,11 @@ export function AppShell({
               <li key={href}>
                 <a
                   href={href}
+                  aria-current={pathname === href || (href !== "/dashboard" && pathname?.startsWith(`${href}/`)) ? "page" : undefined}
                   className={
                     href === "/dashboard"
-                      ? "workspace-nav-link workspace-nav-dashboard"
-                      : "workspace-nav-link"
+                      ? `workspace-nav-link workspace-nav-dashboard${pathname === href ? " is-active" : ""}`
+                      : `workspace-nav-link${pathname === href || pathname?.startsWith(`${href}/`) ? " is-active" : ""}`
                   }
                 >
                   <span className="workspace-nav-icon" aria-hidden="true">
@@ -105,14 +131,20 @@ export function AppShell({
 
       <div className="workspace-main">
         <header className="workspace-topbar">
-          <span className="workspace-topbar-label">MY WORKSPACE</span>
-          <div className="workspace-topbar-account">
-            <span className="workspace-account-dot" />
-            <span>{signedIn ? "Signed in" : "Guest"}</span>
+          <div className="workspace-topbar-leading">
+            <button className="workspace-menu-toggle" type="button" aria-controls="workspace-navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
+              <span aria-hidden="true">☰</span><span>{menuOpen ? "Close menu" : "Menu"}</span>
+            </button>
+            <span className="workspace-topbar-label">MY WORKSPACE</span>
+          </div>
+          <div className="workspace-topbar-trailing">
+            <div className="workspace-topbar-account"><span className="workspace-account-dot" /><span>{signedIn ? "Signed in" : "Guest"}</span></div>
+            <SessionActions signedIn={signedIn} googleConfigured={googleConfigured} />
           </div>
         </header>
 
         <main className="app-content">
+          <TrialReminder trialEndsAt={activeTrialEndsAt} />
           {mode === "local" && (
             <div role="note" className="notice" data-local-banner>
               <p>
@@ -121,36 +153,6 @@ export function AppShell({
                 provider is connected, so account verification and
                 password-reset messages are unavailable here.
               </p>
-              <SessionActions
-                signedIn={signedIn}
-                googleConfigured={googleConfigured}
-              />
-            </div>
-          )}
-
-          {mode === "database" && (
-            <div role="note" className="notice" data-database-banner>
-              <p>
-                This deployment is configured to store accounts, media
-                details, collections, and publishing cycles in PostgreSQL
-                when each operation succeeds. Uploaded files use the
-                configured private storage adapter; they are not stored in
-                PostgreSQL or in memory. If a request reports that the
-                database is unavailable, that operation was not confirmed
-                as saved.{" "}
-                {emailDelivery === "outbox"
-                  ? "A real email provider is not connected, so confirmation messages are unavailable to account holders."
-                  : emailDelivery === "ses" || emailDelivery === "nodemailer"
-                    ? "Email confirmation is delivered through the configured server-side provider."
-                    : "Email is not sent, so new accounts stay unverified and can still sign in."}{" "}
-                Instagram publishing and payment availability are shown on
-                their respective pages. Cloud S3 storage is not connected.
-              </p>
-
-              <SessionActions
-                signedIn={signedIn}
-                googleConfigured={googleConfigured}
-              />
             </div>
           )}
 

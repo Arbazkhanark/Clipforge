@@ -31,19 +31,19 @@ export function CycleItemsTable({ items, mediaTitles, timeZone }: CycleItemsTabl
             const editable = isEditableItem(item);
             return (
               <tr key={item.id} data-item-id={item.id}>
-                <td>{editable
+                <td data-label="Select">{editable
                   ? <input type="checkbox" name="itemIds" value={item.id} aria-label={`Select ${title}`} />
                   : <span className="muted" title="This item can no longer be edited">—</span>}</td>
-                <td>{item.position}</td>
-                <td>{title}</td>
-                <td>{SOURCE_LABELS[item.sourceKind]}</td>
-                <td>
+                <td data-label="Position">{item.position}</td>
+                <td data-label="Video"><strong className="cycle-item-title">{title}</strong></td>
+                <td data-label="Source">{SOURCE_LABELS[item.sourceKind]}</td>
+                <td data-label="Status">
                   <StatusBadge status={item.status} />
                   {item.reviewReason && <p className="muted">{REVIEW_REASON_LABELS[item.reviewReason] ?? "Needs your attention."}</p>}
                 </td>
-                <td>{item.scheduledFor ? formatDateTime(item.scheduledFor, timeZone) : "Not scheduled"}</td>
-                <td>{item.captionText === "" ? <span className="muted">No caption</span> : item.captionText}</td>
-                <td>{COVER_LABELS[item.coverState]}</td>
+                <td data-label="Scheduled">{item.scheduledFor ? formatDateTime(item.scheduledFor, timeZone) : "Not scheduled"}</td>
+                <td data-label="Caption">{item.captionText === "" ? <span className="muted">No caption</span> : <details className="cycle-item-caption"><summary>View caption</summary><p>{item.captionText}</p></details>}</td>
+                <td data-label="Cover">{COVER_LABELS[item.coverState]}</td>
               </tr>
             );
           })}

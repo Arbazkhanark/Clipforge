@@ -270,7 +270,7 @@ export interface Repository {
   finishRazorpaySubscriptionIntent(input: { id: string; userId: string; status: RazorpayIntentStatus; providerSubscriptionId?: string; checkoutUrl?: string; errorCategory?: string; now: Date }): Promise<boolean>;
   getRazorpaySubscriptionIntent(userId: string, idempotencyKey: string): Promise<RazorpaySubscriptionIntentRecord | null>;
   getRazorpaySubscriptionIntentByProviderId(userId: string, providerSubscriptionId: string): Promise<RazorpaySubscriptionIntentRecord | null>;
-  getRazorpaySubscriptionForOwner(userId: string): Promise<{ id: string; planId: PlanId; interval: "weekly" | "monthly"; status: SubscriptionStatus; razorpaySubscriptionId: string | null; currentPeriodEnd: Date | null; cancelAtPeriodEnd: boolean } | null>;
+  getRazorpaySubscriptionForOwner(userId: string): Promise<{ id: string; planId: PlanId; interval: "weekly" | "monthly"; status: SubscriptionStatus; razorpaySubscriptionId: string | null; currentPeriodEnd: Date | null; cancelAtPeriodEnd: boolean; trialEndsAt: number | null } | null>;
   recordRazorpayCancellation(userId: string, providerSubscriptionId: string, cancelAtPeriodEnd: boolean, providerStatus: SubscriptionStatus, currentPeriodEnd: Date | null, now: Date): Promise<boolean>;
   requestRazorpayCancellation(userId: string, providerSubscriptionId: string, now: Date): Promise<boolean>;
   listSubscriptionContinuationCandidates(now: Date): Promise<SubscriptionContinuationCandidate[]>;

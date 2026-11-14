@@ -4,7 +4,14 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation.js";
 
 export function shouldShowPublicSiteChrome(pathname: string | null): boolean {
-  return !pathname?.startsWith("/admin");
+  if (!pathname) return true;
+  return !pathname.startsWith("/admin") && !isWorkspacePath(pathname);
+}
+
+function isWorkspacePath(pathname: string): boolean {
+  return ["/dashboard", "/media", "/collections", "/cycles", "/instagram", "/editor"].some(
+    (base) => pathname === base || pathname.startsWith(`${base}/`),
+  );
 }
 
 export function PublicSiteChrome({ signedIn }: { signedIn: boolean }) {
@@ -13,7 +20,7 @@ export function PublicSiteChrome({ signedIn }: { signedIn: boolean }) {
 
   useEffect(() => {
     const body = document.body;
-    if (!shouldShowPublicSiteChrome(pathname)) {
+    if (pathname?.startsWith("/admin")) {
       body.classList.remove("clipforge-public", "clipforge-dark");
       return;
     }

@@ -23,11 +23,11 @@ export function RepeatModeForm({ cycleId, repeatBehavior, ended }: { cycleId: st
   return (
     <section aria-labelledby="repeat-heading" className="cycles-form-card">
       <h2 id="repeat-heading">Repeat mode</h2>
-      <p>A repeat round can republish only eligible, unpublished items, and only under the mode you save here. Published, publishing, and processing items are left out. Automatic queues another round when this cycle finishes. Ask waits for you. Never does not start another round. Saving this does not send a Reel.</p>
+      <p className="repeat-mode-summary">Choose whether this cycle can be considered for another eligible round.</p>
       {ended ? <p>This cycle has ended, so repeat mode cannot be changed.</p> : (
         <form method="post" action="/api/forms/cycle-repeat">
           <input type="hidden" name="cycleId" value={cycleId} />
-          <p><label>Repeat<br />
+          <p><label>Repeat mode
             <select name="repeatBehavior" defaultValue={repeatBehavior}>
               <option value="never">Never</option>
               <option value="ask">Ask first</option>
@@ -37,6 +37,7 @@ export function RepeatModeForm({ cycleId, repeatBehavior, ended }: { cycleId: st
           <button type="submit">Save repeat mode</button>
         </form>
       )}
+      <details className="repeat-mode-details"><summary>How repeats work</summary><p>A repeat round can republish only eligible, unpublished items, and only under the mode you save here. Published, publishing, and processing items are left out. Automatic queues another round when this cycle finishes. Ask waits for you. Never does not start another round. Saving this does not send a Reel.</p></details>
     </section>
   );
 }
