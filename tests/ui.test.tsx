@@ -13,7 +13,7 @@ import { SchedulePreview } from "../src/components/SchedulePreview.tsx";
 import { ImportWarning } from "../src/components/ImportWarning.tsx";
 import { InstagramAccountsView } from "../src/components/InstagramAccounts.tsx";
 import { StatusBadge } from "../src/components/StatusBadge.tsx";
-import { countNoun, formatStorage } from "../src/components/format.ts";
+import { countNoun, formatDateTime, formatStorage } from "../src/components/format.ts";
 import { DashboardView } from "../src/components/DashboardView.tsx";
 import { runPreflight } from "../src/lib/domain/preflight.ts";
 import { describeUsageReset } from "../src/lib/domain/usage-accounting.ts";
@@ -67,6 +67,12 @@ test("usage meter: ok / warning / over states, formatted storage, and the monthl
 
 test("every cycle item status has a text label", () => {
   for (const status of CYCLE_ITEM_STATUSES) assert.match(html(<StatusBadge status={status} />), new RegExp(`data-status="${status}">[A-Z]`));
+});
+
+test("uploaded timestamps format the same database instant in the viewer's local timezone", () => {
+  const uploaded = new Date("2026-11-14T10:30:00.000Z");
+  assert.equal(formatDateTime(uploaded, "Asia/Kolkata"), "14 Nov 2026, 4:00 pm");
+  assert.equal(formatDateTime(uploaded, "America/Los_Angeles"), "14 Nov 2026, 2:30 am");
 });
 
 test("media upload offers an accessible multi-file picker, queue, and validated storage destination", () => {

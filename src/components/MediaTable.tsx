@@ -99,6 +99,8 @@ import {
   formatStorage,
 } from "./format.ts";
 import { MediaSelection } from "./MediaSelection.tsx";
+import { MediaThumbnail } from "./MediaThumbnail.tsx";
+import { UploadedAt } from "./UploadedAt.tsx";
 
 /**
  * Small preview image.
@@ -113,29 +115,7 @@ export function Thumbnail({
     kind?: "video" | "image";
   };
 }) {
-  const variant = media.hasThumbnail
-    ? "thumbnail"
-    : media.kind === "image"
-      ? "preview"
-      : null;
-
-  if (variant) {
-    return (
-      <img
-        className="media-thumbnail-image"
-        src={`/api/media/file?id=${encodeURIComponent(media.id)}&variant=${variant}`}
-        alt=""
-        width={80}
-        loading="lazy"
-      />
-    );
-  }
-
-  return (
-    <span className="media-no-preview">
-      {media.kind === "image" ? "Image preview unavailable" : "No preview"}
-    </span>
-  );
+  return <MediaThumbnail key={media.id} media={media} />;
 }
 
 function mediaHref(library: MediaLibraryData, page: number): string {
@@ -367,6 +347,9 @@ export function MediaTable({
                     <th scope="col" className="hide-narrow">
                       Size
                     </th>
+                    <th scope="col" className="hide-narrow" aria-sort={sort === "oldest" ? "ascending" : sort === "newest" ? "descending" : "none"}>
+                      Uploaded
+                    </th>
                     <th scope="col" className="hide-narrow">
                       Validation
                     </th>
@@ -422,17 +405,26 @@ export function MediaTable({
                         {formatStorage(m.sizeBytes)}
                       </td>
 
+                      <td className="hide-narrow media-uploaded-at">
+                        <UploadedAt createdAt={m.createdAt} />
+                      </td>
+
                       <td className="hide-narrow">
                         {m.validation === "verified" ? (
-                          <span className="media-validation verified">
-                            Verified
-                          </span>
+                          <div className="media-validation-cell">
+                            <span className="media-validation verified">Verified</span>
+                            <small>Server media probe passed</small>
+                          </div>
                         ) : m.validation === "incomplete" ? (
-                          <span className="media-validation incomplete">
-                            Incomplete
-                          </span>
+                          <div className="media-validation-cell">
+                            <span className="media-validation incomplete">Incomplete</span>
+                            <small>Full probe did not complete; no retry is queued</small>
+                          </div>
                         ) : (
-                          <span className="media-table-dash">—</span>
+                          <div className="media-validation-cell">
+                            <span className="media-table-dash">Unknown</span>
+                            <small>No validation result is stored</small>
+                          </div>
                         )}
                       </td>
 

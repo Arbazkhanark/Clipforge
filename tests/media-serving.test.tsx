@@ -249,11 +249,13 @@ test("THUMBNAILS: a failed upload (quota race loser) leaves NO thumbnail behind 
 });
 
 // ---------- UI ----------
-test("UI: the library shows thumbnails through the checked route and links to the detail page; the detail page shows honest metadata, preview and download", async () => {
-  const lib = renderToStaticMarkup(<MediaTable library={{ items: [{ id: "m1", title: "Clip", kind: "video", sizeBytes: 5e6, durationMs: 12_000, status: "active", validation: "verified", hasThumbnail: true, width: 160, height: 120 }, { id: "m2", title: "Plain", kind: "image", sizeBytes: 1000, durationMs: null, status: "active", validation: "incomplete", hasThumbnail: false, width: null, height: null }], total: 2, page: 1, pageCount: 1, pageSize: 24 }} />);
-  assert.ok(lib.includes('src="/api/media/file?id=m1&amp;variant=thumbnail"')); assert.ok(lib.includes('src="/api/media/file?id=m2&amp;variant=preview"')); assert.ok(lib.includes('href="/media/m1"')); assert.ok(!lib.includes("No preview image.")); assert.ok(!lib.includes("original video is unchanged")); assert.ok(lib.includes("Incomplete"));
+test("UI: media library explains validation and previews, shows the DB upload timestamp, and keeps owner-checked links", async () => {
+  const uploadedAt = new Date("2026-11-14T10:30:00.000Z");
+  const lib = renderToStaticMarkup(<MediaTable library={{ items: [{ id: "m1", title: "Clip", kind: "video", sizeBytes: 5e6, durationMs: 12_000, status: "active", validation: "verified", hasThumbnail: true, width: 160, height: 120, createdAt: uploadedAt }, { id: "m2", title: "Plain", kind: "image", sizeBytes: 1000, durationMs: null, status: "active", validation: "incomplete", hasThumbnail: false, width: null, height: null, createdAt: null }], total: 2, page: 1, pageCount: 1, pageSize: 24 }} />);
+  assert.ok(lib.includes('src="/api/media/file?id=m1&amp;variant=thumbnail"')); assert.ok(lib.includes('src="/api/media/file?id=m2&amp;variant=preview"')); assert.ok(lib.includes('href="/media/m1"')); assert.ok(lib.includes("Incomplete"));
+  assert.ok(lib.includes("Server media probe passed")); assert.ok(lib.includes("Full probe did not complete; no retry is queued")); assert.ok(lib.includes("Uploaded")); assert.ok(lib.includes('dateTime="2026-11-14T10:30:00.000Z"')); assert.ok(lib.includes("Unavailable"));
   const bareVideo = renderToStaticMarkup(<MediaTable library={{ items: [{ id: "m3", title: "Bare", kind: "video", sizeBytes: 1000, durationMs: 1000, status: "active", validation: "verified", hasThumbnail: false, width: 64, height: 64 }], total: 1, page: 1, pageCount: 1, pageSize: 24 }} />);
-  assert.ok(bareVideo.includes('class="media-no-preview">No preview</span>'));
+  assert.ok(bareVideo.includes("Preview unavailable; original unchanged"));
   assert.ok(!/storageKey|media\/owner|thumb\//.test(lib));
   const detailVideo = renderToStaticMarkup(<MediaDetailView timeZone="Asia/Kolkata" detail={{ mimeType: "video/mp4", addedAt: NOW, media: { id: "m1", title: "Clip", kind: "video", sizeBytes: 5e6, durationMs: 12_000, status: "active", validation: "verified", hasThumbnail: true, width: 160, height: 120 } }} />);
   for (const part of ["<video", 'controls', "variant=preview", "variant=thumbnail", "variant=download", "160 × 120", "0:12", "video/mp4", "decoded", "never change this original"]) assert.ok(detailVideo.includes(part), part);
@@ -267,5 +269,8 @@ test("view models: media detail is owner-only (others see 'not found'); the libr
   assert.equal((await errorOf(getMediaDetail(ctxFor("bob"), "m1"))).status, 404); assert.equal((await errorOf(getMediaDetail(ctxFor("owner"), "ghost"))).status, 404);
   assert.equal((await errorOf(getMediaDetail(ctxFor(null), "m1"))).status, 401);
   repo.media.set("m1", { ...repo.media.get("m1")!, status: "deleted" }); assert.equal((await errorOf(getMediaDetail(ctxFor("owner"), "m1"))).status, 404);
-  const { repo: r2, ctxFor: c2 } = setup(); assert.equal((await getMediaLibrary(c2("owner"), 1)).items[0]!.hasThumbnail, true); void r2;
+  const { repo: r2, ctxFor: c2 } = setup();
+  const libraryItem = (await getMediaLibrary(c2("owner"), 1)).items[0]!;
+  assert.equal(libraryItem.hasThumbnail, true);
+  assert.deepEqual(libraryItem.createdAt, r2.media.get("m1")?.createdAt ?? null);
 });

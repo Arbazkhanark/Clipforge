@@ -2891,6 +2891,11 @@ body.clipforge-public.clipforge-dark:has(.media-page) .media-stat-icon.image {
   text-align: center;
 }
 
+.media-uploaded-at { min-width: 145px; white-space: nowrap; }
+.media-uploaded-time-unavailable { color: var(--media-muted); }
+.media-validation-cell { display: grid; justify-items: start; gap: 4px; min-width: 145px; }
+.media-validation-cell small { max-width: 170px; color: var(--media-muted); font-size: 9px; line-height: 1.35; }
+
 .media-file-name {
   display: inline-block;
   max-width: 240px;
