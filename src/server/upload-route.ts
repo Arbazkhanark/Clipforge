@@ -1,5 +1,5 @@
-// POST /api/forms/media-upload (and JSON when the caller asks for it). Multipart is buffered in memory, which is why
-// this is a development-only path with a size cap; the S3 version will upload directly from the browser instead.
+// POST /api/forms/media-upload (and JSON when the caller asks for it). Multipart is buffered in memory and kept
+// single-file per request; the selected private MediaStorage adapter handles staging, validation and commit.
 import { AppError, toHttpResult } from "./errors.ts";
 import { buildFlashLocation, flashCodeForError } from "./flash.ts";
 import { redirectResponse } from "./form-routes.ts";

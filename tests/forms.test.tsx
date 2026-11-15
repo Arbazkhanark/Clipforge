@@ -277,12 +277,12 @@ test("UPLOAD ROUTE: a body that DECLARES it is too large is refused without read
 test("media page: says where files go (memory vs local disk vs none), shows flash, and marks incomplete checks", async () => {
   setRuntimeForTests(runtime(DEMO_USER_ID, await mediaServices()));
   const memory = html(await MediaPage({}));
-  assert.ok(memory.includes("Demo storage (server memory)")); assert.ok(memory.includes("discarded when the server restarts")); assert.ok(memory.includes('data-storage-kind="memory"'));
-  assert.ok(memory.includes('enctype="multipart/form-data"') || memory.includes('encType="multipart/form-data"')); assert.ok(memory.includes('action="/api/forms/media-upload"')); assert.ok(memory.includes("Cloud (S3) storage is not connected"));
+  assert.ok(memory.includes("In-memory demo storage")); assert.ok(memory.includes("discarded when the server restarts")); assert.ok(memory.includes('data-storage-kind="memory"'));
+  assert.ok(memory.includes("Ready for uploads")); assert.ok(memory.includes("In-memory demo storage")); assert.ok(!memory.includes("Cloud (S3) storage is not connected"));
   assert.ok(memory.includes("Up to 5 MB per file"));
   setRuntimeForTests(runtime(DEMO_USER_ID, await mediaServices({ disk: true })));
   const disk = html(await MediaPage({}));
-  assert.ok(disk.includes("Private folder on this computer")); assert.ok(disk.includes("not stored in the database")); assert.ok(!disk.includes("discarded when the server restarts"));
+  assert.ok(disk.includes("Local disk")); assert.ok(disk.includes("Private application storage")); assert.ok(!disk.includes("discarded when the server restarts"));
   setRuntimeForTests(runtime(DEMO_USER_ID));
   const none = html(await MediaPage({}));
   assert.ok(none.includes("Uploads are not available")); assert.ok(!none.includes('action="/api/forms/media-upload"'));

@@ -12,7 +12,7 @@
 //                  A database error stays an error. Nothing is copied into memory.
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { MediaServices, RequestContext } from "./context.ts";
+import type { MediaServices, MediaStorageDestination, RequestContext } from "./context.ts";
 import { AppError } from "./errors.ts";
 import type { Environment } from "./environment.ts";
 import { MemoryRepository } from "./memory-repository.ts";
@@ -290,12 +290,14 @@ async function openConfiguredDatabaseMedia(env: Environment): Promise<MediaServi
   const config = readMediaStorageConfiguration(env);
   if (!config.ok) return { storage: new UnavailableDiskStorage(), probe, thumbnail, maxUploadBytes, unavailable: config.reason };
   if (config.provider === "local-disk") {
-    try { return { storage: await LocalDiskMediaStorage.create(path.resolve(/*turbopackIgnore: true*/ config.directory)), probe, thumbnail, maxUploadBytes }; }
-    catch { return { storage: new UnavailableDiskStorage(), probe, thumbnail, maxUploadBytes, unavailable: "The explicitly selected private test media folder is unavailable." }; }
+    try { return { storage: await LocalDiskMediaStorage.create(path.resolve(/*turbopackIgnore: true*/ config.directory)), destination: localDiskDestination(), probe, thumbnail, maxUploadBytes }; }
+    catch { return { storage: new UnavailableDiskStorage(), destination: localDiskDestination(), probe, thumbnail, maxUploadBytes, unavailable: "The explicitly selected private test media folder is unavailable." }; }
   }
   const client = new S3Client({ region: config.region, credentials: config.credentials });
-  return { storage: new S3MediaStorage(client, config.bucket), probe, thumbnail, maxUploadBytes };
+  return { storage: new S3MediaStorage(client, config.bucket), destination: { provider: "s3", providerLabel: "AWS S3", environment: config.environment, bucket: config.bucket, region: config.region, privacy: "Private" }, probe, thumbnail, maxUploadBytes };
 }
+
+const localDiskDestination = (): MediaStorageDestination => ({ provider: "local-disk", providerLabel: "Local disk", environment: "development", locationLabel: "Private application storage", privacy: "Private" });
 
 async function openDatabaseMedia(dir: string | null | undefined): Promise<MediaServices> {
   const configuredMb = Number(process.env["CLIPFORGE_MAX_UPLOAD_MB"]);
@@ -305,10 +307,10 @@ async function openDatabaseMedia(dir: string | null | undefined): Promise<MediaS
   const trimmed = dir?.trim() ?? "";
   if (!trimmed) return { storage: new UnavailableDiskStorage(), probe, thumbnail, maxUploadBytes, unavailable: MEDIA_FOLDER_UNSET };
   try {
-    return { storage: await LocalDiskMediaStorage.create(path.resolve(/*turbopackIgnore: true*/ trimmed)), probe, thumbnail, maxUploadBytes };
+    return { storage: await LocalDiskMediaStorage.create(path.resolve(/*turbopackIgnore: true*/ trimmed)), destination: localDiskDestination(), probe, thumbnail, maxUploadBytes };
   } catch (error) {
     const unavailable = error instanceof Error && error.message === "The media folder must not be inside a web-served folder." ? MEDIA_FOLDER_PUBLIC : MEDIA_FOLDER_UNAVAILABLE;
-    return { storage: new UnavailableDiskStorage(), probe, thumbnail, maxUploadBytes, unavailable };
+    return { storage: new UnavailableDiskStorage(), destination: localDiskDestination(), probe, thumbnail, maxUploadBytes, unavailable };
   }
 }
 
@@ -322,7 +324,7 @@ function demoMediaServices(): Promise<MediaServices> {
     const dir = process.env["CLIPFORGE_LOCAL_MEDIA_DIR"];
     const storage = dir ? await LocalDiskMediaStorage.create(path.resolve(dir)) : new MemoryMediaStorage();
     const configuredMb = Number(process.env["CLIPFORGE_MAX_UPLOAD_MB"]);
-    return { storage, probe: await detectProbe(), thumbnail: await detectThumbnailMaker(), maxUploadBytes: Number.isFinite(configuredMb) && configuredMb > 0 ? configuredMb * 1024 * 1024 : DEFAULT_MAX_UPLOAD_BYTES };
+    return { storage, destination: dir ? localDiskDestination() : { provider: "memory", providerLabel: "In-memory demo storage", environment: "development", locationLabel: "This server process", privacy: "Private" }, probe: await detectProbe(), thumbnail: await detectThumbnailMaker(), maxUploadBytes: Number.isFinite(configuredMb) && configuredMb > 0 ? configuredMb * 1024 * 1024 : DEFAULT_MAX_UPLOAD_BYTES };
   })();
   return holder.__clipforgeDemoMedia;
 }

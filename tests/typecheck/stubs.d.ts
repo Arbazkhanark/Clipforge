@@ -31,8 +31,12 @@ declare module "next/headers" { export function headers(): Promise<{ get(name: s
 declare module "react" {
   export type ReactNode = any;
   export interface ChangeEvent<T> { currentTarget: T; }
+  export interface DragEvent<T = Element> { currentTarget: T; relatedTarget: EventTarget | null; dataTransfer: DataTransfer; preventDefault(): void; }
+  export interface MutableRefObject<T> { current: T; }
   export function createElement(type: any, props?: any, ...children: any[]): any;
   export function useState<T>(initial: T | (() => T)): [T, (value: T | ((current: T) => T)) => void];
+  export function useRef<T>(initial: T): MutableRefObject<T>;
+  export function useRef<T>(initial: T | null): MutableRefObject<T | null>;
   export function useMemo<T>(factory: () => T, deps: unknown[]): T;
   export function useEffect(effect: () => void | (() => void), deps?: unknown[]): void;
 }

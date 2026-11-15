@@ -8,6 +8,8 @@ import type { Repository } from "./repository.ts";
 
 export interface MediaServices {
   storage: MediaStorage;
+  /** Safe, validated destination metadata for the UI; never includes credentials or filesystem paths. */
+  destination?: MediaStorageDestination;
   /** null when ffprobe is not installed: uploads are then accepted by file signature only and marked "incomplete". */
   probe: MediaProbe | null;
   /** Makes a small JPEG preview image, or null when ffmpeg is not installed (uploads then have no thumbnail). */
@@ -17,6 +19,11 @@ export interface MediaServices {
   /** Set when database mode cannot use the private folder. Callers must not save the file in memory instead. */
   unavailable?: string;
 }
+
+export type MediaStorageDestination =
+  | { provider: "s3"; providerLabel: "AWS S3"; environment: "development" | "production"; bucket: string; region: string; privacy: "Private" }
+  | { provider: "local-disk"; providerLabel: "Local disk"; environment: "development"; locationLabel: "Private application storage"; privacy: "Private" }
+  | { provider: "memory"; providerLabel: "In-memory demo storage"; environment: "development"; locationLabel: "This server process"; privacy: "Private" };
 
 /** Everything a handler needs. `userId` comes from the verified session on the server - NEVER from the request body. */
 export interface RequestContext {

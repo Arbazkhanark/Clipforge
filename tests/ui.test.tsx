@@ -69,28 +69,41 @@ test("every cycle item status has a text label", () => {
   for (const status of CYCLE_ITEM_STATUSES) assert.match(html(<StatusBadge status={status} />), new RegExp(`data-status="${status}">[A-Z]`));
 });
 
-test("media upload offers an accessible picker and drag-drop using the existing single-file endpoint", () => {
+test("media upload offers an accessible multi-file picker, queue, and validated storage destination", () => {
   const out = html(<UploadForm info={{
     available: true,
+    storageStatus: "available",
     storage: { label: "Private folder on this computer", persistent: true, warning: "Stored outside the database." },
     storageKind: "local-disk",
+    destination: { provider: "local-disk", providerLabel: "Local disk", environment: "development", locationLabel: "Private application storage", privacy: "Private" },
     maxMegabytes: 200,
   }} />);
-  for (const text of ["Upload your media", "Drag and drop your videos or images here, or browse files from your device.", "Select Files", "MP4, MOV or WebM video", "JPEG, PNG or WebP images", "Up to 200 MB per file", "One file per upload"]) {
+  for (const text of ["Upload your media", "Drag and drop your videos or images here, or browse files from your device.", "Select Files", "MP4, MOV or WebM video", "JPEG, PNG or WebP images", "Up to 200 MB per file", "multiple", "Upload", "Ready for uploads"]) {
     assert.ok(out.includes(text), `missing ${text}`);
   }
-  assert.ok(out.includes('action="/api/forms/media-upload"'));
-  assert.ok(out.includes('name="file"'));
+  assert.ok(out.includes('multiple=""'));
   assert.ok(out.includes('aria-live="polite"'));
-  assert.ok(!out.includes('multiple=""'));
+  assert.ok(out.includes("Ready for uploads"));
+  assert.ok(!out.includes("Cloud (S3) storage is not connected"));
+  const s3 = html(<UploadForm info={{
+    available: true, storageStatus: "available",
+    storage: { label: "Private cloud storage", persistent: true, warning: "Stored privately." }, storageKind: "s3",
+    destination: { provider: "s3", providerLabel: "AWS S3", environment: "development", bucket: "clipforge-dev-media", region: "ap-south-1", privacy: "Private" }, maxMegabytes: 200,
+  }} />);
+  for (const text of ["AWS S3", "Development", "clipforge-dev-media", "ap-south-1", "Private", "Available"]) assert.ok(s3.includes(text), `missing ${text}`);
+  assert.ok(!s3.includes("Access Key")); assert.ok(!s3.includes("Secret Access Key"));
   const unavailable = html(<UploadForm info={{
-    available: false,
-    storage: { label: "Private folder unavailable", persistent: false, warning: "Storage is not configured." },
+    available: false, storageStatus: "unavailable",
+    storage: { label: "Storage unavailable", persistent: false, warning: "S3 storage is not configured." },
     storageKind: null,
+    destination: null,
     maxMegabytes: 200,
   }} />);
-  assert.ok(unavailable.includes("Uploads are not available"));
-  assert.ok(!unavailable.includes('action="/api/forms/media-upload"'));
+  assert.ok(unavailable.includes("Uploads are unavailable"));
+  assert.ok(unavailable.includes("S3 storage is not configured."));
+  assert.ok(unavailable.includes('data-storage-status="unavailable"'));
+  assert.ok(unavailable.includes("Provider"));
+  assert.ok(!unavailable.includes('data-storage-status="available"'));
 });
 
 test("empty media library links back to the upload section", () => {

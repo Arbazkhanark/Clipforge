@@ -2459,6 +2459,19 @@ body.clipforge-public.clipforge-dark:has(.media-page) {
 .media-upload-storage-note { overflow-wrap: anywhere; }
 .media-upload-storage-note strong { color: var(--media-text); }
 .media-upload-form { display: grid; gap: .8rem; }
+.media-storage-info { display: grid; gap: .75rem; padding: .85rem 1rem; border: 1px solid var(--media-border); border-radius: .75rem; background: var(--media-bg); }
+.media-storage-info-heading, .media-upload-queue-heading, .media-upload-results-heading { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.media-storage-info-heading > div { display: grid; gap: .15rem; }
+.media-storage-label { color: var(--media-muted); font-size: .62rem; font-weight: 800; letter-spacing: .12em; }
+.media-storage-info-heading strong { color: var(--media-text); font-size: .86rem; }
+.media-storage-state { padding: .22rem .55rem; border-radius: 999px; font-size: .66rem; font-weight: 750; }
+.media-storage-state.is-available { background: color-mix(in srgb, #23845b 14%, var(--media-card)); color: #23734f; }
+.media-storage-state.is-unavailable { background: color-mix(in srgb, #b64b36 13%, var(--media-card)); color: #a43827; }
+.media-storage-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: .55rem .9rem; margin: 0; }
+.media-storage-details > div { min-width: 0; display: grid; gap: .12rem; }
+.media-storage-details dt { color: var(--media-muted); font-size: .64rem; }
+.media-storage-details dd { min-width: 0; margin: 0; color: var(--media-text); font-size: .72rem; font-weight: 650; overflow-wrap: anywhere; }
+.media-storage-warning { margin: 0; color: var(--media-muted); font-size: .68rem; line-height: 1.45; }
 
 .media-drop-zone {
   display: grid;
@@ -2506,10 +2519,15 @@ body.clipforge-public.clipforge-dark:has(.media-page) {
 .media-upload-submit-button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(.96); }
 .media-select-files-button:focus-visible,
 .media-upload-submit-button:focus-visible,
-.media-remove-file-button:focus-visible { outline: 3px solid color-mix(in srgb, var(--media-accent) 45%, transparent); outline-offset: 3px; }
+.media-remove-file-button:focus-visible,
+.media-upload-secondary:focus-visible { outline: 3px solid color-mix(in srgb, var(--media-accent) 45%, transparent); outline-offset: 3px; }
 .media-select-files-button:disabled,
 .media-upload-submit-button:disabled { opacity: .55; cursor: not-allowed; }
 .media-drop-zone .media-upload-accessible-hint { margin-top: .1rem; font-size: .66rem !important; }
+.media-upload-queue-list, .media-upload-results { display: grid; gap: .55rem; }
+.media-upload-queue-heading, .media-upload-results-heading { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.media-upload-queue-heading h4, .media-upload-results-heading h4 { margin: 0; color: var(--media-text); font-size: .82rem; }
+.media-upload-queue-heading h4 span { display: inline-grid; min-width: 1.35rem; min-height: 1.35rem; place-items: center; margin-left: .25rem; border-radius: 999px; background: var(--media-accent-soft); color: var(--media-accent); font-size: .66rem; }
 .media-upload-queue { display: flex; min-width: 0; align-items: center; gap: .75rem; padding: .75rem; border: 1px solid var(--media-border); border-radius: .7rem; background: var(--media-bg); }
 .media-queue-file-icon { display: grid; flex: 0 0 auto; width: 2.4rem; height: 2.4rem; place-items: center; border-radius: .65rem; background: var(--media-accent-soft); color: var(--media-accent); font-size: 1rem; }
 .media-queue-file-icon.is-image { background: color-mix(in srgb, #6b8d79 15%, var(--media-bg)); color: #367354; }
@@ -2517,10 +2535,19 @@ body.clipforge-public.clipforge-dark:has(.media-page) {
 .media-queue-file-details strong { overflow: hidden; color: var(--media-text); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
 .media-queue-file-details > span { color: var(--media-muted); font-size: .68rem; }
 .media-queue-file-details .media-upload-status { color: var(--media-accent); font-weight: 700; }
+.media-queue-file-details .media-upload-status.is-failed { color: #a43827; }
+.media-queue-file-details progress { width: min(100%, 20rem); height: .45rem; accent-color: var(--media-accent); }
+.media-upload-error, .media-upload-caution { color: #a43827 !important; }
+.media-upload-caution { margin: 0; font-size: .72rem; }
 .media-remove-file-button { flex: 0 0 auto; padding: .45rem .6rem; border: 1px solid var(--media-border); border-radius: .5rem; background: var(--media-card); color: var(--media-text); font: inherit; font-size: .68rem; font-weight: 700; cursor: pointer; }
+.media-upload-secondary { min-height: 2.3rem; padding: .45rem .7rem; border: 1px solid var(--media-border); border-radius: .55rem; background: var(--media-card); color: var(--media-text); font: inherit; font-size: .69rem; font-weight: 700; cursor: pointer; }
+.media-upload-secondary:disabled, .media-remove-file-button:disabled { opacity: .55; cursor: not-allowed; }
+.media-upload-results { padding: .85rem; border: 1px solid var(--media-border); border-radius: .7rem; background: var(--media-bg); }
+.media-upload-results-heading > span, .media-upload-results p span { color: var(--media-muted); font-size: .68rem; }
+.media-upload-results p { display: grid; gap: .16rem; margin: 0; padding: .5rem 0; border-top: 1px solid var(--media-border); }
+.media-upload-results p strong { color: var(--media-text); font-size: .72rem; overflow-wrap: anywhere; }
 .media-upload-live-status { min-height: 1em; margin: 0; color: var(--media-muted); font-size: .7rem; }
-.media-upload-actions { display: flex; justify-content: flex-end; }
-.media-upload-cloud-note { margin: 0; color: var(--media-muted); font-size: .68rem; }
+.media-upload-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
 .media-upload-unavailable { margin: 0; padding: .85rem; border: 1px solid var(--media-border); border-radius: .6rem; color: var(--media-muted); font-size: .78rem; }
 
 body.clipforge-dark .media-queue-file-icon.is-image { background: #26382d; color: #a9d3b7; }
@@ -2529,6 +2556,7 @@ body.clipforge-dark .media-queue-file-icon.is-image { background: #26382d; color
   .media-upload-card { padding: .75rem; }
   .media-drop-zone { min-height: 190px; padding: 1rem .7rem; }
   .media-upload-actions { justify-content: stretch; }
+  .media-upload-actions > button { flex: 1 1 9rem; }
   .media-upload-submit-button { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {

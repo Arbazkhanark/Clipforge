@@ -11,7 +11,7 @@ import type { Capability, CollectionPermissionGrant, CollectionVisibility, Cycle
 import { evaluateInstagramEligibility, missingInstagramScopes, normalizeInstagramScopes } from "../lib/integrations/instagram-eligibility.ts";
 import type { PreflightReport } from "../lib/domain/preflight.ts";
 import { consecutiveDefiniteFailures, itemsEligibleForRepeat, shouldPauseForAccount, type RepeatBehavior } from "../lib/domain/publish-workflow.ts";
-import { requireUser, type RequestContext } from "./context.ts";
+import { requireUser, type MediaStorageDestination, type RequestContext } from "./context.ts";
 import { readCollectionListQuery, readCollectionVideoQuery, readMediaListQuery, type CollectionSort, type MediaListQuery } from "./library-query.ts";
 import { notFound } from "./errors.ts";
 import { describeStorage, type StorageDescription } from "./storage/media-storage.ts";
@@ -304,14 +304,24 @@ function accountBelongsTo(account: Awaited<ReturnType<RequestContext["repo"]["ge
   return account && account.userId === userId ? account : null;
 }
 
-export interface UploadInfo { available: boolean; storage: StorageDescription; storageKind: "memory" | "local-disk" | "s3" | null; maxMegabytes: number; }
+export interface UploadInfo { available: boolean; storageStatus: "available" | "unavailable"; storage: StorageDescription; storageKind: "memory" | "local-disk" | "s3" | null; destination: MediaStorageDestination | null; maxMegabytes: number; }
 
 /** What the upload form needs. `available` is false when no storage is configured: the form then explains instead of failing. */
 export function getUploadInfo(ctx: RequestContext): UploadInfo {
   requireUser(ctx);
-  if (ctx.media?.unavailable) return { available: false, storage: { label: "Private folder unavailable", persistent: false, warning: ctx.media.unavailable }, storageKind: null, maxMegabytes: Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) };
+  if (ctx.media?.unavailable) return { available: false, storageStatus: "unavailable", storage: { label: "Storage unavailable", persistent: false, warning: ctx.media.unavailable }, storageKind: null, destination: ctx.media.destination ?? null, maxMegabytes: Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) };
   const kind = ctx.media?.storage.kind ?? null;
-  return { available: ctx.media !== undefined, storage: describeStorage(kind), storageKind: kind, maxMegabytes: ctx.media ? Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) : 0 };
+  const destination = ctx.media?.destination ?? (kind === "memory"
+    ? { provider: "memory" as const, providerLabel: "In-memory demo storage" as const, environment: "development" as const, locationLabel: "This server process" as const, privacy: "Private" as const }
+    : kind === "local-disk"
+      ? { provider: "local-disk" as const, providerLabel: "Local disk" as const, environment: "development" as const, locationLabel: "Private application storage" as const, privacy: "Private" as const }
+      : null);
+  // An S3-kind adapter without metadata from validated runtime configuration is not reported as ready.
+  const available = ctx.media !== undefined && kind !== null && (kind !== "s3" || destination?.provider === "s3");
+  const warning = kind === "s3" && !destination
+    ? "Validated S3 configuration is unavailable; uploads are disabled."
+    : describeStorage(kind).warning;
+  return { available, storageStatus: available ? "available" : "unavailable", storage: { ...describeStorage(kind), warning }, storageKind: available ? kind : null, destination: available ? destination : null, maxMegabytes: ctx.media ? Math.floor(ctx.media.maxUploadBytes / (1024 * 1024)) : 0 };
 }
 
 export interface InstagramAccountCard {
