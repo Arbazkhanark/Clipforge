@@ -3,6 +3,7 @@ import { readGoogleOAuthConfig } from "../auth/google-oauth.ts";
 import { readInstagramOAuthConfig } from "../instagram/instagram-oauth.ts";
 import { readRazorpayTestConfig } from "../billing/razorpay-client.ts";
 import { createConfiguredTemporaryMediaAccessAdapter } from "../storage/temporary-media-access.ts";
+import { readMediaStorageConfiguration } from "../storage/storage-config.ts";
 import type { Environment } from "../environment.ts";
 
 export type PlatformSettingState = "configured" | "incomplete" | "missing" | "application_default" | "not_implemented";
@@ -58,6 +59,10 @@ export function buildAdminPlatformSettings(env: Environment = process.env): Admi
   const publishingEnabled = env["CLIPFORGE_PUBLISHING_ENABLED"] === "true" && env["CLIPFORGE_PUBLISHING_LIVE_APPROVED"] === "true";
   const tokenSigningReady = createConfiguredTemporaryMediaAccessAdapter(env) !== null;
   const mediaOriginPresent = present(env, ["CLIPFORGE_PUBLIC_MEDIA_ORIGIN", "CLIPFORGE_TEMP_MEDIA_SIGNING_KEY"]);
+  const storageConfiguration = readMediaStorageConfiguration(env);
+  const storageState: PlatformSettingState = storageConfiguration.ok
+    ? storageConfiguration.provider === "s3" ? "configured" : "incomplete"
+    : present(env, ["CLIPFORGE_STORAGE_PROVIDER", "CLIPFORGE_STORAGE_ENV", "CLIPFORGE_S3_BUCKET", "CLIPFORGE_S3_REGION", "CLIPFORGE_S3_ACCESS_KEY_ID", "CLIPFORGE_S3_SECRET_ACCESS_KEY"]) === 0 ? "missing" : "incomplete";
 
   return {
     environment: ["development", "test", "production"].includes(env["NODE_ENV"] ?? "") ? env["NODE_ENV"] as string : "Unknown",
@@ -85,8 +90,9 @@ export function buildAdminPlatformSettings(env: Environment = process.env): Admi
         item("Webhook verification secret", present(env, ["RAZORPAY_WEBHOOK_SECRET"]) === 1 ? "configured" : "missing", present(env, ["RAZORPAY_WEBHOOK_SECRET"]) === 1 ? "A webhook secret is present; webhook delivery was not tested." : "Webhook secret is not configured."),
       ] },
       { title: "Storage & media processing", items: [
-        item("Private local media directory", present(env, ["CLIPFORGE_LOCAL_MEDIA_DIR"]) === 1 ? "configured" : "missing", present(env, ["CLIPFORGE_LOCAL_MEDIA_DIR"]) === 1 ? "A local media path is configured; accessibility and permissions were not checked." : "No local media path is configured. Cloud storage is not implemented."),
-        item("AWS / S3 storage", "not_implemented", "No AWS storage adapter is connected."),
+        item("Private S3 media storage", storageState, storageConfiguration.ok && storageConfiguration.provider === "s3"
+          ? `S3 configuration passed local validation for the ${storageConfiguration.environment} environment; connectivity was not tested.`
+          : storageConfiguration.ok ? "Local disk is only suitable for explicit development/test fallback." : "Private S3 storage is missing or incomplete; uploads fail closed."),
         item("FFmpeg / FFprobe", "application_default", "External executables are required for media inspection and rendering; availability was not checked here."),
       ] },
       { title: "Email & background jobs", items: [

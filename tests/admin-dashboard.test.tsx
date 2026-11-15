@@ -230,7 +230,7 @@ test("Admin Settings page is protected and distinguishes configuration from live
   assert.match(html, /Current plan catalog/);
   assert.match(html, /Creator/);
   assert.match(html, /₹499/);
-  assert.match(html, /No AWS storage adapter is connected/);
+  assert.match(html, /Private S3 storage is missing or incomplete; uploads fail closed/);
   assert.match(html, /Email delivery/);
   assert.match(html, /Automatic background scheduling/);
 });

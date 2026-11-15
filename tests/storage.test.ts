@@ -140,7 +140,7 @@ test("storage descriptions keep demo memory, local disk and cloud clearly apart"
   assert.match(describeStorage("local-disk").warning, /private folder on this computer/);
   assert.match(describeStorage("local-disk").warning, /not stored in the database/);
   assert.equal(describeStorage("local-disk").persistent, true);
-  assert.match(describeStorage("s3").warning, /not connected/);
+  assert.match(describeStorage("s3").warning, /stored privately in the configured S3 environment/);
   assert.match(describeStorage(null).label, /Not available/);
 });
 

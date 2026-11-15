@@ -251,14 +251,14 @@ test("THUMBNAILS: a failed upload (quota race loser) leaves NO thumbnail behind 
 // ---------- UI ----------
 test("UI: the library shows thumbnails through the checked route and links to the detail page; the detail page shows honest metadata, preview and download", async () => {
   const lib = renderToStaticMarkup(<MediaTable library={{ items: [{ id: "m1", title: "Clip", kind: "video", sizeBytes: 5e6, durationMs: 12_000, status: "active", validation: "verified", hasThumbnail: true, width: 160, height: 120 }, { id: "m2", title: "Plain", kind: "image", sizeBytes: 1000, durationMs: null, status: "active", validation: "incomplete", hasThumbnail: false, width: null, height: null }], total: 2, page: 1, pageCount: 1, pageSize: 24 }} />);
-  assert.ok(lib.includes('src="/api/media/file?id=m1&amp;variant=thumbnail"')); assert.ok(lib.includes('src="/api/media/file?id=m2&amp;variant=preview"')); assert.ok(lib.includes('href="/media/m1"')); assert.ok(!lib.includes("No preview image.")); assert.ok(!lib.includes("original video is unchanged")); assert.ok(lib.includes("Not fully checked"));
+  assert.ok(lib.includes('src="/api/media/file?id=m1&amp;variant=thumbnail"')); assert.ok(lib.includes('src="/api/media/file?id=m2&amp;variant=preview"')); assert.ok(lib.includes('href="/media/m1"')); assert.ok(!lib.includes("No preview image.")); assert.ok(!lib.includes("original video is unchanged")); assert.ok(lib.includes("Incomplete"));
   const bareVideo = renderToStaticMarkup(<MediaTable library={{ items: [{ id: "m3", title: "Bare", kind: "video", sizeBytes: 1000, durationMs: 1000, status: "active", validation: "verified", hasThumbnail: false, width: 64, height: 64 }], total: 1, page: 1, pageCount: 1, pageSize: 24 }} />);
-  assert.ok(bareVideo.includes("No preview image. The original video is unchanged."));
+  assert.ok(bareVideo.includes('class="media-no-preview">No preview</span>'));
   assert.ok(!/storageKey|media\/owner|thumb\//.test(lib));
   const detailVideo = renderToStaticMarkup(<MediaDetailView timeZone="Asia/Kolkata" detail={{ mimeType: "video/mp4", addedAt: NOW, media: { id: "m1", title: "Clip", kind: "video", sizeBytes: 5e6, durationMs: 12_000, status: "active", validation: "verified", hasThumbnail: true, width: 160, height: 120 } }} />);
   for (const part of ["<video", 'controls', "variant=preview", "variant=thumbnail", "variant=download", "160 × 120", "0:12", "video/mp4", "decoded", "never change this original"]) assert.ok(detailVideo.includes(part), part);
   const detailIncomplete = renderToStaticMarkup(<MediaDetailView timeZone="UTC" detail={{ mimeType: null, addedAt: null, media: { id: "m2", title: "P", kind: "image", sizeBytes: 10, durationMs: null, status: "active", validation: "incomplete", hasThumbnail: false, width: null, height: null } }} />);
-  assert.ok(detailIncomplete.includes("<img")); assert.ok(detailIncomplete.includes("file signature only")); assert.ok(detailIncomplete.includes("Unknown"));
+  assert.ok(detailIncomplete.includes("<img")); assert.ok(detailIncomplete.includes("signature accepted; ffprobe unavailable")); assert.ok(detailIncomplete.includes("Unknown"));
 });
 
 test("view models: media detail is owner-only (others see 'not found'); the library carries the thumbnail flag", async () => {

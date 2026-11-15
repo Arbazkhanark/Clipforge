@@ -89,6 +89,12 @@ written if it cannot fit) -> **stage** under `staging/<id>` -> ffprobe (if insta
 Keys come only from validated ids; the user's file name becomes a sanitised display title and is never part of a path. Failures remove only
 this upload's staged/just-committed file; **existing media is never touched** and nothing is deleted automatically.
 
+In database mode, runtime storage is selected by the explicit server-side `CLIPFORGE_STORAGE_PROVIDER` configuration. Normal
+development and production select private S3 with distinct `CLIPFORGE_STORAGE_ENV`, bucket and IAM credentials. A local-disk
+adapter is available only when explicitly selected for non-production development/testing; missing S3 configuration fails closed.
+The S3 adapter preserves these same key namespaces and `MediaStorage` methods. It does not issue object URLs. FFmpeg continues to
+use private temporary local files while reading/writing through the storage abstraction.
+
 ### Forms
 `<form method=post action=/api/forms/...>` -> `formRoute` (same-origin check, size cap) -> the tested handler -> `303` to a page with
 `?notice=<code>` or `?error=<code>`. Codes map to fixed sentences (`flash.ts`); user text is never echoed. One form wraps the cycle items

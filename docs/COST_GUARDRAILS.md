@@ -5,13 +5,13 @@
    If any of that ever becomes useful, FIRST explain exactly what it will change and what it could cost, then wait for explicit approval.
 2. The AWS Free Plan is preserved: never upgrade the account, never join an AWS Organization, never create billable resources
    (S3 buckets, EC2/ECS, RDS, CloudFront, NAT gateways, etc.) without explicit approval.
-3. Development uses local adapters only: in-memory repository (demo mode) now; local PostgreSQL and a local-disk media adapter
-   later. Storage, database, queue and publishing sit behind interfaces (`Repository`, future `MediaStorage`, `JobQueue`) so the real
-   services can be plugged in later without rewriting screens or rules.
+3. Development and production media storage use separate private S3 buckets and IAM identities. Demo/test memory and explicitly
+   selected local-disk fallback stay available for local testing. S3 storage remains behind `MediaStorage` and creates no AWS
+   resources by itself.
 4. Private media is never exposed: view models contain no storage keys or URLs; originals are not downloadable unless the owner
-   granted `download`; when S3 exists it stays private with short-lived presigned URLs.
+   granted `download`; S3 objects stay private and app requests stream authorized content through the existing routes.
 
-**Storage specifically:** uploads use server memory or a private local folder (`CLIPFORGE_LOCAL_MEDIA_DIR`, gitignored `.local-media/`). No S3 adapter exists; when one is written it must stay private (presigned, short-lived URLs), and creating the bucket needs your explicit approval first.
+**Storage specifically:** the application adapter uses private S3 objects and never returns object URLs. This repository change creates no buckets, IAM identities, or cloud resources. Those require separate approval. Uploads, rendering, imports, and publishing workers use server-side S3 access. The existing HMAC-signed application route remains the temporary Instagram media access mechanism.
 
-**Current state:** no AWS credentials exist in the repo or the sandbox; `.env.example` holds placeholders only; nothing here calls
-any cloud service.
+**Current state:** the repository contains S3 client code and configuration names; no AWS resources or live cloud connection have
+been created or tested from this work.

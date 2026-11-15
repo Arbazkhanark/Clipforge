@@ -7,7 +7,8 @@
 //                  built-in sample user. Data resets when the server restarts. For local development only.
 //   "local" (CLIPFORGE_LOCAL_AUTH=true, not production): real auth in memory. Separate from the database.
 //   "database" (DATABASE_URL set, and local mode is not selected): users, sessions, media metadata,
-//                  collections, and publishing cycles are stored in PostgreSQL. File bytes are not.
+//                  collections, and publishing cycles are stored in PostgreSQL. In normal development and production,
+//                  media bytes are stored only in the explicitly selected private S3 environment.
 //                  A database error stays an error. Nothing is copied into memory.
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -30,6 +31,9 @@ import type { ScryptParams } from "./auth/password.ts";
 import { LocalDiskMediaStorage, UnavailableDiskStorage } from "./storage/local-disk-storage.ts";
 import { detectProbe, detectThumbnailMaker } from "./storage/media-inspection.ts";
 import { MemoryMediaStorage } from "./storage/memory-storage.ts";
+import { S3Client } from "@aws-sdk/client-s3";
+import { S3MediaStorage } from "./storage/s3-storage.ts";
+import { readMediaStorageConfiguration } from "./storage/storage-config.ts";
 import { createPrismaClient } from "./prisma/create-client.ts";
 import { PrismaAuthRepository } from "./prisma/prisma-auth-repository.ts";
 import { PrismaRepository } from "./prisma/prisma-repository.ts";
@@ -205,10 +209,10 @@ function guardAuthRepository(load: () => Promise<DatabaseServices>): AuthReposit
  * DATABASE MODE: accounts, sessions, media metadata, collections, and publishing cycles use PostgreSQL.
  * Email uses EMAIL_PROVIDER. Unset means no message is sent and normal unverified accounts follow the existing local policy.
  * "outbox" keeps messages in memory for local development. SES and Nodemailer are initialized only when selected.
- * Video and image bytes go only to CLIPFORGE_LOCAL_MEDIA_DIR. They are never written to PostgreSQL or to memory.
- * A database error stays an error. If the private folder cannot be used, uploads fail instead of using memory.
+ * Normal database mode uses the explicitly configured S3 provider. An explicit local-disk provider is limited to
+ * non-production development/test use. A database error stays an error; missing S3 config never falls back to disk or memory.
  */
-export function createDatabaseRuntime(connectionString: string, connect: DatabaseConnector = createPrismaClient, opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; mediaDir?: string | null; email?: ReturnType<typeof createEmailSetup> } = {}): Runtime {
+export function createDatabaseRuntime(connectionString: string, connect: DatabaseConnector = createPrismaClient, opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; mediaDir?: string | null; storageEnvironment?: Environment; email?: ReturnType<typeof createEmailSetup> } = {}): Runtime {
   const now = opts.now ?? (() => new Date());
   let ready: Promise<DatabaseServices> | null = null;
   let retryAfter = 0;
@@ -250,7 +254,13 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
   return {
     mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, emailSender: email.sender, ...(email.configurationError ? { emailConfigurationError: email.configurationError } : {}), renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => guardAdminData((await load()).adminData),
     now, newId: () => randomUUID(),
-    media: databaseMediaServices(opts.mediaDir === undefined ? process.env["CLIPFORGE_LOCAL_MEDIA_DIR"] : opts.mediaDir),
+    // A supplied mediaDir is an explicit legacy test/development fallback. Normal app runtime
+    // always uses the validated provider selected in the environment; it never falls back silently.
+    media: opts.mediaDir !== undefined
+      ? (opts.storageEnvironment ?? process.env)["NODE_ENV"] === "production"
+        ? configuredDatabaseMediaServices({ ...(opts.storageEnvironment ?? process.env), CLIPFORGE_STORAGE_PROVIDER: "invalid" })
+        : databaseMediaServices(opts.mediaDir)
+      : configuredDatabaseMediaServices(opts.storageEnvironment ?? process.env),
     currentUserId: async (request) => auth.getSessionUserId(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
     currentPrincipal: async (request) => auth.getSessionPrincipal(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
   };
@@ -260,10 +270,31 @@ const MEDIA_FOLDER_UNAVAILABLE = "The private media folder could not be opened. 
 const MEDIA_FOLDER_UNSET = "The private media folder is not configured. Nothing was saved in memory.";
 const MEDIA_FOLDER_PUBLIC = "The private media folder must be outside the web site folders. Nothing was saved in memory.";
 
-/** Database mode only. A missing or unusable folder is an error, never memory storage. */
+/** Explicit local test/development fallback. A missing or unusable folder is an error, never memory storage. */
 export function databaseMediaServices(dir: string | null | undefined): () => Promise<MediaServices> {
   let ready: Promise<MediaServices> | null = null;
   return () => (ready ??= openDatabaseMedia(dir));
+}
+
+/** Main database-mode provider selection. Invalid/missing config produces unavailable storage, never another provider. */
+function configuredDatabaseMediaServices(env: Environment): () => Promise<MediaServices> {
+  let ready: Promise<MediaServices> | null = null;
+  return () => (ready ??= openConfiguredDatabaseMedia(env));
+}
+
+async function openConfiguredDatabaseMedia(env: Environment): Promise<MediaServices> {
+  const configuredMb = Number(env["CLIPFORGE_MAX_UPLOAD_MB"]);
+  const maxUploadBytes = Number.isFinite(configuredMb) && configuredMb > 0 ? configuredMb * 1024 * 1024 : DEFAULT_MAX_UPLOAD_BYTES;
+  const probe = await detectProbe();
+  const thumbnail = await detectThumbnailMaker();
+  const config = readMediaStorageConfiguration(env);
+  if (!config.ok) return { storage: new UnavailableDiskStorage(), probe, thumbnail, maxUploadBytes, unavailable: config.reason };
+  if (config.provider === "local-disk") {
+    try { return { storage: await LocalDiskMediaStorage.create(path.resolve(/*turbopackIgnore: true*/ config.directory)), probe, thumbnail, maxUploadBytes }; }
+    catch { return { storage: new UnavailableDiskStorage(), probe, thumbnail, maxUploadBytes, unavailable: "The explicitly selected private test media folder is unavailable." }; }
+  }
+  const client = new S3Client({ region: config.region, credentials: config.credentials });
+  return { storage: new S3MediaStorage(client, config.bucket), probe, thumbnail, maxUploadBytes };
 }
 
 async function openDatabaseMedia(dir: string | null | undefined): Promise<MediaServices> {
@@ -324,7 +355,7 @@ export function getRuntime(env: Environment = process.env): Runtime {
   const databaseUrl = env["DATABASE_URL"]?.trim();
   if (databaseUrl) {
     const holder = globalThis as GlobalWithDemo;
-    holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient);
+    holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient, { storageEnvironment: env });
     return holder.__clipforgeDatabaseRuntime;
   }
   if (env["NODE_ENV"] === "production") {
