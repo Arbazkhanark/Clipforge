@@ -84,10 +84,18 @@ interface -> adapter chosen by `runtime.ts` (today: in-memory demo data, or a re
 
 ### Upload workflow
 signed in -> input shape -> size cap -> real type from the file's first bytes (browser MIME must agree) -> early plan-quota check (no bytes
-written if it cannot fit) -> **stage** under `staging/<id>` -> ffprobe (if installed; otherwise "incomplete") -> **commit** to
-`media/<userId>/<mediaId>` (never overwrites) -> record created **atomically within the quota** (`addMediaIfStorageWithin`) -> audit.
-Keys come only from validated ids; the user's file name becomes a sanitised display title and is never part of a path. Failures remove only
-this upload's staged/just-committed file; **existing media is never touched** and nothing is deleted automatically.
+written if it cannot fit) -> **stage** under `staging/<id>` -> synchronous signature/MIME checks, ffprobe when available, and optional
+thumbnail generation -> **commit** to `media/<userId>/<mediaId>` (never overwrites) -> MediaAsset, durable verification job, and audit
+created **atomically within the quota** (`addMediaWithVerificationJobIfStorageWithin`). A dedicated worker re-reads the committed private
+object through `MediaStorage`, verifies size, checksum, media signature/type and decode, and checks any generated thumbnail before the
+record is marked fully verified. Upload-time validation remains in place; a completed upload is not reported as end-to-end verified until
+the worker succeeds. Keys come only from validated ids; the user's file name becomes a sanitised display title and is never part of a
+path. Failures remove only this upload's staged/just-committed file; **existing media is never touched** and nothing is deleted automatically.
+
+The `media_verification` `ProcessingJob` kind persists progress, bounded retries and worker leases using the existing job payload and
+lease fields. Run the separately managed worker with `npm run worker:media-verification` in the same database/storage environment as the
+application, with `ffprobe` installed. The forward-only `20261115120000_media_verification_jobs` migration must be applied before
+deploying code that writes or queries the new enum value. This implementation does not apply migrations or provision a worker host.
 
 In database mode, runtime storage is selected by the explicit server-side `CLIPFORGE_STORAGE_PROVIDER` configuration. Normal
 development/preview and production select private S3 with distinct environment-specific bucket variables and IAM credentials. The runtime derives the environment from the hosting/runtime mode and fails closed if its matching bucket variable is absent. A local-disk

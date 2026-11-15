@@ -19,9 +19,9 @@ import { computePreviewLayout, DEFAULT_EDITING_SETTINGS, isReservedTemplateName,
 import type { MaxResolution } from "../lib/render/ffmpeg-command.ts";
 import { buildPreflightReport } from "./preflight-service.ts";
 import { localDateKey, localDateOf } from "../lib/domain/schedule.ts";
-import type { CycleRecord, Repository, RenderOutputRecord } from "./repository.ts";
+import type { CycleRecord, MediaVerificationState, Repository, RenderOutputRecord } from "./repository.ts";
 
-export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; /** "incomplete" = accepted by file signature only. */ validation: "verified" | "incomplete" | "unknown"; hasThumbnail: boolean; width: number | null; height: number | null; createdAt?: Date | null; }
+export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; /** "incomplete" until the verification job completes all mandatory checks. */ validation: "verified" | "incomplete" | "unknown"; hasThumbnail: boolean; width: number | null; height: number | null; createdAt?: Date | null; verification?: MediaVerificationState; }
 const toMediaCard = (m: MediaAsset): MediaCard => ({ id: m.id, title: m.title ?? "Untitled", kind: m.kind ?? "video", sizeBytes: m.sizeBytes, durationMs: m.durationMs ?? null, status: m.status, validation: m.validation ?? "unknown", hasThumbnail: m.hasThumbnail === true, width: m.width ?? null, height: m.height ?? null, createdAt: m.createdAt ?? null });
 
 export interface UsageLine { used: number; limit: number; }
@@ -72,7 +72,9 @@ export async function getMediaLibrary(ctx: RequestContext, requested: unknown): 
   const userId = requireUser(ctx);
   const query = readMediaListQuery(typeof requested === "object" && requested !== null ? requested : { page: requested });
   const { items, total } = await ctx.repo.listMediaForOwner(userId, { limit: MEDIA_PAGE_SIZE, offset: (query.page - 1) * MEDIA_PAGE_SIZE, ...(query.kind ? { kind: query.kind } : {}), ...(query.search ? { search: query.search } : {}), sort: query.sort });
-  return { items: items.map(toMediaCard), total, page: query.page, pageSize: MEDIA_PAGE_SIZE, pageCount: Math.max(1, Math.ceil(total / MEDIA_PAGE_SIZE)), search: query.search, sort: query.sort, kind: query.kind ?? "all", filtered: query.filtered };
+  const verifications = await ctx.repo.listMediaVerificationsForOwner(userId, items.map((item) => item.id));
+  const verificationById = new Map(verifications.map((state) => [state.mediaId, state]));
+  return { items: items.map((item) => ({ ...toMediaCard(item), verification: verificationById.get(item.id) })), total, page: query.page, pageSize: MEDIA_PAGE_SIZE, pageCount: Math.max(1, Math.ceil(total / MEDIA_PAGE_SIZE)), search: query.search, sort: query.sort, kind: query.kind ?? "all", filtered: query.filtered };
 }
 
 export interface CollectionCard { id: string; name: string; description: string | null; videoCount: number; visibility: CollectionVisibility; archived: boolean; sharedByAnotherUser: boolean; capabilities: Capability[]; createdAt: Date | null; previewMediaId: string | null; }

@@ -165,6 +165,7 @@ enum JobKind {
   thumbnail
   import
   cleanup
+  media_verification
 }
 
 enum PublishOutcome {

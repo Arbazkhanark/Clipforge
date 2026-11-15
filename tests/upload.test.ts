@@ -54,11 +54,12 @@ test("no storage configured = 503 with a clear message (never a fake success)", 
 test("SUCCESS (real ffprobe): a real MP4 is stored, verified, recorded, audited - and nothing private is returned", { skip: !ffmpegAvailable || !ffprobeInstalled ? "ffmpeg/ffprobe not installed" : false }, async () => {
   const { repo, storage, ctxFor } = setup();
   const result = await upload(ctxFor("bob"), fixtures.mp4, "My Clip.mp4", "video/mp4");
-  assert.deepEqual([result.title, result.kind, result.validation, result.warning, result.storage], ["My Clip.mp4", "video", "verified", null, "memory"]);
+  assert.deepEqual([result.title, result.kind, result.validation, result.warning, result.storage, result.verificationStatus], ["My Clip.mp4", "video", "incomplete", "Upload saved. Private storage and media verification are still in progress.", "memory", "processing"]);
   assert.ok(result.durationMs! > 800 && result.durationMs! < 1300, `duration ${result.durationMs}`);
   assert.equal(result.sizeBytes, fixtures.mp4.length);
   const record = repo.media.get(result.mediaId)!;
-  assert.deepEqual([record.ownerId, record.status, record.kind, record.width, record.height, record.validation], ["bob", "active", "video", 160, 120, "verified"]);
+  assert.deepEqual([record.ownerId, record.status, record.kind, record.width, record.height, record.validation], ["bob", "active", "video", 160, 120, "incomplete"]);
+  assert.equal(repo.mediaVerificationJobs.size, 1);
   const mem = storage as MemoryMediaStorage;
   assert.deepEqual(memoryCounts(mem), { staged: 0, objects: 1 });
   assert.ok(mem.objects.has(`media/bob/${result.mediaId}`));
@@ -74,7 +75,7 @@ test("SUCCESS: PNG and JPEG images are accepted (kind image, no duration), also 
   const jpg = await upload(ctxFor("bob"), fixtures.jpeg, "cover.jpg", "application/octet-stream");
   for (const r of [png, jpg]) { assert.equal(r.kind, "image"); assert.equal(r.durationMs, null); }
   assert.equal(repo.media.size, 2);
-  if (realProbe) assert.deepEqual([repo.media.get(png.mediaId)!.width, repo.media.get(png.mediaId)!.validation], [64, "verified"]);
+  if (realProbe) assert.deepEqual([repo.media.get(png.mediaId)!.width, repo.media.get(png.mediaId)!.validation], [64, "incomplete"]);
 });
 
 test("SUCCESS on local disk: the file really lands in the private folder, under an id-based name", needFfmpeg, async () => {
@@ -195,9 +196,10 @@ test("QUOTA RACE: two simultaneous uploads that each fit but not together - exac
 test("NO FFPROBE: the upload is accepted by signature only and CLEARLY marked incomplete - never 'verified'", needFfmpeg, async () => {
   const { repo, ctxFor } = setup({ probe: null });
   const result = await upload(ctxFor("bob"), fixtures.mp4);
-  assert.equal(result.validation, "incomplete"); assert.equal(result.durationMs, null); assert.match(result.warning ?? "", /ffprobe is not installed/);
+  assert.equal(result.validation, "incomplete"); assert.equal(result.verificationStatus, "processing"); assert.equal(result.durationMs, null); assert.match(result.warning ?? "", /verification are still in progress/);
   const record = repo.media.get(result.mediaId)!;
   assert.deepEqual([record.validation, record.width, record.height, record.durationMs], ["incomplete", null, null, null]);
+  assert.equal(repo.mediaVerificationJobs.size, 1);
   // Even without ffprobe, the signature check still blocks obviously wrong files.
   assert.equal((await errorOf(upload(ctxFor("bob"), new TextEncoder().encode("hello hello hello hello")))).status, 415);
 });

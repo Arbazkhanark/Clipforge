@@ -112,6 +112,20 @@ export interface RenderJobRecord {
 }
 export type CreateRenderJobResult = { status: "created" | "existing"; job: RenderJobRecord } | { status: "conflict" };
 export interface RenderJobClaim { workerId: string; now: Date; leaseSeconds: number; jobId?: string; }
+export type MediaVerificationStage = "queued" | "uploading" | "uploaded_to_storage" | "storage_verifying" | "storage_verified" | "media_probing" | "media_verified" | "thumbnail_generating" | "thumbnail_verifying" | "thumbnail_verified" | "thumbnail_skipped" | "completed";
+export type MediaVerificationOutcome = "processing" | "verified" | "incomplete" | "failed";
+export type MediaVerificationJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export interface MediaVerificationJobRecord {
+  id: string; ownerId: string; mediaAssetId: string; status: MediaVerificationJobStatus; progressPercent: number;
+  attempts: number; idempotencyKey: string; lockedBy: string | null; lockToken: string | null; lockExpiresAt: Date | null;
+  errorMessage: string | null; createdAt: Date; finishedAt: Date | null; payload: unknown;
+}
+export interface MediaVerificationState {
+  mediaId: string; status: MediaVerificationOutcome | "legacy_unverified"; stage: MediaVerificationStage;
+  completedStages: MediaVerificationStage[]; errorCode: string | null; errorMessage: string | null;
+  attempts: number; retryable: boolean; updatedAt: Date | null; thumbnailStatus: "pending" | "verified" | "failed" | "skipped";
+}
+export interface MediaVerificationClaim { workerId: string; now: Date; leaseSeconds: number; jobId?: string; }
 export interface RenderJobFence { id: string; ownerId: string; lockToken: string; }
 export interface AuditEntry { actorId: string | null; action: string; entityType: string; entityId: string; metadata?: Record<string, unknown>; }
 export type MediaImportStatus = "pending" | "copying" | "verifying" | "succeeded" | "failed";
@@ -317,6 +331,15 @@ export interface Repository {
    * `storageKey` stays inside the repository: it is never returned by queries.
    */
   addMediaIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, limitBytes: number): Promise<boolean>;
+  /** Atomically creates a not-yet-verified media row and its single idempotent verification job within quota. */
+  addMediaWithVerificationJobIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, job: MediaVerificationJobRecord, audit: AuditEntry, limitBytes: number): Promise<boolean>;
+  getMediaVerificationForOwner(ownerId: string, mediaId: string): Promise<MediaVerificationState | null>;
+  listMediaVerificationsForOwner(ownerId: string, mediaIds: string[]): Promise<MediaVerificationState[]>;
+  retryMediaVerification(ownerId: string, mediaId: string, now: Date): Promise<"queued" | "existing" | "missing" | "not_retryable">;
+  claimNextMediaVerificationJob(claim: MediaVerificationClaim): Promise<MediaVerificationJobRecord | null>;
+  updateMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; now: Date; leaseSeconds: number; payload: unknown }): Promise<boolean>;
+  completeMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; finishedAt: Date; payload: unknown; width: number; height: number; durationMs: number | null }): Promise<boolean>;
+  failMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; now: Date; payload: unknown; errorMessage: string; retryAt?: Date }): Promise<boolean>;
   /** For the serving routes ONLY. These keys never leave the server. */
   getMediaStorageInfo(mediaId: string): Promise<{ storageKey: string; thumbnailKey: string | null; mimeType: string | null } | null>;
   createOrGetMediaImportJob(input: MediaImportRequestInput): Promise<MediaImportRequestResult>;

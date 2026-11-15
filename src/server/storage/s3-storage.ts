@@ -43,10 +43,10 @@ export class S3MediaStorage implements MediaStorage {
 
   private validate(key: string): void { parseStorageKey(key); }
 
-  async stage(stagingKey: string, data: Uint8Array): Promise<void> {
+  async stage(stagingKey: string, data: Uint8Array, metadata: { contentType?: string } = {}): Promise<void> {
     this.validate(stagingKey);
     try {
-      await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: stagingKey, Body: data, IfNoneMatch: "*" }));
+      await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: stagingKey, Body: data, IfNoneMatch: "*", ...(metadata.contentType ? { ContentType: metadata.contentType } : {}) }));
     } catch (error) {
       if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.");
       throw new Error("Private storage could not save the staged file.");
@@ -91,8 +91,11 @@ export class S3MediaStorage implements MediaStorage {
   }
 
   async getPrivateMetadata(key: string) {
-    const sizeBytes = await this.statSize(key);
-    return sizeBytes === null ? null : { sizeBytes, storageKind: this.kind };
+    this.validate(key);
+    try {
+      const response = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      return typeof response.ContentLength === "number" && Number.isSafeInteger(response.ContentLength) && response.ContentLength >= 0 ? { sizeBytes: response.ContentLength, storageKind: this.kind, contentType: response.ContentType ?? null } : null;
+    } catch (error) { if (isNotFound(error)) return null; throw new Error("Private storage could not read file details."); }
   }
 
   async openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>> {

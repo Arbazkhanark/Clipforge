@@ -37,7 +37,11 @@ Instagram uses Instagram Login and stays off until you create a Meta app yoursel
 3. Apply `prisma/migrations/20261106174500_instagram_account_details` on a database you choose before database mode can store the account type and permission names. It is not applied to Neon from this repo. The encrypted token column already exists on the init migration.
 4. Connect from the Instagram page while signed in. A personal account is refused. Disconnect asks for confirmation and removes the token without deleting videos.
 
-Rendering and upload tests need `ffmpeg`/`ffprobe` on the PATH (skipped if ffmpeg is missing).
+Rendering and synchronous upload checks need `ffmpeg`/`ffprobe` on the PATH (tests skip the real-binary cases if unavailable). Database-mode
+uploads also create a durable verification job. Run `npm run worker:media-verification` as a separate process in the same environment as
+the application, with private storage access and `ffprobe` installed; otherwise media stays in Processing/Incomplete until a worker can
+verify it. Apply the forward-only `20261115120000_media_verification_jobs` migration before deploying this code. This repository change
+does not apply the migration, connect to AWS, or create worker infrastructure.
 No AWS account, credentials or resources are needed or used: see docs/COST_GUARDRAILS.md.
 
 Sandbox note: in the development sandbox React, react-dom, tsx were symlinked into `node_modules` from a global install because there

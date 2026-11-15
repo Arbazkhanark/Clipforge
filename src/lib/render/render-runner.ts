@@ -17,8 +17,9 @@ function runCommand(command: string, args: string[], onStdout?: (chunk: string) 
   });
 }
 
-export async function probeVideo(filePath: string): Promise<ProbeResult> {
-  const { code, stdout, stderr } = await runCommand("ffprobe", ["-v", "error", "-print_format", "json", "-show_streams", "-show_format", filePath]);
+export async function probeVideo(filePath: string, timeoutMs?: number): Promise<ProbeResult> {
+  const { code, stdout, stderr, timedOut } = await runCommand("ffprobe", ["-v", "error", "-print_format", "json", "-show_streams", "-show_format", filePath], undefined, timeoutMs);
+  if (timedOut) throw new Error("ffprobe timed out.");
   if (code !== 0) throw new Error(`ffprobe failed: ${stderr.slice(-300)}`);
   const info = JSON.parse(stdout) as { streams: { codec_type: string; codec_name: string; width?: number; height?: number }[]; format: { duration?: string } };
   const video = info.streams.find((s) => s.codec_type === "video");

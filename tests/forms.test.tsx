@@ -218,12 +218,13 @@ async function multipart(bytes: Uint8Array | string, filename: string, type: str
 }
 const needReal = { skip: !ffmpegAvailable || !ffprobeInstalled ? "ffmpeg/ffprobe not installed" : false };
 
-test("UPLOAD ROUTE (browser form): a real file is verified, stored, recorded; user is redirected with 'upload complete'", needReal, async () => {
+test("UPLOAD ROUTE (browser form): sync validation runs but final storage verification stays pending", needReal, async () => {
   const media = await mediaServices(); setRuntimeForTests(runtime(DEMO_USER_ID, media));
   const response = await uploadRoute()(await multipart(fixtures.mp4, "My Video.mp4", "video/mp4", { accept: "text/html,application/xhtml+xml" }));
-  assert.equal(response.status, 303); assert.equal(location(response), "/media?notice=upload_ok");
+  assert.equal(response.status, 303); assert.equal(location(response), "/media?notice=upload_incomplete");
   const saved = [...repo.media.values()].find((m) => m.title === "My Video.mp4")!;
-  assert.deepEqual([saved.ownerId, saved.validation, saved.kind], [DEMO_USER_ID, "verified", "video"]);
+  assert.deepEqual([saved.ownerId, saved.validation, saved.kind], [DEMO_USER_ID, "incomplete", "video"]);
+  assert.equal(repo.mediaVerificationJobs.size, 1);
   assert.equal((media.storage as MemoryMediaStorage).objects.size, 1);
 });
 
@@ -232,7 +233,7 @@ test("UPLOAD ROUTE (API caller): JSON result without any path or storage key", n
   const response = await uploadRoute()(await multipart(fixtures.png, "c.png", "image/png"));
   assert.equal(response.status, 200); assert.equal(response.headers.get("cache-control"), "no-store");
   const body = await response.json() as Record<string, unknown>;
-  assert.deepEqual([body["kind"], body["validation"], body["storage"]], ["image", "verified", "local-disk"]);
+  assert.deepEqual([body["kind"], body["validation"], body["verificationStatus"], body["storage"]], ["image", "incomplete", "processing", "local-disk"]);
   assert.ok(!/clipforge-forms|media\/|staging|storageKey/.test(JSON.stringify(body)));
 });
 
@@ -287,7 +288,7 @@ test("media page: says where files go (memory vs local disk vs none), shows flas
   const none = html(await MediaPage({}));
   assert.ok(none.includes("Uploads are not available")); assert.ok(!none.includes('action="/api/forms/media-upload"'));
   repo.media.set("demo-media-1", { ...repo.media.get("demo-media-1")!, validation: "incomplete" });
-  assert.ok(html(await MediaPage({})).includes("Incomplete"));
+  assert.ok(html(await MediaPage({})).includes("Not rechecked"));
   const flash = html(await MediaPage({ searchParams: Promise.resolve({ notice: "upload_ok" }) })); assert.ok(flash.includes('data-flash="notice"')); assert.ok(flash.includes("Upload complete"));
   const evil = html(await MediaPage({ searchParams: Promise.resolve({ error: "<script>alert(1)</script>" }) })); assert.ok(!evil.includes("<script>")); assert.ok(!evil.includes("data-flash"));
 });
@@ -296,7 +297,7 @@ test("cycles page: create form lists only your connected accounts (no external i
   const withAccount = html(await CyclesPage({}));
   assert.ok(withAccount.includes('action="/api/forms/cycle-create"')); assert.ok(withAccount.includes("Connected account 1")); assert.ok(!withAccount.includes(">demo-account<")); // the internal id is only the option value, never visible text
   repo.socialAccounts.set("demo-account", { id: "demo-account", userId: DEMO_USER_ID, status: "token_expired" });
-  assert.ok(html(await CyclesPage({})).includes("Scheduled Reels are handled separately by the publishing worker"));
+  const second = html(await CyclesPage({})); assert.ok(second.includes("No Instagram account is connected"));
 });
 
 test("cycle page: one form wraps the table and all actions; versions only for editable items; covers are images only; start needs readiness", async () => {

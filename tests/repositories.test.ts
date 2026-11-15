@@ -311,7 +311,7 @@ test("mappers: media, grants, collections and items round-trip; bigint sizes bec
   assert.equal(mediaToRow(makeMedia({ id: "x" }), { storageKey: "k", thumbnailKey: null })["mimeType"], "application/octet-stream");
   const g = { collectionId: "c", granteeId: "u", capabilities: ["view" as const], status: "revoked" as const, expiresAt: null };
   assert.deepEqual(rowToGrant(grantToRow(g)), g);
-  assert.deepEqual(rowToCollection({ id: "c", ownerId: "o", visibility: "link", archived: false, name: "N", description: null }, ["a"]), { id: "c", ownerId: "o", visibility: "link", archived: false, mediaIds: ["a"], name: "N" });
+  assert.deepEqual(rowToCollection({ id: "c", ownerId: "o", visibility: "link", archived: false, name: "N", description: null }, ["a"]), { id: "c", ownerId: "o", visibility: "link", archived: false, mediaIds: ["a"], name: "N", captionMode: "individual", sharedCaptionText: null, coverMode: "individual", sharedCoverMediaId: null, settingsVersion: 1, items: [] });
   const i = makeItem({ id: "i", captionText: "hi", coverState: "saved_internally", coverMediaId: "c" }); assert.deepEqual(rowToItem(itemToRow(i)), i);
   assert.ok(!("id" in itemToMutableData(i)) && !("cycleId" in itemToMutableData(i)) && !("cycleOwnerId" in itemToMutableData(i)));
 });

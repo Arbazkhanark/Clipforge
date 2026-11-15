@@ -22,6 +22,8 @@ import { mediaKeyFor, stagingKeyFor } from "./storage/media-storage.ts";
 import { calculateDiscountAmounts, normalizePromotionCode, promotionRedemptionTransitionAllowed, samePromotionDefinition, validDiscountSnapshot, validPromotionEventMetadata, validPromotionRecord } from "../lib/domain/promotions.ts";
 import type { CreatePromotionRedemptionInput, CreatePromotionalAccessGrantInput, PromotionLifecycleEventInput, PromotionLifecycleEventRecord, PromotionRecord, PromotionRedemptionRecord, PromotionalAccessGrantRecord, RedeemFreeAccessCouponInput, RedeemFreeAccessCouponResult, ReserveDiscountedManualPaymentIntentInput, ReserveDiscountedManualPaymentIntentResult } from "./repository.ts";
 import type { CollectionAccessRequestRecord, CollectionGrantMutationResult, CollectionShareLinkRecord, CollectionShareLinkSummary, CreateCollectionAccessRequestInput, CreateCollectionGrantInput, CreateCollectionShareLinkInput, DecideCollectionAccessRequestInput, MediaImportClaim, MediaImportFinalizationInput, MediaImportJobRecord, MediaImportRequestInput, MediaImportVerificationInput, RevokeCollectionGrantInput, UpdateCollectionShareLinkInput } from "./repository.ts";
+import type { MediaVerificationClaim, MediaVerificationJobRecord } from "./repository.ts";
+import { mediaVerificationStateFromJob } from "./media-verification-state.ts";
 
 const clone = <T>(value: T): T => structuredClone(value);
 const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]` : typeof value === "object" && value !== null ? `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}` : JSON.stringify(value) ?? "undefined";
@@ -55,6 +57,7 @@ export class MemoryRepository implements Repository {
   collectionAccessRequests = new Map<string, CollectionAccessRequestRecord>();
   collectionShareLinks = new Map<string, CollectionShareLinkRecord>();
   mediaImportJobs = new Map<string, MediaImportJobRecord>();
+  mediaVerificationJobs = new Map<string, MediaVerificationJobRecord>();
   socialAccounts = new Map<string, SocialAccountRecord>();
   publishingJobs = new Map<string, PublishingAttemptRecord>();
   /** Ciphertext only. Never copied onto SocialAccountRecord. */
@@ -1012,6 +1015,65 @@ export class MemoryRepository implements Repository {
     if (used + media.sizeBytes > limitBytes) return false;
     this.media.set(media.id, clone(media)); this.storageKeys.set(media.id, keys.storageKey); this.thumbnailKeys.set(media.id, keys.thumbnailKey);
     return true;
+  }
+  async addMediaWithVerificationJobIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, job: MediaVerificationJobRecord, audit: AuditEntry, limitBytes: number): Promise<boolean> {
+    await tick();
+    const key = `media-verification:${media.id}`;
+    const used = [...this.media.values()].filter((m) => m.ownerId === media.ownerId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
+    if (used + media.sizeBytes > limitBytes || media.validation !== "incomplete" || job.ownerId !== media.ownerId || job.mediaAssetId !== media.id || job.status !== "queued" || job.idempotencyKey !== key || [...this.mediaVerificationJobs.values()].some((item) => item.idempotencyKey === key) || this.media.has(media.id)) return false;
+    this.media.set(media.id, clone(media)); this.storageKeys.set(media.id, keys.storageKey); this.thumbnailKeys.set(media.id, keys.thumbnailKey); this.mediaVerificationJobs.set(job.id, clone(job)); this.audit.push(clone(audit));
+    return true;
+  }
+  async getMediaVerificationForOwner(ownerId: string, mediaId: string) {
+    await tick(); const media = this.media.get(mediaId);
+    if (!media || media.ownerId !== ownerId || media.status === "deleted") return null;
+    const job = [...this.mediaVerificationJobs.values()].find((item) => item.ownerId === ownerId && item.mediaAssetId === mediaId && item.idempotencyKey === `media-verification:${mediaId}`);
+    return mediaVerificationStateFromJob(job, mediaId);
+  }
+  async listMediaVerificationsForOwner(ownerId: string, mediaIds: string[]) {
+    await tick(); const unique = [...new Set(mediaIds)];
+    return unique.flatMap((mediaId) => { const media = this.media.get(mediaId); if (!media || media.ownerId !== ownerId || media.status === "deleted") return []; const job = [...this.mediaVerificationJobs.values()].find((item) => item.ownerId === ownerId && item.mediaAssetId === mediaId && item.idempotencyKey === `media-verification:${mediaId}`); return [mediaVerificationStateFromJob(job, mediaId)]; });
+  }
+  async retryMediaVerification(ownerId: string, mediaId: string, now: Date): Promise<"queued" | "existing" | "missing" | "not_retryable"> {
+    await tick(); const media = this.media.get(mediaId);
+    if (!media || media.ownerId !== ownerId || media.status === "deleted") return "missing";
+    const job = [...this.mediaVerificationJobs.values()].find((item) => item.ownerId === ownerId && item.mediaAssetId === mediaId);
+    if (!job) return "not_retryable";
+    if (job.status === "queued" || job.status === "running") return "existing";
+    const payload = typeof job.payload === "object" && job.payload !== null && !Array.isArray(job.payload) ? job.payload as Record<string, unknown> : {};
+    if (job.status !== "failed" || payload["retryable"] !== true || job.attempts >= 6) return "not_retryable";
+    job.status = "queued"; job.finishedAt = null; job.lockToken = null; job.lockedBy = null; job.lockExpiresAt = null; job.errorMessage = null;
+    job.payload = { ...payload, stage: "queued", outcome: "processing", errorCode: null, retryable: false, updatedAt: now.toISOString() };
+    return "queued";
+  }
+  async claimNextMediaVerificationJob(claim: MediaVerificationClaim): Promise<MediaVerificationJobRecord | null> {
+    await tick(); if (!claim.workerId || !Number.isFinite(claim.leaseSeconds) || claim.leaseSeconds <= 0) return null;
+    for (const stale of this.mediaVerificationJobs.values()) if (stale.idempotencyKey === `media-verification:${stale.mediaAssetId}` && stale.status === "running" && stale.attempts >= 6 && stale.lockExpiresAt && stale.lockExpiresAt <= claim.now && (!claim.jobId || stale.id === claim.jobId)) {
+      stale.status = "failed"; stale.finishedAt = claim.now; stale.lockedBy = null; stale.lockToken = null; stale.lockExpiresAt = null; stale.errorMessage = "Verification worker stopped before completing."; stale.payload = { stage: "storage_verifying", outcome: "failed", completedStages: [], errorCode: "worker_interrupted", retryable: false, thumbnailStatus: "pending", updatedAt: claim.now.toISOString() };
+    }
+    const candidates = [...this.mediaVerificationJobs.values()].filter((job) => job.idempotencyKey === `media-verification:${job.mediaAssetId}` && job.attempts < 6 && ((job.status === "queued" && (!job.lockExpiresAt || job.lockExpiresAt <= claim.now)) || (job.status === "running" && job.lockExpiresAt !== null && job.lockExpiresAt <= claim.now)) && (!claim.jobId || job.id === claim.jobId)).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
+    const job = candidates[0]; if (!job) return null;
+    const claimed = { ...job, status: "running" as const, lockedBy: claim.workerId, lockToken: randomUUID(), lockExpiresAt: new Date(claim.now.getTime() + claim.leaseSeconds * 1000), attempts: job.attempts + 1 };
+    this.mediaVerificationJobs.set(job.id, claimed); return clone(claimed);
+  }
+  private updateClaimedMediaVerification(input: { id: string; ownerId: string; lockToken: string }, change: Partial<MediaVerificationJobRecord>): boolean {
+    const job = this.mediaVerificationJobs.get(input.id);
+    if (!job || job.ownerId !== input.ownerId || job.status !== "running" || !input.lockToken || job.lockToken !== input.lockToken) return false;
+    this.mediaVerificationJobs.set(job.id, { ...job, ...clone(change) }); return true;
+  }
+  async updateMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; now: Date; leaseSeconds: number; payload: unknown }): Promise<boolean> {
+    await tick(); if (!Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) return false;
+    return this.updateClaimedMediaVerification(input, { payload: clone(input.payload), lockExpiresAt: new Date(input.now.getTime() + input.leaseSeconds * 1000) });
+  }
+  async completeMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; finishedAt: Date; payload: unknown; width: number; height: number; durationMs: number | null }): Promise<boolean> {
+    await tick(); const job = this.mediaVerificationJobs.get(input.id); const media = job ? this.media.get(job.mediaAssetId) : null;
+    if (!job || !media || media.ownerId !== input.ownerId || media.status !== "active" || !this.updateClaimedMediaVerification(input, { status: "succeeded", progressPercent: 100, finishedAt: input.finishedAt, payload: clone(input.payload), errorMessage: null, lockToken: null, lockedBy: null, lockExpiresAt: null })) return false;
+    this.media.set(media.id, { ...media, validation: "verified", width: input.width, height: input.height, durationMs: input.durationMs }); return true;
+  }
+  async failMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; now: Date; payload: unknown; errorMessage: string; retryAt?: Date }): Promise<boolean> {
+    await tick();
+    const result = { status: input.retryAt ? "queued" as const : "failed" as const, progressPercent: 0, finishedAt: input.retryAt ? null : input.now, lockExpiresAt: input.retryAt ?? null, payload: clone(input.payload), errorMessage: input.errorMessage.slice(0, 200), lockToken: null, lockedBy: null };
+    return this.updateClaimedMediaVerification(input, result);
   }
   async getMediaStorageInfo(mediaId: string): Promise<{ storageKey: string; thumbnailKey: string | null; mimeType: string | null } | null> {
     await tick();

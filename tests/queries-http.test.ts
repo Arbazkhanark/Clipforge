@@ -56,7 +56,8 @@ test("view models contain ONLY whitelisted fields (no storage keys, urls, owner 
   const everything = JSON.stringify([await getMediaLibrary(ctx, 1), await getCollectionsOverview(ctx), await getCollectionDetail(ctx, "demo-shared-col-1"), await getDashboardData(ctx)]);
   assert.ok(!/storageKey|ownerId|granteeId|grantedById|https?:|s3/i.test(everything), everything.slice(0, 200));
   const media = (await getMediaLibrary(ctx, 1)).items[0]!;
-  assert.deepEqual(Object.keys(media).sort(), ["durationMs", "hasThumbnail", "height", "id", "kind", "sizeBytes", "status", "title", "validation", "width"]);
+  assert.deepEqual(Object.keys(media).sort(), ["createdAt", "durationMs", "hasThumbnail", "height", "id", "kind", "sizeBytes", "status", "title", "validation", "verification", "width"]);
+  assert.equal(media.verification?.status, "legacy_unverified");
 });
 
 test("dashboard summaries include owner-safe campaign counts, next planned time, and status filtering", async () => {

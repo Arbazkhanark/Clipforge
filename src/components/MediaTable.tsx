@@ -101,6 +101,7 @@ import {
 import { MediaSelection } from "./MediaSelection.tsx";
 import { MediaThumbnail } from "./MediaThumbnail.tsx";
 import { UploadedAt } from "./UploadedAt.tsx";
+import { MediaVerificationStatus } from "./MediaVerificationStatus.tsx";
 
 /**
  * Small preview image.
@@ -410,7 +411,7 @@ export function MediaTable({
                       </td>
 
                       <td className="hide-narrow">
-                        {m.validation === "verified" ? (
+                        {m.verification ? <MediaVerificationStatus mediaId={m.id} initial={m.verification} /> : m.validation === "verified" ? (
                           <div className="media-validation-cell">
                             <span className="media-validation verified">Verified</span>
                             <small>Server media probe passed</small>

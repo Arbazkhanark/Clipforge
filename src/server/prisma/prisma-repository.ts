@@ -32,6 +32,8 @@ import { canCreateAccessRequest, canImportVideo, decideAccessRequest, getCollect
 import { calculateDiscountAmounts, normalizePromotionCode, promotionRedemptionTransitionAllowed, samePromotionDefinition, validDiscountSnapshot, validPromotionEventMetadata, validPromotionRecord } from "../../lib/domain/promotions.ts";
 import type { CreatePromotionRedemptionInput, CreatePromotionalAccessGrantInput, PromotionLifecycleEventInput, PromotionLifecycleEventRecord, PromotionRecord, PromotionRedemptionRecord, PromotionalAccessGrantRecord, RedeemFreeAccessCouponInput, RedeemFreeAccessCouponResult, ReserveDiscountedManualPaymentIntentInput, ReserveDiscountedManualPaymentIntentResult, UpdateDraftPromotionResult, TransitionCouponStatusResult } from "../repository.ts";
 import type { CollectionGrantMutationResult, CollectionShareLinkRecord, CollectionShareLinkSummary, CreateCollectionGrantInput, CreateCollectionShareLinkInput, MediaImportClaim, MediaImportFinalizationInput, MediaImportJobRecord, MediaImportRequestInput, MediaImportVerificationInput, RevokeCollectionGrantInput, UpdateCollectionShareLinkInput } from "../repository.ts";
+import type { MediaVerificationClaim, MediaVerificationJobRecord } from "../repository.ts";
+import { mediaVerificationStateFromJob } from "../media-verification-state.ts";
 
 function accessRequestFromRow(row: Record<string, unknown>): CollectionAccessRequestRecord {
   return { id: String(row["id"]), collectionId: String(row["collectionId"]), requesterId: String(row["requesterId"]), requestedCapabilities: Array.isArray(row["requestedCapabilities"]) ? row["requestedCapabilities"] as CollectionAccessRequestRecord["requestedCapabilities"] : [], status: row["status"] as CollectionAccessRequestRecord["status"], decidedById: row["decidedById"] as string | null ?? null, decidedAt: row["decidedAt"] as Date | null ?? null, createdAt: row["createdAt"] as Date };
@@ -43,6 +45,10 @@ function shareLinkFromRow(row: Record<string, unknown>): CollectionShareLinkReco
 function shareLinkSummary(link: CollectionShareLinkRecord): CollectionShareLinkSummary {
   const { tokenHash: _tokenHash, ...summary } = link;
   return summary;
+}
+
+function mediaVerificationJobFromRow(row: Record<string, unknown>): MediaVerificationJobRecord {
+  return { id: String(row["id"]), ownerId: String(row["ownerId"]), mediaAssetId: String(row["mediaAssetId"]), status: row["status"] as MediaVerificationJobRecord["status"], progressPercent: Number(row["progressPercent"] ?? 0), attempts: Number(row["attempts"] ?? 0), idempotencyKey: String(row["idempotencyKey"]), lockedBy: row["lockedBy"] as string | null ?? null, lockToken: row["lockToken"] as string | null ?? null, lockExpiresAt: row["lockExpiresAt"] as Date | null ?? null, errorMessage: row["errorMessage"] as string | null ?? null, createdAt: row["createdAt"] as Date, finishedAt: row["finishedAt"] as Date | null ?? null, payload: row["payload"] ?? null };
 }
 
 function publishingAttemptFromRow(row: Record<string, unknown>): PublishingAttemptRecord {
@@ -1231,6 +1237,87 @@ export class PrismaRepository implements Repository {
       await tx.mediaAsset.create({ data: mediaToRow(media, keys) });
       return true;
     });
+  }
+  async addMediaWithVerificationJobIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, job: MediaVerificationJobRecord, audit: AuditEntry, limitBytes: number): Promise<boolean> {
+    const idempotencyKey = `media-verification:${media.id}`;
+    if (media.validation !== "incomplete" || job.ownerId !== media.ownerId || job.mediaAssetId !== media.id || job.status !== "queued" || job.idempotencyKey !== idempotencyKey) return false;
+    try {
+      return await this.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${media.ownerId} FOR UPDATE`;
+        const sum = await tx.mediaAsset.aggregate({ where: { ownerId: media.ownerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } });
+        if (Number(sum._sum["sizeBytes"] ?? 0) + media.sizeBytes > limitBytes) return false;
+        if (await tx.processingJob.findUnique({ where: { idempotencyKey } })) return false;
+        await tx.mediaAsset.create({ data: mediaToRow(media, keys) });
+        await tx.processingJob.create({ data: { id: job.id, ownerId: job.ownerId, kind: "media_verification", status: "queued", cycleItemId: null, mediaAssetId: job.mediaAssetId, progressPercent: 0, attempts: 0, idempotencyKey, lockedBy: null, lockExpiresAt: null, errorMessage: null, createdAt: job.createdAt, finishedAt: null, settingsHash: null, payload: job.payload, pendingOutputId: null, outputDerivativeId: null, lockToken: null, ffmpegPid: null, ffmpegStartedAt: null } });
+        await tx.auditLog.create({ data: { actorId: audit.actorId, action: audit.action, entityType: audit.entityType, entityId: audit.entityId, metadata: audit.metadata ?? null } });
+        return true;
+      });
+    } catch (error) { if (isUniqueViolation(error)) return false; throw error; }
+  }
+  async getMediaVerificationForOwner(ownerId: string, mediaId: string) {
+    const media = await this.db.mediaAsset.findFirst({ where: { id: mediaId, ownerId, status: { not: "deleted" } }, select: { id: true } });
+    if (!media) return null;
+    const row = await this.db.processingJob.findUnique({ where: { idempotencyKey: `media-verification:${mediaId}` } });
+    return mediaVerificationStateFromJob(row ? mediaVerificationJobFromRow(row) : undefined, mediaId);
+  }
+  async listMediaVerificationsForOwner(ownerId: string, mediaIds: string[]) {
+    const ids = [...new Set(mediaIds)]; if (ids.length === 0) return [];
+    const [mediaRows, jobRows] = await Promise.all([
+      this.db.mediaAsset.findMany({ where: { id: { in: ids }, ownerId, status: { not: "deleted" } }, select: { id: true } }),
+      this.db.processingJob.findMany({ where: { ownerId, mediaAssetId: { in: ids }, kind: "media_verification" } }),
+    ]);
+    const jobs = new Map(jobRows.map((row) => { const job = mediaVerificationJobFromRow(row); return [job.mediaAssetId, job] as const; }));
+    const owned = new Set(mediaRows.map((row) => String(row["id"])));
+    return ids.filter((id) => owned.has(id)).map((id) => mediaVerificationStateFromJob(jobs.get(id), id));
+  }
+  async retryMediaVerification(ownerId: string, mediaId: string, now: Date): Promise<"queued" | "existing" | "missing" | "not_retryable"> {
+    const media = await this.db.mediaAsset.findFirst({ where: { id: mediaId, ownerId, status: { not: "deleted" } }, select: { id: true } });
+    if (!media) return "missing";
+    const row = await this.db.processingJob.findUnique({ where: { idempotencyKey: `media-verification:${mediaId}` } });
+    if (!row || row["ownerId"] !== ownerId || row["kind"] !== "media_verification") return "not_retryable";
+    const job = mediaVerificationJobFromRow(row);
+    if (job.status === "queued" || job.status === "running") return "existing";
+    const payload = typeof job.payload === "object" && job.payload !== null && !Array.isArray(job.payload) ? job.payload as Record<string, unknown> : {};
+    if (job.status !== "failed" || payload["retryable"] !== true || job.attempts >= 6) return "not_retryable";
+    const result = await this.db.processingJob.updateMany({ where: { id: job.id, ownerId, kind: "media_verification", status: "failed", attempts: job.attempts }, data: { status: "queued", progressPercent: 0, lockedBy: null, lockToken: null, lockExpiresAt: null, finishedAt: null, errorMessage: null, payload: { ...payload, stage: "queued", outcome: "processing", errorCode: null, retryable: false, updatedAt: now.toISOString() } } });
+    return result.count === 1 ? "queued" : "existing";
+  }
+  async claimNextMediaVerificationJob(claim: MediaVerificationClaim): Promise<MediaVerificationJobRecord | null> {
+    if (!claim.workerId || !Number.isFinite(claim.leaseSeconds) || claim.leaseSeconds <= 0) return null;
+    return this.db.$transaction(async (tx) => {
+      const exhausted = await tx.processingJob.findMany({ where: { kind: "media_verification", status: "running", attempts: { gte: 6 }, lockExpiresAt: { lte: claim.now }, ...(claim.jobId ? { id: claim.jobId } : {}) }, take: 50 });
+      for (const row of exhausted) await tx.processingJob.updateMany({ where: { id: row["id"], status: "running", lockToken: row["lockToken"], lockExpiresAt: { lte: claim.now } }, data: { status: "failed", finishedAt: claim.now, lockedBy: null, lockToken: null, lockExpiresAt: null, errorMessage: "Verification worker stopped before completing." , payload: { stage: "storage_verifying", outcome: "failed", errorCode: "worker_interrupted", retryable: false, updatedAt: claim.now.toISOString(), completedStages: [] } } });
+      const candidates = await tx.processingJob.findMany({ where: { kind: "media_verification", attempts: { lt: 6 }, OR: [{ status: "queued", OR: [{ lockExpiresAt: null }, { lockExpiresAt: { lte: claim.now } }] }, { status: "running", lockExpiresAt: { lte: claim.now } }], ...(claim.jobId ? { id: claim.jobId } : {}) }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 50 });
+      for (const row of candidates) {
+        const old = mediaVerificationJobFromRow(row); const lockToken = randomUUID();
+        const updated = await tx.processingJob.updateMany({ where: { id: old.id, ownerId: old.ownerId, kind: "media_verification", status: old.status, lockToken: old.lockToken, ...(old.status === "running" ? { lockExpiresAt: { lte: claim.now } } : {}), attempts: old.attempts }, data: { status: "running", lockedBy: claim.workerId, lockToken, lockExpiresAt: new Date(claim.now.getTime() + claim.leaseSeconds * 1000), attempts: { increment: 1 } } });
+        if (updated.count !== 1) continue;
+        const claimed = await tx.processingJob.findFirst({ where: { id: old.id, ownerId: old.ownerId, status: "running", lockToken } });
+        if (claimed) return mediaVerificationJobFromRow(claimed);
+      }
+      return null;
+    });
+  }
+  async updateMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; now: Date; leaseSeconds: number; payload: unknown }): Promise<boolean> {
+    if (!Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) return false;
+    const result = await this.db.processingJob.updateMany({ where: { id: input.id, ownerId: input.ownerId, kind: "media_verification", status: "running", lockToken: input.lockToken }, data: { payload: input.payload, lockExpiresAt: new Date(input.now.getTime() + input.leaseSeconds * 1000) } });
+    return result.count === 1;
+  }
+  async completeMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; finishedAt: Date; payload: unknown; width: number; height: number; durationMs: number | null }): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      const job = await tx.processingJob.findFirst({ where: { id: input.id, ownerId: input.ownerId, kind: "media_verification", status: "running", lockToken: input.lockToken } });
+      if (!job) return false;
+      const media = await tx.mediaAsset.findFirst({ where: { id: job["mediaAssetId"], ownerId: input.ownerId, status: "active" }, select: { id: true } });
+      if (!media) return false;
+      const updated = await tx.processingJob.updateMany({ where: { id: input.id, ownerId: input.ownerId, kind: "media_verification", status: "running", lockToken: input.lockToken }, data: { status: "succeeded", progressPercent: 100, finishedAt: input.finishedAt, payload: input.payload, errorMessage: null, lockToken: null, lockedBy: null, lockExpiresAt: null } });
+      if (updated.count !== 1) return false;
+      await tx.mediaAsset.update({ where: { id: job["mediaAssetId"] }, data: { metadataValidated: true, width: input.width, height: input.height, durationMs: input.durationMs } });
+      return true;
+    });
+  }
+  async failMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; now: Date; payload: unknown; errorMessage: string; retryAt?: Date }): Promise<boolean> {
+    const result = await this.db.processingJob.updateMany({ where: { id: input.id, ownerId: input.ownerId, kind: "media_verification", status: "running", lockToken: input.lockToken }, data: { status: input.retryAt ? "queued" : "failed", progressPercent: 0, finishedAt: input.retryAt ? null : input.now, lockExpiresAt: input.retryAt ?? null, payload: input.payload, errorMessage: input.errorMessage.slice(0, 200), lockToken: null, lockedBy: null } });
+    return result.count === 1;
   }
   async getMediaStorageInfo(mediaId: string): Promise<{ storageKey: string; thumbnailKey: string | null; mimeType: string | null } | null> {
     const row = await this.db.mediaAsset.findUnique({ where: { id: mediaId } });

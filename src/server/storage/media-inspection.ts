@@ -58,7 +58,7 @@ export function sanitizeFilename(raw: string): string {
 // ---------- ffprobe ----------
 export interface MediaProbeResult { width: number; height: number; durationSeconds: number; }
 /** Reads a file with ffprobe. Throws if the file cannot be decoded as media. */
-export type MediaProbe = (filePath: string) => Promise<MediaProbeResult>;
+export type MediaProbe = (filePath: string, timeoutMs?: number) => Promise<MediaProbeResult>;
 
 let ffprobeAvailable: Promise<boolean> | null = null;
 
@@ -75,8 +75,8 @@ export function isFfprobeAvailable(): Promise<boolean> {
 /** The real probe (or null when ffprobe is not installed: callers must then say validation is incomplete). */
 export async function detectProbe(): Promise<MediaProbe | null> {
   if (!(await isFfprobeAvailable())) return null;
-  return async (filePath) => {
-    const result = await probeVideo(filePath);
+  return async (filePath, timeoutMs) => {
+    const result = await probeVideo(filePath, timeoutMs);
     return { width: result.width, height: result.height, durationSeconds: Number.isFinite(result.durationSeconds) ? result.durationSeconds : 0 };
   };
 }

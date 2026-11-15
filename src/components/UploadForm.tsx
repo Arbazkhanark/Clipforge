@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent } from "react";
 import type { UploadInfo } from "../server/queries.ts";
+import type { MediaVerificationState } from "../server/repository.ts";
+import { MediaVerificationStatus } from "./MediaVerificationStatus.tsx";
 import { retryableUploads, runBoundedUploads, UploadRunGuard } from "./upload-queue.ts";
 
 const ACCEPT = ".mp4,.mov,.webm,.jpg,.jpeg,.png,.webp,video/mp4,video/quicktime,video/webm,image/jpeg,image/png,image/webp";
@@ -10,7 +12,7 @@ const UPLOAD_CONCURRENCY = 2;
 
 type UploadState = "queued" | "uploading" | "failed";
 type QueueItem = { id: string; file: File; status: UploadState; progress: number; error?: string; uncertain?: boolean };
-type UploadedItem = { id: string; name: string; mediaId: string; storage: string; destinationConfirmed: boolean };
+type UploadedItem = { id: string; name: string; mediaId: string; storage: string; destinationConfirmed: boolean; verification: MediaVerificationState };
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -47,8 +49,8 @@ function uploadOne(file: File, onProgress: (percent: number) => void): Promise<{
         return;
       }
       try {
-        const body = JSON.parse(xhr.responseText) as { mediaId?: unknown; storage?: unknown };
-        if (typeof body.mediaId !== "string" || typeof body.storage !== "string") throw new Error("invalid upload response");
+        const body = JSON.parse(xhr.responseText) as { mediaId?: unknown; storage?: unknown; verificationStatus?: unknown };
+        if (typeof body.mediaId !== "string" || typeof body.storage !== "string" || body.verificationStatus !== "processing") throw new Error("invalid upload response");
         resolve({ mediaId: body.mediaId, storage: body.storage });
       } catch {
         reject(Object.assign(new Error("The server may have saved this file, but its result could not be confirmed. Check your library before retrying."), { uncertain: true }));
@@ -124,7 +126,7 @@ export function UploadForm({ info }: { info: UploadInfo }) {
       try {
         const result = await uploadOne(item.file, (progress) => setQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, progress } : candidate)));
         const destinationConfirmed = result.storage === info.storageKind && info.destination !== null;
-        setUploaded((current) => [...current, { id: item.id, name: item.file.name, mediaId: result.mediaId, storage: result.storage, destinationConfirmed }]);
+        setUploaded((current) => [...current, { id: item.id, name: item.file.name, mediaId: result.mediaId, storage: result.storage, destinationConfirmed, verification: { mediaId: result.mediaId, status: "processing", stage: "queued", completedStages: [], errorCode: null, errorMessage: null, attempts: 0, retryable: false, updatedAt: null, thumbnailStatus: "pending" } }]);
         setQueue((current) => current.filter((candidate) => candidate.id !== item.id));
         succeeded += 1;
       } catch (error) {
@@ -206,7 +208,7 @@ export function UploadForm({ info }: { info: UploadInfo }) {
         <p className="media-upload-live-status" aria-live="polite">{selectionMessage}</p>
         {(successfulCount > 0 || failedCount > 0) && <section className="media-upload-results" aria-label="Upload results">
           <div className="media-upload-results-heading"><h4>Upload summary</h4><span>{successfulCount} successful · {failedCount} failed</span></div>
-          {uploaded.map((item) => <p key={item.id}><strong>{item.name}</strong><span>{item.destinationConfirmed ? `Saved to ${destinationDescription(info)}` : `Upload saved; destination could not be confirmed. Storage type: ${item.storage}.`}</span></p>)}
+          {uploaded.map((item) => <div className="media-upload-result-item" key={item.id}><p><strong>{item.name}</strong><span>{item.destinationConfirmed ? `Saved to ${destinationDescription(info)}` : `Upload saved; destination could not be confirmed. Storage type: ${item.storage}.`}</span></p><MediaVerificationStatus mediaId={item.mediaId} initial={item.verification} /></div>)}
           <button type="button" className="media-upload-secondary" onClick={() => window.location.reload()}>Refresh media library</button>
         </section>}
       </> : <p className="media-upload-unavailable" role="status">Uploads are unavailable: {info.storage.warning}</p>}

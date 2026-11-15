@@ -104,7 +104,7 @@ test("a failed database write removes the file that was just saved", async () =>
   const dir = tempDir();
   const storage = await LocalDiskMediaStorage.create(dir);
   const repo = new MemoryRepository();
-  repo.addMediaIfStorageWithin = async () => { throw new AppError(503, "database_unavailable", "The database could not complete that request. Nothing was saved in memory."); };
+  repo.addMediaWithVerificationJobIfStorageWithin = async () => { throw new AppError(503, "database_unavailable", "The database could not complete that request. Nothing was saved in memory."); };
   const error = await errorOf(uploadMedia(context(repo, storage, "ann"), { filename: "a.png", declaredMimeType: "image/png", data: PNG }));
   assert.equal(error.code, "database_unavailable");
   assert.equal(repo.media.size, 0);

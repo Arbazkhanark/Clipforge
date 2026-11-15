@@ -6,6 +6,7 @@
 //   - if the record cannot be created after commit, only the file this upload just wrote is removed,
 //   - existing media is never touched.
 import { getPlan } from "../../lib/billing/catalog.ts";
+import { createHash, randomUUID } from "node:crypto";
 import type { MediaAsset } from "../../lib/domain/types.ts";
 import { requireUser, type RequestContext } from "../context.ts";
 import { AppError, fileTooLarge, invalidMedia, planLimit, unsupportedMediaType, validationFailed } from "../errors.ts";
@@ -21,6 +22,7 @@ export interface UploadResult {
   sizeBytes: number;
   durationMs: number | null;
   validation: "verified" | "incomplete";
+  verificationStatus: "processing";
   /** Set when validation is incomplete, in words the user can read. */
   warning: string | null;
   storage: "memory" | "local-disk" | "s3";
@@ -61,6 +63,7 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
 
   // 5. Stage, inspect, commit. Keys come from ids only - never from the file name.
   const mediaId = ctx.newId();
+  const checksumSha256 = createHash("sha256").update(data).digest("hex");
   const stagingKey = stagingKeyFor(mediaId);
   const finalKey = mediaKeyFor(userId, mediaId);
   const thumbStagingKey = stagingKeyFor(`${mediaId}-thumb`);
@@ -69,7 +72,7 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
   let thumbCommitted = false;
   let metadata: { width: number | null; height: number | null; durationMs: number | null; validation: "verified" | "incomplete" };
   try {
-    await storage.stage(stagingKey, data);
+    await storage.stage(stagingKey, data, { contentType: CANONICAL_MIME[sniffed.type] });
 
     if (probe === null) {
       // ffprobe is not installed: we must NOT pretend the media was checked.
@@ -87,7 +90,7 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
     let hasThumbnail = false;
     if (makeThumbnail) {
       const jpeg = await storage.runWithStagedFile(stagingKey, (file) => makeThumbnail(file, metadata.durationMs === null ? null : metadata.durationMs / 1000)).catch(() => null);
-      if (jpeg && jpeg.length > 0) { await storage.stage(thumbStagingKey, jpeg); hasThumbnail = true; }
+      if (jpeg && jpeg.length > 0) { await storage.stage(thumbStagingKey, jpeg, { contentType: "image/jpeg" }); hasThumbnail = true; }
     }
 
     await storage.commit(stagingKey, finalKey);
@@ -98,15 +101,23 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
     const title = sanitizeFilename(input.filename as string);
     const media: MediaAsset = {
       id: mediaId, ownerId: userId, status: "active", sizeBytes: data.length, deleteAfter: null, title, kind: sniffed.kind,
-      durationMs: metadata.durationMs, createdAt: ctx.now, width: metadata.width, height: metadata.height, validation: metadata.validation,
-      mimeType: CANONICAL_MIME[sniffed.type], hasThumbnail,
+      durationMs: metadata.durationMs, createdAt: ctx.now, width: metadata.width, height: metadata.height, validation: "incomplete",
+      mimeType: CANONICAL_MIME[sniffed.type], hasThumbnail, checksumSha256,
     };
-    if (!(await ctx.repo.addMediaIfStorageWithin(media, { storageKey: finalKey, thumbnailKey: hasThumbnail ? thumbFinalKey : null }, limitBytes))) throw planLimit(quotaMessage);
-
-    await ctx.repo.appendAudit({ actorId: userId, action: "media.uploaded", entityType: "MediaAsset", entityId: mediaId, metadata: { sizeBytes: data.length, kind: sniffed.kind, validation: metadata.validation } });
+    const jobId = ctx.newId();
+    const job = {
+      id: jobId, ownerId: userId, mediaAssetId: mediaId, status: "queued" as const, progressPercent: 0, attempts: 0,
+      idempotencyKey: `media-verification:${mediaId}`, lockedBy: null, lockToken: null, lockExpiresAt: null, errorMessage: null,
+      createdAt: ctx.now, finishedAt: null, payload: {
+        stage: "queued", outcome: "processing", completedStages: ["uploaded_to_storage", ...(metadata.validation === "verified" ? ["media_verified"] : [])],
+        errorCode: null, retryable: false, updatedAt: ctx.now.toISOString(), thumbnailStatus: hasThumbnail ? "pending" : "skipped",
+      },
+    };
+    const audit = { actorId: userId, action: "media.uploaded", entityType: "MediaAsset", entityId: mediaId, metadata: { sizeBytes: data.length, kind: sniffed.kind, validation: "processing" } };
+    if (!(await ctx.repo.addMediaWithVerificationJobIfStorageWithin(media, { storageKey: finalKey, thumbnailKey: hasThumbnail ? thumbFinalKey : null }, job, audit, limitBytes))) throw planLimit(quotaMessage);
     return {
-      mediaId, title, kind: sniffed.kind, sizeBytes: data.length, durationMs: metadata.durationMs, validation: metadata.validation, storage: storage.kind, hasThumbnail,
-      warning: metadata.validation === "incomplete" ? "The file was accepted by its file signature only. Its length and size could not be checked because ffprobe is not installed on this server." : null,
+      mediaId, title, kind: sniffed.kind, sizeBytes: data.length, durationMs: metadata.durationMs, validation: "incomplete", verificationStatus: "processing", storage: storage.kind, hasThumbnail,
+      warning: "Upload saved. Private storage and media verification are still in progress.",
     };
   } catch (error) {
     // Cleanup of THIS upload only. Best effort: a cleanup problem must never hide the real error.

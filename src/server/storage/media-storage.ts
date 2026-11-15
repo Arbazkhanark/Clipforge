@@ -7,12 +7,13 @@
 //    that was written a moment earlier and never got a database record (see `deleteUnreferencedUpload`).
 
 export type StorageKind = "memory" | "local-disk" | "s3";
-export interface PrivateStorageMetadata { sizeBytes: number; storageKind: StorageKind; }
+export interface PrivateStorageMetadata { sizeBytes: number; storageKind: StorageKind; contentType?: string | null; }
+export interface StageMetadata { contentType?: string; }
 
 export interface MediaStorage {
   readonly kind: StorageKind;
   /** Write bytes to a temporary "staging" key. Fails if the key already exists. */
-  stage(stagingKey: string, data: Uint8Array): Promise<void>;
+  stage(stagingKey: string, data: Uint8Array, metadata?: StageMetadata): Promise<void>;
   /**
    * Run `work` with a real file path for the staged bytes (needed by ffprobe).
    * The path is for trusted server code only: never return it to a user or put it in a log or error.

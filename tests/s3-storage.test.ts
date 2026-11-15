@@ -8,12 +8,13 @@ import { S3MediaStorage } from "../src/server/storage/s3-storage.ts";
 type CommandLike = { input: Record<string, unknown>; constructor: { name: string } };
 class FakeS3 {
   objects = new Map<string, Uint8Array>();
+  contentTypes = new Map<string, string>();
   commands: CommandLike[] = [];
   failNext: { status: number; name: string } | null = null;
   async send(command: unknown): Promise<Record<string, unknown>> {
     const current = command as CommandLike; this.commands.push(current);
     if (this.failNext) { const failure = this.failNext; this.failNext = null; throw Object.assign(new Error("synthetic"), { name: failure.name, $metadata: { httpStatusCode: failure.status } }); }
-    const { Bucket, Key, CopySource, IfNoneMatch, Range } = current.input;
+    const { Bucket, Key, CopySource, IfNoneMatch, Range, ContentType } = current.input;
     const objectKey = `${String(Bucket)}/${String(Key)}`;
     if (current.constructor.name === "PutObjectCommand") {
       if (IfNoneMatch === "*" && this.objects.has(objectKey)) throw Object.assign(new Error("exists"), { name: "PreconditionFailed", $metadata: { httpStatusCode: 412 } });
@@ -23,19 +24,25 @@ class FakeS3 {
         const chunks: Uint8Array[] = []; for await (const chunk of body as AsyncIterable<Uint8Array>) chunks.push(chunk);
         this.objects.set(objectKey, Buffer.concat(chunks));
       }
+      if (typeof ContentType === "string") this.contentTypes.set(objectKey, ContentType);
       return {};
     }
     if (current.constructor.name === "CopyObjectCommand") {
       if (IfNoneMatch === "*" && this.objects.has(objectKey)) throw Object.assign(new Error("exists"), { name: "PreconditionFailed", $metadata: { httpStatusCode: 412 } });
-      const source = this.objects.get(String(CopySource));
+      const copySourceKey = decodeURIComponent(String(CopySource).slice(String(Bucket).length + 1));
+      const sourceObjectKey = `${String(Bucket)}/${copySourceKey}`;
+      const source = this.objects.get(sourceObjectKey);
       if (!source) throw Object.assign(new Error("missing"), { name: "NotFound", $metadata: { httpStatusCode: 404 } });
-      this.objects.set(objectKey, source.slice()); return {};
+      this.objects.set(objectKey, source.slice());
+      const sourceType = this.contentTypes.get(sourceObjectKey);
+      if (sourceType) this.contentTypes.set(objectKey, sourceType);
+      return {};
     }
-    if (current.constructor.name === "DeleteObjectCommand") { this.objects.delete(objectKey); return {}; }
+    if (current.constructor.name === "DeleteObjectCommand") { this.objects.delete(objectKey); this.contentTypes.delete(objectKey); return {}; }
     if (current.constructor.name === "HeadObjectCommand") {
       const bytes = this.objects.get(objectKey);
       if (!bytes) throw Object.assign(new Error("missing"), { name: "NotFound", $metadata: { httpStatusCode: 404 } });
-      return { ContentLength: bytes.length };
+      return { ContentLength: bytes.length, ContentType: this.contentTypes.get(objectKey) };
     }
     if (current.constructor.name === "GetObjectCommand") {
       const bytes = this.objects.get(objectKey);
@@ -58,11 +65,19 @@ test("S3 adapter stages, commits conditionally, reports metadata and supports ra
   assert.equal(await storage.exists("media/owner1/media1"), false);
   await storage.commit("staging/upload1", "media/owner1/media1");
   assert.equal(await storage.exists("media/owner1/media1"), true);
-  assert.deepEqual(await storage.getPrivateMetadata("media/owner1/media1"), { sizeBytes: 4, storageKind: "s3" });
+  assert.deepEqual(await storage.getPrivateMetadata("media/owner1/media1"), { sizeBytes: 4, storageKind: "s3", contentType: null });
   const ranged = await storage.openRead("media/owner1/media1", { start: 1, end: 2 });
   assert.deepEqual([...new Uint8Array(await new Response(ranged).arrayBuffer())], [2, 3]);
   assert.equal(client.commands.some((command) => command.constructor.name === "GetObjectCommand" && command.input["Range"] === "bytes=1-2"), true);
   assert.equal(client.objects.has("clipforge-test-media/staging/upload1"), false);
+});
+
+test("S3 preserves the validated content type from staged upload through committed metadata", async () => {
+  const { client, storage } = makeStorage();
+  await storage.stage("staging/typed", new Uint8Array([1, 2, 3]), { contentType: "video/mp4" });
+  assert.equal(client.commands.find((command) => command.constructor.name === "PutObjectCommand")?.input["ContentType"], "video/mp4");
+  await storage.commit("staging/typed", "media/owner1/typed");
+  assert.equal((await storage.getPrivateMetadata("media/owner1/typed"))?.contentType, "video/mp4");
 });
 
 test("S3 adapter rejects overwrite and invalid storage keys", async () => {
