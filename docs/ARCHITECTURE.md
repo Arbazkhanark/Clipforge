@@ -90,7 +90,7 @@ Keys come only from validated ids; the user's file name becomes a sanitised disp
 this upload's staged/just-committed file; **existing media is never touched** and nothing is deleted automatically.
 
 In database mode, runtime storage is selected by the explicit server-side `CLIPFORGE_STORAGE_PROVIDER` configuration. Normal
-development and production select private S3 with distinct `CLIPFORGE_STORAGE_ENV`, bucket and IAM credentials. A local-disk
+development/preview and production select private S3 with distinct environment-specific bucket variables and IAM credentials. The runtime derives the environment from the hosting/runtime mode and fails closed if its matching bucket variable is absent. A local-disk
 adapter is available only when explicitly selected for non-production development/testing; missing S3 configuration fails closed.
 The S3 adapter preserves these same key namespaces and `MediaStorage` methods. It does not issue object URLs. FFmpeg continues to
 use private temporary local files while reading/writing through the storage abstraction.
