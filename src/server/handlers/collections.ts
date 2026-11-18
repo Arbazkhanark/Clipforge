@@ -2,7 +2,7 @@
 // Someone else's collection looks missing. Media that the user does not own is refused.
 import { COLLECTION_VISIBILITIES, type CollectionVisibility, type VideoCollection } from "../../lib/domain/types.ts";
 import { requireUser, type RequestContext } from "../context.ts";
-import { AppError, conflict, notFound } from "../errors.ts";
+import { AppError, conflict, forbidden, notFound } from "../errors.ts";
 import { Problems, readBoolean, readId, readIdList, readObject, readText } from "../validation.ts";
 import type { CollectionItemSettings } from "../../lib/domain/types.ts";
 
@@ -92,6 +92,17 @@ export async function createCollection(ctx: RequestContext, rawInput: unknown): 
   await ctx.repo.appendAudit({ actorId: userId, action: "collection.created", entityType: "VideoCollection", entityId: collectionId });
   if (captionMode === "shared" || coverMode === "shared") await ctx.repo.appendAudit({ actorId: userId, action: "collection.shared_settings_applied", entityType: "VideoCollection", entityId: collectionId, metadata: { affected: mediaIds.length, captionMode, coverMode } });
   return { collectionId };
+}
+
+/** Adds one of the caller's own active media items without replacing other collection members. */
+export async function addOwnedMediaToCollection(ctx: RequestContext, rawInput: unknown): Promise<{ collectionId: string; mediaAssetId: string; status: "added" | "existing" }> {
+  const userId = requireUser(ctx); const problems = new Problems(); const input = readObject(rawInput, problems);
+  if (Object.keys(input).some((key) => key !== "collectionId" && key !== "mediaAssetId")) problems.add("The request contains unsupported fields.");
+  const collectionId = readId(input, "collectionId", problems); const mediaAssetId = readId(input, "mediaAssetId", problems); problems.throwIfAny();
+  const result = await ctx.repo.addOwnedMediaToCollection({ collectionId, mediaAssetId, ownerId: userId, actorId: userId, now: ctx.now });
+  if (result === "not_found") throw notFound("Collection");
+  if (result === "not_owned") throw notFound("File");
+  return { collectionId, mediaAssetId, status: result };
 }
 
 export async function updateCollectionItemSettings(ctx: RequestContext, rawInput: unknown): Promise<{ collectionId: string }> {
@@ -199,4 +210,20 @@ export async function replaceCollectionMedia(ctx: RequestContext, rawInput: unkn
   if (!saved) throw notFound("Collection");
   await ctx.repo.appendAudit({ actorId: userId, action: "collection.media_replaced", entityType: "VideoCollection", entityId: collectionId, metadata: { count: mediaIds.length } });
   return { collectionId };
+}
+
+/** Removes one membership only. The repository rechecks manage permission and writes its audit atomically. */
+export async function removeCollectionItem(ctx: RequestContext, rawInput: unknown): Promise<{ collectionId: string; mediaAssetId: string; status: "removed" | "already_absent" }> {
+  const actorId = requireUser(ctx);
+  const problems = new Problems();
+  const input = readObject(rawInput, problems);
+  const collectionId = readId(input, "collectionId", problems);
+  const mediaAssetId = readId(input, "mediaAssetId", problems);
+  problems.throwIfAny();
+
+  const result = await ctx.repo.removeCollectionItem({ collectionId, mediaAssetId, actorId, now: ctx.now });
+  if (result === "not_found") throw notFound("Collection");
+  if (result === "forbidden") throw forbidden("You need collection management permission to remove a video.");
+  if (result === "conflict") throw conflict("This video has an active import from the collection. Wait for it to finish before removing it.");
+  return { collectionId, mediaAssetId, status: result };
 }

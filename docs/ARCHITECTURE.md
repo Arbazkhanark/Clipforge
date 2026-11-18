@@ -42,6 +42,23 @@ A collection has an owner and a visibility (private / link / public_view). Other
 capabilities (`view`, `use_in_cycle`, `import_copy`, `download`, `manage`). Public view only ever gives `view`.
 Permission is **re-checked** when adding to a cycle, before rendering, before publishing, and before import completes.
 
+### Removing a video from a collection
+`Remove from collection` deletes only the selected `CollectionItem` membership (the schema prevents duplicate media entries
+inside one collection). The server rechecks the owner's or delegated `manage` capability while holding the collection lock,
+records `collection.item_removed` atomically, and refuses while an import from that collection/item is active. It never calls
+the media deletion lifecycle or storage adapter. The owner's `MediaAsset`, original object, thumbnails/derivatives, memberships
+in other collections, and sharing grants remain intact. Permanent media deletion is a separate owner-only lifecycle with its
+existing dependency checks and grace period.
+
+### Permanent delete from the Media Library
+The owner-only `POST /api/media/delete` action first confirms the current collection names and IDs. A transaction removes this
+media's `CollectionItem` links, tombstones the `MediaAsset`, queues one idempotent `cleanup` ProcessingJob, and writes an audit
+event. The separate `worker:media-cleanup` process rechecks cycle, import, render and cover references before removing the
+private original and thumbnail through `MediaStorage`; it never accepts a storage key from the browser. The library reports
+cleanup as pending until that worker completes. Cycle history and referenced render derivatives remain retained; the media
+database row also remains as a tombstone because historical foreign keys use `Restrict`. The existing grace-period removal
+workflow remains separate.
+
 ### Using a shared video without copying it
 A `CycleItem` points at the owner's `MediaAsset` (`sourceKind = shared_reference`). No second S3 object exists.
 Recipient edit settings live on the `CycleItem`; the source is never modified. Revoked permission => item goes to `needs_review`.

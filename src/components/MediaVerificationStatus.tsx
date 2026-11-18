@@ -34,10 +34,14 @@ export function MediaVerificationStatus({ mediaId, initial }: { mediaId: string;
   const [state, setState] = useState<MediaVerificationState | undefined>(initial);
   const [checking, setChecking] = useState(false);
   const [requestError, setRequestError] = useState(false);
+  const [polling, setPolling] = useState(!initial || initial.status === "processing");
+  const [pollVersion, setPollVersion] = useState(0);
 
   useEffect(() => {
     let stopped = false;
     let busy = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let checks = 0;
     const refresh = async () => {
       if (busy || stopped) return;
       busy = true;
@@ -46,14 +50,29 @@ export function MediaVerificationStatus({ mediaId, initial }: { mediaId: string;
         if (!response.ok) throw new Error("status");
         const body = await response.json() as { items?: unknown };
         const next = Array.isArray(body.items) ? body.items.find((item) => validState(item) && item.mediaId === mediaId) : undefined;
-        if (!stopped && validState(next)) { setState(next); setRequestError(false); }
+        if (!stopped && validState(next)) {
+          setState(next);
+          setRequestError(false);
+          if (next.status !== "processing") { setPolling(false); return; }
+        }
       } catch { if (!stopped) setRequestError(true); }
       finally { busy = false; }
+      if (stopped) return;
+      checks += 1;
+      // A missing worker must not make every media row poll the API forever.
+      // Give the worker time to claim the durable job, then let the user resume checks.
+      if (checks >= 8) { setPolling(false); return; }
+      timer = setTimeout(() => void refresh(), Math.min(3_000 * (2 ** (checks - 1)), 30_000));
     };
-    if (!state || state.status === "processing") void refresh();
-    const timer = !state || state.status === "processing" ? setInterval(() => void refresh(), 3_000) : null;
-    return () => { stopped = true; if (timer) clearInterval(timer); };
-  }, [mediaId, state?.status]);
+    if (polling && (!state || state.status === "processing")) void refresh();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [mediaId, polling, pollVersion, state?.status]);
+
+  function checkStatusAgain() {
+    setRequestError(false);
+    setPolling(true);
+    setPollVersion((version) => version + 1);
+  }
 
   async function retry() {
     setChecking(true); setRequestError(false);
@@ -70,7 +89,18 @@ export function MediaVerificationStatus({ mediaId, initial }: { mediaId: string;
     return <div className="media-validation-cell" role="status"><span className="media-validation incomplete">{copy.label}</span><small>{copy.description}</small></div>;
   }
   if (state.status === "verified") return <div className="media-validation-cell"><span className="media-validation verified">Verified</span><small>Private object, size, checksum and media decode passed. Preview: {state.thumbnailStatus}.</small></div>;
-  if (state.status === "processing") return <div className="media-validation-cell" aria-live="polite"><span className="media-validation incomplete">Processing</span><small><span className="media-verification-indicator" aria-hidden="true" />{stages[state.stage]}</small>{state.errorMessage && <small>{state.errorMessage}</small>}{requestError && <small role="status">Status temporarily unavailable; checking again.</small>}</div>;
+  if (state.status === "processing") {
+    const waitingForWorker = state.stage === "queued" && state.attempts === 0;
+    const isLocal = typeof window !== "undefined" && ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+    return <div className="media-validation-cell" aria-live="polite">
+      <span className="media-validation incomplete">Processing</span>
+      <small><span className="media-verification-indicator" aria-hidden="true" />{stages[state.stage]}</small>
+      {waitingForWorker && <small>This job has not been claimed yet. {isLocal ? "Start the media verification worker in another terminal using npm run worker:media-verification, with the same database and storage configuration as this app." : "The media verification worker must be running against this app’s database and private storage."}</small>}
+      {state.errorMessage && <small>{state.errorMessage}</small>}
+      {requestError && <small role="status">Status temporarily unavailable.</small>}
+      {polling ? <small>Checking status automatically with backoff.</small> : <button type="button" className="media-upload-secondary" onClick={checkStatusAgain}>Check status again</button>}
+    </div>;
+  }
   if (state.status === "legacy_unverified") return <div className="media-validation-cell"><span className="media-validation incomplete">Not rechecked</span><small>{state.errorMessage}</small></div>;
   return <div className="media-validation-cell"><span className="media-validation incomplete">{state.status === "failed" ? "Failed" : "Incomplete"}</span><small>{state.errorMessage ?? "A required verification did not complete."}</small>{requestError && <small role="status">The retry request could not be confirmed.</small>}{state.retryable && <button type="button" className="media-upload-secondary" onClick={() => void retry()} disabled={checking}>{checking ? "Queueing…" : "Retry verification"}</button>}</div>;
 }

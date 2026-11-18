@@ -114,3 +114,13 @@ test("missing objects are distinguished from storage errors and upload cleanup i
   client.failNext = { status: 500, name: "InternalError" };
   await assert.rejects(storage.exists("media/owner1/missing"), /could not check/);
 });
+
+test("committed media deletion is a separate, key-validated private storage operation", async () => {
+  const { client, storage } = makeStorage();
+  await storage.stage("staging/delete-test", new Uint8Array([1, 2]));
+  await storage.commit("staging/delete-test", "media/owner1/delete-test");
+  await storage.deleteCommittedMediaObject("media/owner1/delete-test");
+  assert.equal(client.objects.has("clipforge-test-media/media/owner1/delete-test"), false);
+  assert.equal(client.commands.filter((command) => command.constructor.name === "DeleteObjectCommand").length, 2);
+  await assert.rejects(storage.deleteCommittedMediaObject("../outside"));
+});

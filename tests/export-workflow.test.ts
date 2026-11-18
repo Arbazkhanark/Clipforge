@@ -13,7 +13,7 @@ import { toRenderSettings, type EditingSettings } from "../src/lib/domain/editin
 import { hashExportSettings } from "../src/lib/render/render-limits.ts";
 import { probeVideo, readPixel } from "../src/lib/render/render-runner.ts";
 import { AppError } from "../src/server/errors.ts";
-import { serveRender } from "../src/server/handlers/render-serve.ts";
+import { serveRender, serveRenderPreview } from "../src/server/handlers/render-serve.ts";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { createPrismaClient } from "../src/server/prisma/create-client.ts";
 import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
@@ -215,6 +215,25 @@ test("the standalone worker reconstructs a persisted queued job and stores its f
   assert.equal(recovered?.status, "failed");
   assert.equal(recovered?.attempts, 1);
   assert.match(recovered?.errorMessage ?? "", /rendering failed/i);
+});
+
+test("completed render preview is private, inline, and supports bounded byte ranges", async () => {
+  const { repo, storage } = library();
+  const ctx = context(repo, storage, "bob");
+  const bytes = new Uint8Array([0, 1, 2, 3, 4, 5]);
+  storage.objects.set("private/rendered-preview", bytes);
+  await repo.saveRenderOutput({ id: "preview-output", sourceMediaId: "v1", ownerId: "bob", storageKey: "private/rendered-preview", sizeBytes: bytes.length, settingsHash: "settings-hash", createdAt: NOW }, 10_000);
+
+  const preview = await serveRenderPreview(ctx, { exportId: "preview-output", rangeHeader: null });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.headers["Content-Type"], "video/mp4");
+  assert.equal(preview.headers["Content-Disposition"], 'inline; filename="export.mp4"; filename*=UTF-8\'\'export.mp4');
+  assert.equal(preview.headers["Cache-Control"], "private, no-store");
+  const partial = await serveRenderPreview(ctx, { exportId: "preview-output", rangeHeader: "bytes=2-4" });
+  assert.equal(partial.status, 206);
+  assert.equal(partial.headers["Content-Range"], "bytes 2-4/6");
+  assert.deepEqual([...new Uint8Array(await new Response(partial.body).arrayBuffer())], [2, 3, 4]);
+  await assert.rejects(() => serveRenderPreview({ ...ctx, userId: "eve" }, { exportId: "preview-output", rangeHeader: null }), (error: unknown) => error instanceof AppError && error.status === 404);
 });
 
 test("REAL FFMPEG: a short export is playable, keeps the original, and can be downloaded by its owner", { skip: !ffmpegAvailable && "ffmpeg/ffprobe not installed" }, async () => {

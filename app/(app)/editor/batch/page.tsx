@@ -19,7 +19,12 @@ export default async function BatchPage(props: { searchParams?: Promise<Search> 
   const result = await loadPageData(async (ctx) => {
     const batch = getRenderBatch(batchId);
     if (!batch || batch.ownerId !== ctx.userId) throw notFound("Render batch");
-    return batchJobs(ctx, batch);
+    const items = batchJobs(ctx, batch);
+    return Promise.all(items.map(async (item) => {
+      const media = await ctx.repo.getMedia(item.mediaId);
+      const ownedMedia = media?.ownerId === batch.ownerId && media.status !== "deleted" && (media.kind ?? "video") === "video";
+      return { ...item, hasThumbnail: ownedMedia && media.hasThumbnail === true, durationMs: ownedMedia ? media.durationMs ?? null : null };
+    }));
   });
   return (
     <>

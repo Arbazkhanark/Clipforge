@@ -102,6 +102,8 @@ import { MediaSelection } from "./MediaSelection.tsx";
 import { MediaThumbnail } from "./MediaThumbnail.tsx";
 import { UploadedAt } from "./UploadedAt.tsx";
 import { MediaVerificationStatus } from "./MediaVerificationStatus.tsx";
+import { MediaDeleteAction } from "./MediaDeleteAction.tsx";
+import { MediaOrganizationActions } from "./MediaOrganizationActions.tsx";
 
 /**
  * Small preview image.
@@ -429,7 +431,8 @@ export function MediaTable({
                         )}
                       </td>
 
-                      <td>
+                      <td className="media-action-cell">
+                        <div className="media-row-actions">
                         {m.kind === "video" ? (
                           <a
                             className="media-edit-link"
@@ -445,6 +448,9 @@ export function MediaTable({
                             View →
                           </a>
                         )}
+                        <MediaDeleteAction mediaId={m.id} mediaTitle={m.title} status={m.status} />
+                        </div>
+                        <MediaOrganizationActions mediaId={m.id} isVideo={m.kind === "video"} templates={library.templates ?? []} collections={library.collections ?? []} collectionMemberships={m.collectionMemberships ?? []} matchingTemplateName={m.matchingTemplateName ?? null} hasSavedEditorSettings={m.hasSavedEditorSettings === true} />
                       </td>
                     </tr>
                   ))}

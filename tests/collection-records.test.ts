@@ -8,6 +8,10 @@ import { makeMedia } from "./helpers.ts";
 import { getCollectionDetail, getCollectionsOverview } from "../src/server/queries.ts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CollectionDetailView } from "../src/components/CollectionViews.tsx";
+import { DEFAULT_EDITING_SETTINGS } from "../src/lib/domain/editing-settings.ts";
+import { toRenderSettings } from "../src/lib/domain/editing-settings.ts";
+import { hashExportSettings } from "../src/lib/render/render-limits.ts";
+import { getPlan } from "../src/lib/billing/catalog.ts";
 
 function context(repo: MemoryRepository, userId: string): RequestContext {
   let n = 0;
@@ -145,6 +149,49 @@ test("collection owner sees safe sharing-management data; a recipient does not r
   assert.equal(JSON.stringify(recipientDetail).includes("sharingManagement"), false);
   assert.equal(JSON.stringify(recipientDetail).includes("granteeId"), false);
   assert.equal(renderToStaticMarkup(CollectionDetailView({ detail: recipientDetail })).includes("People with collection access"), false);
+});
+
+test("collection owner gets a bulk template action preselecting every collection video; viewers do not", async () => {
+  const repo = new MemoryRepository();
+  const owner = context(repo, "owner");
+  for (const id of ["video-one", "video-two"]) {
+    await repo.addMediaIfStorageWithin(makeMedia({ id, ownerId: "owner", kind: "video", title: id }), { storageKey: `private/${id}`, thumbnailKey: null }, 10_000);
+  }
+  await repo.createCollection({ id: "template-collection", ownerId: "owner", name: "Campaign", visibility: "public_view", archived: false, mediaIds: ["video-one", "video-two"], createdAt: owner.now });
+  const ownerHtml = renderToStaticMarkup(CollectionDetailView({ detail: await getCollectionDetail(owner, "template-collection") }));
+  assert.match(ownerHtml, /Apply template to all videos/);
+  assert.match(ownerHtml, /href="\/editor\/bulk\?media=video-one&amp;media=video-two"/);
+  const viewerHtml = renderToStaticMarkup(CollectionDetailView({ detail: await getCollectionDetail(context(repo, "viewer"), "template-collection") }));
+  assert.doesNotMatch(viewerHtml, /Apply template to all videos/);
+});
+
+test("collection videos play the exact completed edited export and show their template label", async () => {
+  const repo = new MemoryRepository();
+  const owner = context(repo, "owner");
+  for (const id of ["edited", "custom"]) {
+    await repo.addMediaIfStorageWithin(makeMedia({ id, ownerId: "owner", kind: "video", title: `${id}.mp4`, durationMs: 12_000, hasThumbnail: true }), { storageKey: `private/${id}`, thumbnailKey: `private/${id}-thumb` }, 20_000);
+  }
+  await repo.createCollection({ id: "preview-collection", ownerId: "owner", name: "Previews", visibility: "public_view", archived: false, mediaIds: ["edited", "custom"], createdAt: owner.now });
+
+  const settings = { ...DEFAULT_EDITING_SETTINGS, aspect: "1:1" as const };
+  await repo.saveVideoSettings({ id: "video-settings-edited", ownerId: "owner", name: "v:edited", settings, createdAt: owner.now });
+  await repo.saveVideoSettings({ id: "video-settings-custom", ownerId: "owner", name: "v:custom", settings: { ...settings, zoom: 1.2 }, createdAt: owner.now });
+  await repo.createTemplateIfWithinLimit({ id: "template-portrait", ownerId: "owner", name: "Portrait look", settings, createdAt: owner.now }, 5);
+  const settingsHash = hashExportSettings("edited", toRenderSettings(settings, getPlan("free").features.maxResolution), null, null);
+  await repo.saveRenderOutput({ id: "edited-output", sourceMediaId: "edited", ownerId: "owner", storageKey: "private/edited-export", sizeBytes: 4, settingsHash, createdAt: owner.now }, 20_000);
+
+  const ownerHtml = renderToStaticMarkup(CollectionDetailView({ detail: await getCollectionDetail(owner, "preview-collection") }));
+  assert.match(ownerHtml, /src="\/api\/renders\/preview\?id=edited-output"/);
+  assert.match(ownerHtml, /Template: Portrait look/);
+  assert.match(ownerHtml, /Edited export/);
+  assert.match(ownerHtml, /Custom settings/);
+  assert.match(ownerHtml, /Original · no matching export yet/);
+  assert.match(ownerHtml, /src="\/api\/media\/file\?id=custom&amp;variant=preview"/);
+
+  const viewerHtml = renderToStaticMarkup(CollectionDetailView({ detail: await getCollectionDetail(context(repo, "viewer"), "preview-collection") }));
+  assert.match(viewerHtml, /Template details unavailable/);
+  assert.doesNotMatch(viewerHtml, /Portrait look|edited-output|\/api\/renders\/preview/);
+  assert.match(viewerHtml, /Playback is not included in this collection’s permissions/);
 });
 
 test("access-request views are owner/requester scoped and do not reveal private collection details", async () => {

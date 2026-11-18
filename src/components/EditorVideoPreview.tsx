@@ -27,11 +27,13 @@ function writeFormCamera(form: HTMLFormElement, camera: EditorCamera): void {
 }
 
 export function EditorVideoPreview({
-  videoUrl, sourceId, sourceWidth, sourceHeight, durationMs, assumedSourceSize = false, settings: initialSettings, maxResolution, images, formId,
+  videoUrl, sourceId, sourceWidth, sourceHeight, durationMs, assumedSourceSize = false, settings: initialSettings, controlledSettings, maxResolution, images, formId,
 }: {
   videoUrl: string; sourceId: string; sourceWidth: number | null; sourceHeight: number | null; durationMs: number | null;
   assumedSourceSize?: boolean;
   settings: EditingSettings; maxResolution: MaxResolution; images: EditorPreviewImage[]; formId: string;
+  /** Optional parent-controlled preview settings. The normal editor continues reading its form as before. */
+  controlledSettings?: EditingSettings;
 }) {
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
   const [originalVideoElement, setOriginalVideoElement] = useState<HTMLVideoElement | null>(null);
@@ -57,6 +59,10 @@ export function EditorVideoPreview({
   const trimEnd = settings.trim.endSeconds ?? durationSeconds ?? Infinity;
   const logoUrl = logoInfo?.url;
   const backgroundInfo = settings.background.kind === "image" ? imageById.get(settings.background.mediaId) : undefined;
+
+  useEffect(() => {
+    if (controlledSettings) setSettings(controlledSettings);
+  }, [controlledSettings]);
 
   useEffect(() => {
     const stage = stageElement;

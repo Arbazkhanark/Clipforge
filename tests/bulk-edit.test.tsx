@@ -10,7 +10,7 @@ import { DEFAULT_EDITING_SETTINGS } from "../src/lib/domain/editing-settings.ts"
 import { publicRenderFailure, renderDiagnostic } from "../src/lib/render/render-errors.ts";
 import { MediaTable } from "../src/components/MediaTable.tsx";
 import { MediaDetailView } from "../src/components/MediaDetailView.tsx";
-import { BulkConfirmation, BulkForm } from "../src/components/BulkViews.tsx";
+import { BatchStatus, BulkConfirmation, BulkForm } from "../src/components/BulkViews.tsx";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
 import { applyBulkEdit, clearBulkStateForTests, reviewBulkEdit, startBulkRender } from "../src/server/bulk/bulk-service.ts";
@@ -33,12 +33,12 @@ test("selection: select all, clear, and toggle only the ids on the page", () => 
   assert.deepEqual(selectionAfter(["a", "b"], ["a", "b"], { toggle: "a" }), ["b"]);
 });
 
-test("library: every video has an Edit button and a checkbox; images have neither", () => {
+test("library: every video has an Edit video link and a checkbox; images have neither", () => {
   const html = renderToStaticMarkup(<MediaTable library={{ items: [card("v1", "video", "Clip"), card("p1", "image", "Poster")], total: 2, page: 1, pageCount: 1, pageSize: 24 }} />);
-  assert.ok(html.includes('href="/editor?media=v1"') && html.includes(">Edit</a>"));
+  assert.ok(html.includes('href="/editor?media=v1"') && html.includes(">Edit video →</a>"));
   assert.ok(html.includes('aria-label="Select Clip"'));
   assert.ok(html.includes("Select all on this page") && html.includes("not to every filtered result") && html.includes("Clear selection") && html.includes("Bulk edit") && html.includes("selected"));
-  assert.ok(html.includes("No editor"));
+  assert.ok(html.includes('href="/media/p1"') && html.includes("View →"));
   assert.equal(html.includes('value="p1"'), false);
   assert.equal(html.includes('href="/editor?media=p1"'), false);
   const image = renderToStaticMarkup(<MediaDetailView timeZone="UTC" detail={{ mimeType: "image/png", addedAt: null, media: card("p1", "image", "Poster") }} />);
@@ -46,9 +46,40 @@ test("library: every video has an Edit button and a checkbox; images have neithe
 });
 
 test("bulk form offers saved styles and makes trim copying an explicit choice", () => {
-  const html = renderToStaticMarkup(<BulkForm videos={[card("v1", "video", "Clip")]} images={[card("logo", "image", "Brand")]} templates={[{ id: "style1", name: "Brand look", summary: "1:1, zoom 2, border" }]} batchSize={5} />);
+  const html = renderToStaticMarkup(<BulkForm videos={[card("v1", "video", "Clip")]} images={[card("logo", "image", "Brand")]} templates={[{ id: "style1", name: "Brand look", summary: "1:1, zoom 2, border", settings: { ...DEFAULT_EDITING_SETTINGS, aspect: "1:1", zoom: 2 } }]} batchSize={5} />);
   assert.ok(html.includes('name="styleTemplateId"') && html.includes("Brand look") && html.includes('name="copyTemplateTrim"'));
-  assert.ok(html.includes("trim is preserved"));
+  assert.ok(html.includes("trim ranges stay as they are"));
+  assert.ok(html.includes("bulk-editor-page") && html.includes("Videos selected") && html.includes("Review changes"));
+  assert.ok(html.includes("Individual settings") && html.includes("Nothing changes yet"));
+  assert.ok(html.includes("See your changes") && html.includes('id="bulk-preview-video"') && html.includes('aria-label="Source video preview"'));
+  assert.ok(html.includes('/api/media/file?id=v1&amp;variant=preview') && html.includes("This is a browser preview"));
+});
+
+test("bulk form keeps templates optional when the owner has not created one", () => {
+  const html = renderToStaticMarkup(<BulkForm videos={[card("v1", "video", "Clip")]} images={[]} templates={[]} batchSize={5} />);
+  assert.match(html, /No templates yet/);
+  assert.match(html, /continue with individual settings/);
+  assert.match(html, /name="use" value="aspect"/);
+});
+
+test("render batch uses video cards with real status, refusal reason, preview, and successful export actions", () => {
+  const html = renderToStaticMarkup(<BatchStatus items={[
+    { title: "Needs verification.mp4", mediaId: "v1", status: "refused", message: "This video has not been fully checked, so it cannot be rendered.", outputId: null, hasThumbnail: true, durationMs: 12_000 },
+    { title: "Finished.mp4", mediaId: "v2", status: "completed", message: null, outputId: "output-2", hasThumbnail: false, durationMs: 8_000 },
+  ]} />);
+  assert.match(html, /Your render batch/);
+  assert.match(html, /2 of 2 items finished/);
+  assert.match(html, /Needs verification\.mp4/);
+  assert.match(html, /Not eligible/);
+  assert.match(html, /has not been fully checked/);
+  assert.match(html, /Watch preview of Needs verification\.mp4/);
+  assert.match(html, /\/api\/media\/file\?id=v1&amp;variant=thumbnail/);
+  assert.match(html, /Download export/);
+  assert.match(html, /\/api\/renders\/file\?id=output-2/);
+  assert.match(html, /\/api\/renders\/preview\?id=output-2/);
+  assert.match(html, /Edited export/);
+  assert.match(html, /Original upload/);
+  assert.match(html, /\/editor\?media=v1/);
 });
 
 test("patch: only ticked settings change, and a colour is not forced onto a blurred video", () => {
@@ -146,7 +177,7 @@ test("bulk applies an owned reusable style, preserving each video's trim unless 
   assert.deepEqual([draft.videos[0]!.after.zoom, draft.videos[0]!.after.offsetX, draft.videos[0]!.after.offsetY], [2.4, 0.3, -0.25]);
   assert.deepEqual(draft.videos[0]!.after.logo, templateSettings.logo);
   const reviewedMarkup = renderToStaticMarkup(<BulkConfirmation draft={draft} />);
-  assert.ok(reviewedMarkup.includes("Reel style") && reviewedMarkup.includes("preserved for each video") && reviewedMarkup.includes("Layout sketch") && reviewedMarkup.includes("data-preview-border") && reviewedMarkup.includes("data-preview-logo"));
+  assert.ok(reviewedMarkup.includes("Reel style") && reviewedMarkup.includes("Each video keeps its current trim") && reviewedMarkup.includes("Layout sketch") && reviewedMarkup.includes("data-preview-border") && reviewedMarkup.includes("data-preview-logo"));
   await applyBulkEdit(ctxFor("bob"), { draftId: reviewed.draftId });
   const rows = await repo.listTemplatesForOwner("bob");
   const v1 = rows.find((row) => row.name === "v:v1")!.settings; const v2 = rows.find((row) => row.name === "v:v2")!.settings;

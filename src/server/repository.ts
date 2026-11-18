@@ -101,6 +101,7 @@ export interface ApplyVideoSettingsBatchInput {
 }
 export type ApplyVideoSettingsBatchResult = "applied" | "existing" | "not_owned" | "conflict";
 export interface RenderOutputRecord { id: string; sourceMediaId: string; ownerId: string; sizeBytes: number; createdAt: Date; }
+export interface RenderOutputPreviewRecord { id: string; sourceMediaId: string; settingsHash: string; }
 export interface SelectCycleItemRenderOutputInput { cycleId: string; itemId: string; ownerId: string; renderOutputId: string | null; expectedVersion: number; }
 export type SaveRenderResult = { status: "saved" | "duplicate"; id: string } | { status: "over_quota" } | { status: "stale_job" };
 export type RenderJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -125,6 +126,8 @@ export interface MediaVerificationState {
   completedStages: MediaVerificationStage[]; errorCode: string | null; errorMessage: string | null;
   attempts: number; retryable: boolean; updatedAt: Date | null; thumbnailStatus: "pending" | "verified" | "failed" | "skipped";
 }
+export interface MediaCleanupJobRecord { id: string; ownerId: string; mediaAssetId: string; status: "queued" | "running" | "succeeded" | "failed"; attempts: number; lockToken: string | null; lockExpiresAt: Date | null; createdAt: Date; }
+export type PermanentMediaDeletionResult = { status: "queued" | "existing"; job: MediaCleanupJobRecord; removedCollectionIds: string[] } | { status: "missing" | "already_deleted" | "collections_changed" | "in_use" | "cover_in_use" | "import_in_progress" | "conflict" };
 export interface MediaVerificationClaim { workerId: string; now: Date; leaseSeconds: number; jobId?: string; }
 export interface RenderJobFence { id: string; ownerId: string; lockToken: string; }
 export interface AuditEntry { actorId: string | null; action: string; entityType: string; entityId: string; metadata?: Record<string, unknown>; }
@@ -352,6 +355,11 @@ export interface Repository {
   finalizeMediaImportJob(input: MediaImportFinalizationInput): Promise<"applied" | "stale" | "unauthorized" | "quota">;
   failMediaImportJob(input: { jobId: string; lockToken: string; now: Date; reason: string }): Promise<boolean>;
   scheduleMediaDeletion(input: { mediaId: string; ownerId: string; now: Date; graceDays: number }): Promise<"scheduled" | "missing" | "already_pending" | "import_pending">;
+  requestPermanentMediaDeletion(input: { id: string; mediaId: string; ownerId: string; expectedCollectionIds: string[]; now: Date }): Promise<PermanentMediaDeletionResult>;
+  claimMediaCleanupJob(input: { workerId: string; now: Date; leaseSeconds: number }): Promise<MediaCleanupJobRecord | null>;
+  finishMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date }): Promise<boolean>;
+  failMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date; errorCode: string; retryAt: Date | null }): Promise<boolean>;
+  canCleanupMediaAsset(mediaId: string): Promise<boolean>;
   /** Every collection (anyone's) that currently contains this media, for access checks. */
   listCollectionsContainingMedia(mediaId: string): Promise<VideoCollection[]>;
   listSocialAccountsForOwner(userId: string): Promise<SocialAccountRecord[]>;
@@ -368,6 +376,8 @@ export interface Repository {
    * Nothing is written in those cases.
    */
   createCollection(collection: VideoCollection): Promise<boolean>;
+  /** Atomically appends an owned active media item to an owned collection; idempotent for existing membership. */
+  addOwnedMediaToCollection(input: { collectionId: string; mediaAssetId: string; ownerId: string; actorId: string; now: Date }): Promise<"added" | "existing" | "not_found" | "not_owned">;
   saveCollectionItemSettings(input: { collectionId: string; ownerId: string; mediaAssetId: string; captionText: string; coverMediaId: string | null; expectedVersion: number }): Promise<boolean>;
   saveCollectionSharedSettings(input: { collectionId: string; ownerId: string; actorId: string; affected: number; expectedVersion: number; captionMode?: "individual" | "shared"; sharedCaptionText?: string | null; coverMode?: "individual" | "shared"; sharedCoverMediaId?: string | null }): Promise<boolean>;
   /** Changes the name, description, visibility, and archived flag. Returns false when the collection does not exist. Items stay as they are. */
@@ -378,6 +388,8 @@ export interface Repository {
    * The same list sent twice leaves the same rows.
    */
   replaceCollectionMedia(collectionId: string, mediaIds: string[]): Promise<boolean>;
+  /** Removes only one collection membership. Media, storage, derivatives, grants, and other memberships are untouched. */
+  removeCollectionItem(input: { collectionId: string; mediaAssetId: string; actorId: string; now: Date }): Promise<"removed" | "already_absent" | "not_found" | "forbidden" | "conflict">;
   /**
    * Removes the collection and its membership rows.
    * Does not delete media files or remove those files from any other collection.
@@ -454,6 +466,7 @@ export interface Repository {
   saveRenderOutput(record: { id: string; sourceMediaId: string; ownerId: string; storageKey: string; sizeBytes: number; settingsHash: string; createdAt: Date }, limitBytes: number, fence?: RenderJobFence): Promise<SaveRenderResult>;
   listRenderOutputsForOwner(ownerId: string): Promise<RenderOutputRecord[]>;
   listRenderOutputsForOwnerAndSource(ownerId: string, sourceMediaId: string): Promise<RenderOutputRecord[]>;
+  listRenderOutputPreviewsForOwner(ownerId: string, sourceMediaIds: string[]): Promise<RenderOutputPreviewRecord[]>;
   createRenderJob(job: RenderJobRecord): Promise<CreateRenderJobResult>;
   getRenderJobForOwner(id: string, ownerId: string): Promise<RenderJobRecord | null>;
   getRenderJobByIdempotencyKey(idempotencyKey: string, ownerId: string): Promise<RenderJobRecord | null>;

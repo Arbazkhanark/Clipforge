@@ -47,3 +47,31 @@ export async function scheduleOwnedMediaDeletion(ctx: RequestContext, rawInput: 
   if (!media?.deleteAfter) throw new AppError(500, "deletion_state_unavailable", "The removal schedule could not be verified.");
   return { mediaId, deleteAfter: media.deleteAfter.toISOString() };
 }
+
+export async function getOwnedMediaDeletionPreview(ctx: RequestContext, rawMediaId: unknown): Promise<{ mediaId: string; title: string; collections: { id: string; name: string }[] }> {
+  const ownerId = requireUser(ctx);
+  if (typeof rawMediaId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(rawMediaId)) throw new AppError(422, "invalid_media_id", "Select a valid media item.");
+  const media = await ctx.repo.getMedia(rawMediaId);
+  if (!media || media.ownerId !== ownerId || media.status === "deleted") throw notFound("File");
+  const collections = await ctx.repo.listCollectionsContainingMedia(media.id);
+  return { mediaId: media.id, title: media.title ?? "Untitled media", collections: collections.filter((collection) => collection.mediaIds.includes(media.id)).map(({ id, name }) => ({ id, name: name ?? "Untitled collection" })) };
+}
+
+export async function requestPermanentOwnedMediaDeletion(ctx: RequestContext, rawInput: unknown): Promise<{ mediaId: string; jobId: string; status: "queued" | "existing"; removedCollectionIds: string[] }> {
+  const ownerId = requireUser(ctx); const problems = new Problems(); const input = readObject(rawInput, problems);
+  if (Object.keys(input).some((key) => !["mediaId", "confirm", "expectedCollectionIds"].includes(key))) problems.add("The request contains unsupported fields.");
+  const mediaId = readId(input, "mediaId", problems);
+  if (input["confirm"] !== true) problems.add("Confirm permanent deletion first.");
+  const rawCollections = input["expectedCollectionIds"];
+  if (!Array.isArray(rawCollections) || rawCollections.length > 100 || rawCollections.some((value) => typeof value !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(value)) || (Array.isArray(rawCollections) && new Set(rawCollections).size !== rawCollections.length)) problems.add("Refresh the collection list before deleting this media.");
+  problems.throwIfAny();
+  const result = await ctx.repo.requestPermanentMediaDeletion({ id: ctx.newId(), mediaId, ownerId, expectedCollectionIds: rawCollections as string[], now: ctx.now });
+  if (result.status === "missing" || result.status === "already_deleted") throw notFound("File");
+  if (result.status === "collections_changed") throw conflict("This media's collection membership changed. Refresh and review the affected collections before confirming again.");
+  if (result.status === "in_use") throw conflict("This media is used by a cycle, publishing job, or render. Remove it from those workflows before permanent deletion.");
+  if (result.status === "cover_in_use") throw conflict("This media is selected as a collection or cycle cover. Change those covers before permanent deletion.");
+  if (result.status === "import_in_progress") throw conflict("A media import is still using this file. Wait for it to finish before permanent deletion.");
+  if (result.status === "conflict") throw conflict("The media deletion request conflicts with another change. Refresh and try again.");
+  if (result.status !== "queued" && result.status !== "existing") throw conflict("The media deletion request could not be confirmed. Refresh and try again.");
+  return { mediaId, jobId: result.job.id, status: result.status, removedCollectionIds: result.removedCollectionIds };
+}

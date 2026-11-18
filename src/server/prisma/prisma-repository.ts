@@ -17,7 +17,7 @@ import type { CaptionRevision } from "../../lib/domain/caption-cover-updates.ts"
 import type { MediaSort } from "../../lib/domain/media-list.ts";
 import type { Capability, CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../../lib/domain/types.ts";
 import type { UsageRecordDraft } from "../../lib/domain/usage-accounting.ts";
-import type { ApplyVideoSettingsBatchInput, AuditEntry, ClaimPublishingAttemptInput, CollectionAccessRequestRecord, CreateCollectionAccessRequestInput, CreatePublishingAttemptInput, CreateRenderJobResult, CycleRecord, DecideCollectionAccessRequestInput, EditingTemplateRecord, InstagramConnectionWrite, PersistedCycleSchedule, PublishingAttemptRecord, PublishingJobRecord, PublishingAttemptUpdate, RazorpaySubscriptionEventInput, RazorpaySubscriptionEventResult, RenderJobClaim, RenderJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SelectCycleItemRenderOutputInput, SocialAccountRecord, RazorpaySubscriptionIntentRecord, ReserveRazorpaySubscriptionIntentInput, RazorpayIntentStatus, ManualPaymentIntentRecord, ManualIntentStatus, SettleManualPaymentInput } from "../repository.ts";
+import type { ApplyVideoSettingsBatchInput, AuditEntry, ClaimPublishingAttemptInput, CollectionAccessRequestRecord, CreateCollectionAccessRequestInput, CreatePublishingAttemptInput, CreateRenderJobResult, CycleRecord, DecideCollectionAccessRequestInput, EditingTemplateRecord, InstagramConnectionWrite, MediaCleanupJobRecord, PersistedCycleSchedule, PublishingAttemptRecord, PublishingJobRecord, PublishingAttemptUpdate, RazorpaySubscriptionEventInput, RazorpaySubscriptionEventResult, RenderJobClaim, RenderJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SelectCycleItemRenderOutputInput, SocialAccountRecord, RazorpaySubscriptionIntentRecord, ReserveRazorpaySubscriptionIntentInput, RazorpayIntentStatus, ManualPaymentIntentRecord, ManualIntentStatus, SettleManualPaymentInput } from "../repository.ts";
 import { cycleToRow, grantToRow, itemToMutableData, itemToRow, mediaToRow, rowToCollection, rowToCycle, rowToGrant, rowToItem, rowToMedia, rowToSocialAccount } from "./mappers.ts";
 import { isUniqueViolation, type PrismaClientLike } from "./prisma-client-like.ts";
 import { canTransitionPublishingAttempt, isActivePublishingAttempt, publishingOutcomeForStage, safePublishingError } from "../../lib/domain/publishing-attempt.ts";
@@ -49,6 +49,10 @@ function shareLinkSummary(link: CollectionShareLinkRecord): CollectionShareLinkS
 
 function mediaVerificationJobFromRow(row: Record<string, unknown>): MediaVerificationJobRecord {
   return { id: String(row["id"]), ownerId: String(row["ownerId"]), mediaAssetId: String(row["mediaAssetId"]), status: row["status"] as MediaVerificationJobRecord["status"], progressPercent: Number(row["progressPercent"] ?? 0), attempts: Number(row["attempts"] ?? 0), idempotencyKey: String(row["idempotencyKey"]), lockedBy: row["lockedBy"] as string | null ?? null, lockToken: row["lockToken"] as string | null ?? null, lockExpiresAt: row["lockExpiresAt"] as Date | null ?? null, errorMessage: row["errorMessage"] as string | null ?? null, createdAt: row["createdAt"] as Date, finishedAt: row["finishedAt"] as Date | null ?? null, payload: row["payload"] ?? null };
+}
+
+function mediaCleanupJobFromRow(row: Record<string, unknown>): MediaCleanupJobRecord {
+  return { id: String(row["id"]), ownerId: String(row["ownerId"]), mediaAssetId: String(row["mediaAssetId"]), status: row["status"] as MediaCleanupJobRecord["status"], attempts: Number(row["attempts"] ?? 0), lockToken: row["lockToken"] as string | null ?? null, lockExpiresAt: row["lockExpiresAt"] as Date | null ?? null, createdAt: row["createdAt"] as Date };
 }
 
 function publishingAttemptFromRow(row: Record<string, unknown>): PublishingAttemptRecord {
@@ -1490,6 +1494,99 @@ export class PrismaRepository implements Repository {
     });
   }
 
+  async requestPermanentMediaDeletion(input: { id: string; mediaId: string; ownerId: string; expectedCollectionIds: string[]; now: Date }) {
+    try {
+      return await this.db.$transaction(async (tx) => {
+        if (!(await lockedUsers(tx, [input.ownerId]))) return { status: "missing" as const };
+        const mediaLock = await tx.$queryRaw`SELECT "id" FROM "MediaAsset" WHERE "id" = ${input.mediaId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+        if (!Array.isArray(mediaLock) || mediaLock.length !== 1) return { status: "missing" as const };
+        const idempotencyKey = `media-cleanup:${input.mediaId}`;
+        const existing = await tx.processingJob.findUnique({ where: { idempotencyKey } });
+        if (existing) return existing["ownerId"] === input.ownerId && existing["kind"] === "cleanup" && existing["mediaAssetId"] === input.mediaId
+          ? { status: "existing" as const, job: mediaCleanupJobFromRow(existing), removedCollectionIds: [] }
+          : { status: "conflict" as const };
+        const media = await tx.mediaAsset.findFirst({ where: { id: input.mediaId, ownerId: input.ownerId } });
+        if (!media) return { status: "missing" as const };
+        if (media["status"] === "deleted") return { status: "already_deleted" as const };
+        const collectionRows = await tx.collectionItem.findMany({ where: { mediaAssetId: input.mediaId }, select: { id: true, collectionId: true } });
+        const collectionIds = [...new Set(collectionRows.map((row) => String(row["collectionId"])))].sort();
+        if (JSON.stringify(collectionIds) !== JSON.stringify([...new Set(input.expectedCollectionIds)].sort())) return { status: "collections_changed" as const };
+        const cycleItems = await tx.cycleItem.findMany({ where: { mediaAssetId: input.mediaId }, select: { status: true } });
+        if (cycleItems.some((item) => ["upcoming", "scheduled", "processing", "publishing"].includes(String(item["status"])))) return { status: "in_use" as const };
+        const imports = await tx.mediaImportJob.findMany({ where: { sourceMediaId: input.mediaId, status: { in: ["pending", "copying", "verifying"] } }, select: { id: true } });
+        if (imports.length) return { status: "import_in_progress" as const };
+        const renders = await tx.processingJob.findMany({ where: { mediaAssetId: input.mediaId, kind: "render", status: { in: ["queued", "running"] } }, select: { id: true } });
+        if (renders.length) return { status: "in_use" as const };
+        const coverRefs = await Promise.all([
+          tx.videoCollection.findMany({ where: { sharedCoverMediaId: input.mediaId }, select: { id: true } }),
+          tx.collectionItem.findMany({ where: { coverMediaId: input.mediaId }, select: { id: true } }),
+          tx.cycleItem.findMany({ where: { coverMediaId: input.mediaId }, select: { id: true } }),
+        ]);
+        if (coverRefs.some((rows) => rows.length > 0)) return { status: "cover_in_use" as const };
+        // Lock collection rows with bound identifiers before deleting their membership rows.
+        if (collectionIds.length) {
+          for (const collectionId of collectionIds) {
+            const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${collectionId} FOR UPDATE`;
+            if (!Array.isArray(locked) || locked.length !== 1) return { status: "collections_changed" as const };
+          }
+        }
+        await tx.collectionItem.deleteMany({ where: { mediaAssetId: input.mediaId } });
+        const changed = await tx.mediaAsset.updateMany({ where: { id: input.mediaId, ownerId: input.ownerId, status: media["status"] }, data: { status: "deleted", deleteAfter: null } });
+        if (changed.count !== 1) throw new Error("Media changed while deletion was being confirmed.");
+        const job = await tx.processingJob.create({ data: { id: input.id, ownerId: input.ownerId, kind: "cleanup", status: "queued", cycleItemId: null, mediaAssetId: input.mediaId, progressPercent: 0, attempts: 0, idempotencyKey, lockedBy: null, lockExpiresAt: null, errorMessage: null, createdAt: input.now, finishedAt: null, settingsHash: null, payload: { version: 1, mediaAssetId: input.mediaId }, pendingOutputId: null, outputDerivativeId: null, lockToken: null, ffmpegPid: null, ffmpegStartedAt: null } });
+        await tx.auditLog.create({ data: { actorId: input.ownerId, action: "media.permanent_deletion_queued", entityType: "MediaAsset", entityId: input.mediaId, metadata: { collectionIds } } });
+        return { status: "queued" as const, job: mediaCleanupJobFromRow(job), removedCollectionIds: collectionIds };
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) return { status: "conflict" as const };
+      throw error;
+    }
+  }
+
+  async claimMediaCleanupJob(input: { workerId: string; now: Date; leaseSeconds: number }): Promise<MediaCleanupJobRecord | null> {
+    if (!input.workerId || !Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) return null;
+    return this.db.$transaction(async (tx) => {
+      const candidates = await tx.processingJob.findMany({ where: { kind: "cleanup", OR: [{ status: "queued", createdAt: { lte: input.now } }, { status: "running", lockExpiresAt: { lte: input.now } }] }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+      for (const candidate of candidates) {
+        const ownerId = String(candidate["ownerId"]);
+        if (!(await lockedUsers(tx, [ownerId]))) continue;
+        const lockToken = randomUUID();
+        const changed = await tx.processingJob.updateMany({ where: { id: candidate["id"], kind: "cleanup", status: candidate["status"], ...(candidate["status"] === "running" ? { lockToken: candidate["lockToken"], lockExpiresAt: { lte: input.now } } : {}) }, data: { status: "running", lockedBy: input.workerId, lockToken, lockExpiresAt: new Date(input.now.getTime() + input.leaseSeconds * 1000), attempts: { increment: 1 } } });
+        if (changed.count !== 1) continue;
+        const claimed = await tx.processingJob.findFirst({ where: { id: candidate["id"], kind: "cleanup", status: "running", lockToken } });
+        if (claimed) return mediaCleanupJobFromRow(claimed);
+      }
+      return null;
+    });
+  }
+
+  async canCleanupMediaAsset(mediaId: string): Promise<boolean> {
+    const media = await this.db.mediaAsset.findUnique({ where: { id: mediaId }, select: { status: true } });
+    if (!media || media["status"] !== "deleted") return false;
+    const [items, imports, renders, collectionCovers, itemCovers, cycleCovers] = await Promise.all([
+      this.db.cycleItem.findMany({ where: { mediaAssetId: mediaId }, select: { status: true } }),
+      this.db.mediaImportJob.findMany({ where: { sourceMediaId: mediaId, status: { in: ["pending", "copying", "verifying"] } }, select: { id: true } }),
+      this.db.processingJob.findMany({ where: { mediaAssetId: mediaId, kind: "render", status: { in: ["queued", "running"] } }, select: { id: true } }),
+      this.db.videoCollection.findMany({ where: { sharedCoverMediaId: mediaId }, select: { id: true } }),
+      this.db.collectionItem.findMany({ where: { coverMediaId: mediaId }, select: { id: true } }),
+      this.db.cycleItem.findMany({ where: { coverMediaId: mediaId }, select: { id: true } }),
+    ]);
+    return !items.some((item) => ["upcoming", "scheduled", "processing", "publishing"].includes(String(item["status"]))) && imports.length === 0 && renders.length === 0 && collectionCovers.length === 0 && itemCovers.length === 0 && cycleCovers.length === 0;
+  }
+
+  async finishMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date }): Promise<boolean> {
+    const result = await this.db.processingJob.updateMany({ where: { id: input.id, ownerId: input.ownerId, kind: "cleanup", status: "running", lockToken: input.lockToken }, data: { status: "succeeded", progressPercent: 100, finishedAt: input.now, errorMessage: null, lockToken: null, lockedBy: null, lockExpiresAt: null } });
+    return result.count === 1;
+  }
+
+  async failMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date; errorCode: string; retryAt: Date | null }): Promise<boolean> {
+    const current = await this.db.processingJob.findFirst({ where: { id: input.id, ownerId: input.ownerId, kind: "cleanup", status: "running", lockToken: input.lockToken } });
+    if (!current) return false;
+    const retry = input.retryAt !== null;
+    const result = await this.db.processingJob.updateMany({ where: { id: input.id, ownerId: input.ownerId, kind: "cleanup", status: "running", lockToken: input.lockToken }, data: { status: retry ? "queued" : "failed", createdAt: retry ? input.retryAt : input.now, finishedAt: retry ? null : input.now, errorMessage: input.errorCode, lockToken: null, lockedBy: null, lockExpiresAt: null } });
+    return result.count === 1;
+  }
+
   private async collectionsFromRows(rows: Record<string, unknown>[]): Promise<VideoCollection[]> {
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r["id"] as string);
@@ -1523,6 +1620,22 @@ export class PrismaRepository implements Repository {
       });
       return true;
     } catch (error) { if (isUniqueViolation(error)) return false; throw error; }
+  }
+  async addOwnedMediaToCollection(input: { collectionId: string; mediaAssetId: string; ownerId: string; actorId: string; now: Date }): Promise<"added" | "existing" | "not_found" | "not_owned"> {
+    if (input.actorId !== input.ownerId) return "not_owned";
+    return this.db.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length !== 1) return "not_found";
+      const media = await tx.mediaAsset.findFirst({ where: { id: input.mediaAssetId, ownerId: input.ownerId, status: "active", kind: "video" }, select: { id: true } });
+      if (!media) return "not_owned";
+      const existing = await tx.collectionItem.findUnique({ where: { collectionId_mediaAssetId: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId } }, select: { id: true } });
+      if (existing) return "existing";
+      const last = await tx.collectionItem.findFirst({ where: { collectionId: input.collectionId }, orderBy: [{ position: "desc" }, { id: "desc" }], select: { position: true } });
+      await tx.collectionItem.create({ data: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId, position: Number(last?.["position"] ?? -1) + 1 } });
+      await tx.videoCollection.updateMany({ where: { id: input.collectionId, ownerId: input.ownerId }, data: { settingsVersion: { increment: 1 } } });
+      await tx.auditLog.create({ data: { actorId: input.actorId, action: "collection.item_added", entityType: "CollectionItem", entityId: `${input.collectionId}:${input.mediaAssetId}`, metadata: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId } } });
+      return "added";
+    });
   }
   async saveCollectionItemSettings(input: { collectionId: string; ownerId: string; mediaAssetId: string; captionText: string; coverMediaId: string | null; expectedVersion: number }): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
@@ -1568,6 +1681,31 @@ export class PrismaRepository implements Repository {
       for (const mediaAssetId of mediaIds) await tx.collectionItem.updateMany({ where: { collectionId, mediaAssetId }, data: { position: mediaIds.indexOf(mediaAssetId) } });
       await tx.videoCollection.updateMany({ where: { id: collectionId }, data: { settingsVersion: { increment: 1 } } });
       return true;
+    });
+  }
+  async removeCollectionItem(input: { collectionId: string; mediaAssetId: string; actorId: string; now: Date }): Promise<"removed" | "already_absent" | "not_found" | "forbidden" | "conflict"> {
+    return this.db.$transaction(async (tx) => {
+      // Share the collection lock used by grant changes and membership edits, so a revoked
+      // delegated manager cannot race this authorization check.
+      const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length !== 1) return "not_found";
+      const collectionRow = await tx.videoCollection.findUnique({ where: { id: input.collectionId } });
+      if (!collectionRow) return "not_found";
+      const memberships = await tx.collectionItem.findMany({ where: { collectionId: input.collectionId }, orderBy: [{ position: "asc" }, { mediaAssetId: "asc" }] });
+      const collection = rowToCollection(collectionRow, memberships.map((item) => String(item["mediaAssetId"])));
+      const grants = (await tx.collectionPermission.findMany({ where: { collectionId: input.collectionId } })).map(rowToGrant);
+      const capabilities = getCollectionCapabilities(input.actorId, collection, grants, input.now);
+      if (!capabilities.has("view")) return "not_found";
+      if (!capabilities.has("manage")) return "forbidden";
+      const selected = memberships.find((item) => item["mediaAssetId"] === input.mediaAssetId);
+      if (!selected) return "already_absent";
+      const activeImport = await tx.mediaImportJob.findFirst({ where: { sourceCollectionId: input.collectionId, sourceMediaId: input.mediaAssetId, status: { in: ["pending", "copying", "verifying"] } } });
+      if (activeImport) return "conflict";
+      const removed = await tx.collectionItem.deleteMany({ where: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId } });
+      if (removed.count !== 1) return "already_absent";
+      await tx.videoCollection.updateMany({ where: { id: input.collectionId }, data: { settingsVersion: { increment: 1 } } });
+      await tx.auditLog.create({ data: { actorId: input.actorId, action: "collection.item_removed", entityType: "CollectionItem", entityId: `${input.collectionId}:${input.mediaAssetId}`, metadata: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId } } });
+      return "removed";
     });
   }
   async deleteCollection(collectionId: string): Promise<boolean> {
@@ -1999,6 +2137,15 @@ export class PrismaRepository implements Repository {
   async listRenderOutputsForOwnerAndSource(ownerId: string, sourceMediaId: string): Promise<RenderOutputRecord[]> {
     const rows = await this.db.mediaDerivative.findMany({ where: { ownerId, mediaAssetId: sourceMediaId, kind: "render" }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] });
     return rows.map((row) => ({ id: row["id"], ownerId: row["ownerId"], sourceMediaId: row["mediaAssetId"], sizeBytes: Number(row["sizeBytes"]), createdAt: row["createdAt"] }));
+  }
+  async listRenderOutputPreviewsForOwner(ownerId: string, sourceMediaIds: string[]): Promise<{ id: string; sourceMediaId: string; settingsHash: string }[]> {
+    if (sourceMediaIds.length === 0) return [];
+    const rows = await this.db.mediaDerivative.findMany({
+      where: { ownerId, mediaAssetId: { in: sourceMediaIds }, kind: "render" },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+      select: { id: true, mediaAssetId: true, settingsHash: true },
+    });
+    return rows.map((row) => ({ id: row["id"], sourceMediaId: row["mediaAssetId"], settingsHash: row["settingsHash"] }));
   }
   async createRenderJob(job: RenderJobRecord): Promise<CreateRenderJobResult> {
     try {

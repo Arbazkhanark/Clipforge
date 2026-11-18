@@ -292,6 +292,8 @@ import type { Capability } from "../lib/domain/types.ts";
 import { Thumbnail } from "./MediaTable.tsx";
 import { CollectionCreateDialog } from "./CollectionCreateDialog.tsx";
 import { CollectionCaptionCoverEditor } from "./CollectionCaptionCoverEditor.tsx";
+import { CollectionVideoRemoveAction } from "./CollectionVideoRemoveAction.tsx";
+import { CollectionVideoPreview } from "./CollectionVideoPreview.tsx";
 import {
   CAPABILITY_LABELS,
   VISIBILITY_LABELS,
@@ -1311,7 +1313,7 @@ function CollectionVideos({ detail }: { detail: CollectionDetail }) {
                 data-media-id={video.id}
               >
                 <div className="collection-video-preview">
-                  <Thumbnail media={video} />
+                  <CollectionVideoPreview media={video} />
                 </div>
                 <div className="collection-video-card-body">
                   <h3 className="collection-video-title">{video.title}</h3>
@@ -1319,6 +1321,15 @@ function CollectionVideos({ detail }: { detail: CollectionDetail }) {
                     <span>{formatDuration(video.durationMs)}</span>
                     <span>{formatStorage(video.sizeBytes)}</span>
                   </div>
+
+                  {permissions.canManage && (
+                    <CollectionVideoRemoveAction
+                      collectionId={collection.id}
+                      collectionName={collection.name}
+                      mediaAssetId={video.id}
+                      mediaTitle={video.title}
+                    />
+                  )}
 
                   {permissions.canRequestImport && (
                     <div className="collection-video-import">
@@ -1432,6 +1443,7 @@ export function CollectionDetailView({ detail }: { detail: CollectionDetail }) {
         <nav className="collection-detail-actions" aria-label="Collection actions">
           <a href="#collection-videos" className="collection-secondary-button">Videos</a>
           {permissions.canUseInCycle && <a href="#add-to-cycle" className="collection-secondary-button">Add to cycle</a>}
+          {permissions.isOwner && detail.memberIds.length > 0 && <a href={`/editor/bulk?${detail.memberIds.map((id) => `media=${encodeURIComponent(id)}`).join("&")}`} className="collection-primary-button">Apply template to all videos</a>}
           {permissions.isOwner && <a href="#collection-settings" className="collection-secondary-button">Edit details</a>}
           {permissions.isOwner && detail.sharingManagement && <a href="#sharing-management" className="collection-secondary-button">Manage sharing</a>}
         </nav>

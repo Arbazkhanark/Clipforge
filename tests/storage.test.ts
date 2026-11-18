@@ -41,6 +41,10 @@ test("storage contract (both adapters): stage -> inspect -> commit -> exists; co
     await storage.deleteUnreferencedUpload("media/bob/unreferenced");
     assert.equal(await storage.exists("media/bob/unreferenced"), false);
     assert.equal(await storage.getPrivateMetadata("media/bob/unreferenced"), null);
+    await storage.stage("staging/permanent-delete", BYTES);
+    await storage.commit("staging/permanent-delete", "media/bob/permanent-delete");
+    await storage.deleteCommittedMediaObject("media/bob/permanent-delete");
+    assert.equal(await storage.exists("media/bob/permanent-delete"), false, `${name}: cleanup worker can remove committed media`);
   }
 });
 

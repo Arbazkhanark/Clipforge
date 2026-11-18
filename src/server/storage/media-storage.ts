@@ -35,6 +35,8 @@ export interface MediaStorage {
    * Never call this for media that has a record.
    */
   deleteUnreferencedUpload(finalKey: string): Promise<void>;
+  /** Permanently removes a committed owner's object. Only the durable media-cleanup worker may call this after repository authorization and dependency checks. */
+  deleteCommittedMediaObject(key: string): Promise<void>;
   /**
    * Run `work` with a real file path for a committed object. The path stays private:
    * it is never returned to a browser, a log, or an error message.

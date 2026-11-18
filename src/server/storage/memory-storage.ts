@@ -45,6 +45,7 @@ export class MemoryMediaStorage implements MediaStorage {
     return new Response(slice).body as ReadableStream<Uint8Array>;
   }
   async deleteUnreferencedUpload(finalKey: string): Promise<void> { parseStorageKey(finalKey); this.objects.delete(finalKey); }
+  async deleteCommittedMediaObject(key: string): Promise<void> { parseStorageKey(key); this.objects.delete(key); }
   async runWithCommittedFile<T>(key: string, work: (filePath: string) => Promise<T>): Promise<T> {
     parseStorageKey(key);
     const bytes = this.objects.get(key);

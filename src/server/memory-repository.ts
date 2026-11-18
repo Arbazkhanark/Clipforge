@@ -7,7 +7,7 @@ import type { CaptionRevision } from "../lib/domain/caption-cover-updates.ts";
 import { compareMedia, mediaMatchesSearch, type MediaSort } from "../lib/domain/media-list.ts";
 import type { Capability, CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
 import type { UsageRecordDraft } from "../lib/domain/usage-accounting.ts";
-import type { ApplyVideoSettingsBatchInput, AuditEntry, ClaimPublishingAttemptInput, CreatePublishingAttemptInput, CreateRenderJobResult, CycleRecord, EditingTemplateRecord, InstagramConnectionWrite, PersistedCycleSchedule, PublishingAttemptRecord, PublishingJobRecord, PublishingAttemptUpdate, RenderJobClaim, RenderJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SelectCycleItemRenderOutputInput, SocialAccountRecord, RazorpaySubscriptionIntentRecord, ReserveRazorpaySubscriptionIntentInput, RazorpayIntentStatus, ManualPaymentIntentRecord, ManualIntentStatus, SettleManualPaymentInput, TransitionCouponStatusResult } from "./repository.ts";
+import type { ApplyVideoSettingsBatchInput, AuditEntry, ClaimPublishingAttemptInput, CreatePublishingAttemptInput, CreateRenderJobResult, CycleRecord, EditingTemplateRecord, InstagramConnectionWrite, MediaCleanupJobRecord, PersistedCycleSchedule, PublishingAttemptRecord, PublishingJobRecord, PublishingAttemptUpdate, RenderJobClaim, RenderJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SelectCycleItemRenderOutputInput, SocialAccountRecord, RazorpaySubscriptionIntentRecord, ReserveRazorpaySubscriptionIntentInput, RazorpayIntentStatus, ManualPaymentIntentRecord, ManualIntentStatus, SettleManualPaymentInput, TransitionCouponStatusResult } from "./repository.ts";
 import { canTransitionPublishingAttempt, isActivePublishingAttempt, publishingOutcomeForStage, safePublishingError } from "../lib/domain/publishing-attempt.ts";
 import { buildPublishIdempotencyKey, isCycleFinished } from "../lib/domain/cycle-state.ts";
 import { decideSettledCycle, itemsEligibleForRepeat } from "../lib/domain/publish-workflow.ts";
@@ -67,6 +67,7 @@ export class MemoryRepository implements Repository {
   templates = new Map<string, EditingTemplateRecord>();
   renders = new Map<string, RenderOutputRecord & { storageKey: string; settingsHash: string }>();
   renderJobs = new Map<string, RenderJobRecord>();
+  mediaCleanupJobs = new Map<string, MediaCleanupJobRecord>();
   usageKeys = new Set<string>();
   storageKeys = new Map<string, string>();
   thumbnailKeys = new Map<string, string | null>();
@@ -1182,6 +1183,61 @@ export class MemoryRepository implements Repository {
       media.status = "pending_deletion"; media.deleteAfter = deleteAfter; this.audit.push(entry); return "scheduled" as const;
     }));
   }
+  async requestPermanentMediaDeletion(input: { id: string; mediaId: string; ownerId: string; expectedCollectionIds: string[]; now: Date }) {
+    return this.withPromotionLock(`user:${input.ownerId}`, () => this.withPromotionLock(`media:${input.mediaId}`, async () => {
+      await tick();
+      const media = this.media.get(input.mediaId);
+      if (!media || media.ownerId !== input.ownerId) return { status: "missing" as const };
+      const existing = [...this.mediaCleanupJobs.values()].find((job) => job.mediaAssetId === media.id && job.ownerId === input.ownerId);
+      if (existing) return { status: "existing" as const, job: clone(existing), removedCollectionIds: [] };
+      if (media.status === "deleted") return { status: "already_deleted" as const };
+      const collectionIds = [...this.collections.values()].filter((collection) => collection.mediaIds.includes(media.id)).map((collection) => collection.id).sort();
+      if (JSON.stringify(collectionIds) !== JSON.stringify([...new Set(input.expectedCollectionIds)].sort())) return { status: "collections_changed" as const };
+      if ([...this.items.values()].some((item) => item.mediaAssetId === media.id && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status))) return { status: "in_use" as const };
+      if ([...this.mediaImportJobs.values()].some((job) => job.sourceMediaId === media.id && ["pending", "copying", "verifying"].includes(job.status))) return { status: "import_in_progress" as const };
+      if ([...this.renderJobs.values()].some((job) => job.mediaAssetId === media.id && ["queued", "running"].includes(job.status))) return { status: "in_use" as const };
+      if ([...this.collections.values()].some((collection) => collection.sharedCoverMediaId === media.id) || [...this.collections.values()].some((collection) => collection.items?.some((item) => item.coverMediaId === media.id)) || [...this.items.values()].some((item) => item.coverMediaId === media.id)) return { status: "cover_in_use" as const };
+      const job: MediaCleanupJobRecord = { id: input.id, ownerId: input.ownerId, mediaAssetId: media.id, status: "queued", attempts: 0, lockToken: null, lockExpiresAt: null, createdAt: input.now };
+      const collectionSnapshot = collectionIds.map((id) => [id, clone(this.collections.get(id)!)] as const);
+      const auditLength = this.audit.length;
+      try {
+        for (const id of collectionIds) {
+          const collection = this.collections.get(id)!;
+          this.collections.set(id, { ...collection, mediaIds: collection.mediaIds.filter((id) => id !== media.id), items: collection.items?.filter((item) => item.mediaAssetId !== media.id) });
+        }
+        this.media.set(media.id, { ...media, status: "deleted", deleteAfter: null });
+        this.mediaCleanupJobs.set(job.id, job);
+        this.audit.push({ actorId: input.ownerId, action: "media.permanent_deletion_queued", entityType: "MediaAsset", entityId: media.id, metadata: { collectionIds } });
+        return { status: "queued" as const, job: clone(job), removedCollectionIds: collectionIds };
+      } catch {
+        this.media.set(media.id, media); this.mediaCleanupJobs.delete(job.id); this.audit.length = auditLength;
+        for (const [id, collection] of collectionSnapshot) this.collections.set(id, collection);
+        return { status: "conflict" as const };
+      }
+    }));
+  }
+  async claimMediaCleanupJob(input: { workerId: string; now: Date; leaseSeconds: number }): Promise<MediaCleanupJobRecord | null> {
+    await tick(); if (!input.workerId || !Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) return null;
+    const queued = [...this.mediaCleanupJobs.values()].filter((job) => job.status === "queued" && job.createdAt <= input.now || job.status === "running" && job.lockExpiresAt !== null && job.lockExpiresAt <= input.now).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
+    const job = queued[0]; if (!job) return null;
+    const claimed = { ...job, status: "running" as const, attempts: job.attempts + 1, lockToken: randomUUID(), lockExpiresAt: new Date(input.now.getTime() + input.leaseSeconds * 1000) };
+    this.mediaCleanupJobs.set(job.id, claimed); return clone(claimed);
+  }
+  async canCleanupMediaAsset(mediaId: string): Promise<boolean> {
+    await tick(); const media = this.media.get(mediaId);
+    return Boolean(media?.status === "deleted" && ![...this.items.values()].some((item) => item.mediaAssetId === mediaId && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status)) && ![...this.mediaImportJobs.values()].some((job) => job.sourceMediaId === mediaId && ["pending", "copying", "verifying"].includes(job.status)) && ![...this.renderJobs.values()].some((job) => job.mediaAssetId === mediaId && job.kind === "render" && ["queued", "running"].includes(job.status)) && ![...this.collections.values()].some((collection) => collection.sharedCoverMediaId === mediaId || collection.items?.some((item) => item.coverMediaId === mediaId)) && ![...this.items.values()].some((item) => item.coverMediaId === mediaId));
+  }
+  async finishMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date }): Promise<boolean> {
+    await tick(); const job = this.mediaCleanupJobs.get(input.id);
+    if (!job || job.ownerId !== input.ownerId || job.status !== "running" || job.lockToken !== input.lockToken) return false;
+    this.mediaCleanupJobs.set(job.id, { ...job, status: "succeeded", lockToken: null, lockExpiresAt: null }); return true;
+  }
+  async failMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date; errorCode: string; retryAt: Date | null }): Promise<boolean> {
+    await tick(); const job = this.mediaCleanupJobs.get(input.id);
+    if (!job || job.ownerId !== input.ownerId || job.status !== "running" || job.lockToken !== input.lockToken) return false;
+    this.mediaCleanupJobs.set(job.id, { ...job, status: input.retryAt === null ? "failed" : "queued", lockToken: null, lockExpiresAt: null, createdAt: input.retryAt ?? input.now });
+    return true;
+  }
   async listCollectionsContainingMedia(mediaId: string): Promise<VideoCollection[]> { await tick(); return [...this.collections.values()].filter((c) => c.mediaIds.includes(mediaId)).map(clone); }
   async listSocialAccountsForOwner(userId: string): Promise<SocialAccountRecord[]> { await tick(); return [...this.socialAccounts.values()].filter((a) => a.userId === userId).map(clone); }
   async listCollectionsForOwner(userId: string): Promise<VideoCollection[]> { await tick(); return [...this.collections.values()].filter((c) => c.ownerId === userId).map(clone); }
@@ -1210,6 +1266,23 @@ export class MemoryRepository implements Repository {
     if (collection.mediaIds.some((id) => !this.media.has(id))) return false;
     this.collections.set(collection.id, clone({ ...collection, captionMode: collection.captionMode ?? "individual", sharedCaptionText: collection.sharedCaptionText ?? null, coverMode: collection.coverMode ?? "individual", sharedCoverMediaId: collection.sharedCoverMediaId ?? null, settingsVersion: collection.settingsVersion ?? 1, items: collection.mediaIds.map((mediaAssetId) => collection.items?.find((item) => item.mediaAssetId === mediaAssetId) ?? { mediaAssetId, captionText: "", coverMediaId: null, version: 1 }) }));
     return true;
+  }
+  async addOwnedMediaToCollection(input: { collectionId: string; mediaAssetId: string; ownerId: string; actorId: string; now: Date }): Promise<"added" | "existing" | "not_found" | "not_owned"> {
+    if (input.actorId !== input.ownerId) return "not_owned";
+    return this.withPromotionLock(`collection:${input.collectionId}`, async () => {
+      await tick();
+      const collection = this.collections.get(input.collectionId);
+      if (!collection || collection.ownerId !== input.ownerId) return "not_found";
+      const media = this.media.get(input.mediaAssetId);
+      if (!media || media.ownerId !== input.ownerId || media.status !== "active" || media.kind !== "video") return "not_owned";
+      if (collection.mediaIds.includes(input.mediaAssetId)) return "existing";
+      const audit: AuditEntry = { actorId: input.actorId, action: "collection.item_added", entityType: "CollectionItem", entityId: `${input.collectionId}:${input.mediaAssetId}`, metadata: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId } };
+      if (this.beforeSharingAuditInsert && !this.beforeSharingAuditInsert(clone(audit))) throw new Error("Collection add audit insert failed.");
+      const items = collection.items ?? collection.mediaIds.map((mediaAssetId) => ({ mediaAssetId, captionText: "", coverMediaId: null, version: 1 }));
+      this.collections.set(input.collectionId, { ...collection, mediaIds: [...collection.mediaIds, input.mediaAssetId], items: [...items, { mediaAssetId: input.mediaAssetId, captionText: "", coverMediaId: null, version: 1 }], settingsVersion: (collection.settingsVersion ?? 1) + 1 });
+      this.audit.push(clone(audit));
+      return "added";
+    });
   }
   async saveCollectionItemSettings(input: { collectionId: string; ownerId: string; mediaAssetId: string; captionText: string; coverMediaId: string | null; expectedVersion: number }): Promise<boolean> {
     return this.withPromotionLock(`collection:${input.collectionId}`, async () => {
@@ -1257,6 +1330,27 @@ export class MemoryRepository implements Repository {
       const retained = new Map(currentItems.filter((item) => mediaIds.includes(item.mediaAssetId)).map((item) => [item.mediaAssetId, item]));
       this.collections.set(collectionId, { ...current, mediaIds: [...mediaIds], settingsVersion: (current.settingsVersion ?? 1) + 1, items: mediaIds.map((mediaAssetId) => retained.get(mediaAssetId) ?? { mediaAssetId, captionText: "", coverMediaId: null, version: 1 }) });
       return true;
+    });
+  }
+  async removeCollectionItem(input: { collectionId: string; mediaAssetId: string; actorId: string; now: Date }): Promise<"removed" | "already_absent" | "not_found" | "forbidden" | "conflict"> {
+    const initial = this.collections.get(input.collectionId);
+    if (!initial) return "not_found";
+    return this.withSharingLocks([initial.ownerId, input.actorId], input.collectionId, async () => {
+      await tick();
+      const collection = this.collections.get(input.collectionId);
+      if (!collection) return "not_found";
+      const grants = this.grants.filter((grant) => grant.collectionId === input.collectionId).map(clone);
+      const capabilities = getCollectionCapabilities(input.actorId, collection, grants, input.now);
+      if (!capabilities.has("view")) return "not_found";
+      if (!capabilities.has("manage")) return "forbidden";
+      if (!collection.mediaIds.includes(input.mediaAssetId)) return "already_absent";
+      if ([...this.mediaImportJobs.values()].some((job) => job.sourceCollectionId === input.collectionId && job.sourceMediaId === input.mediaAssetId && ["pending", "copying", "verifying"].includes(job.status))) return "conflict";
+      const audit: AuditEntry = { actorId: input.actorId, action: "collection.item_removed", entityType: "CollectionItem", entityId: `${input.collectionId}:${input.mediaAssetId}`, metadata: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId } };
+      if (this.beforeSharingAuditInsert && !this.beforeSharingAuditInsert(clone(audit))) throw new Error("Collection removal audit insert failed.");
+      const items = collection.items ?? collection.mediaIds.map((mediaAssetId) => ({ mediaAssetId, captionText: "", coverMediaId: null, version: 1 }));
+      this.collections.set(input.collectionId, { ...collection, mediaIds: collection.mediaIds.filter((id) => id !== input.mediaAssetId), items: items.filter((item) => item.mediaAssetId !== input.mediaAssetId), settingsVersion: (collection.settingsVersion ?? 1) + 1 });
+      this.audit.push(clone(audit));
+      return "removed";
     });
   }
   async getGrants(collectionId: string): Promise<CollectionPermissionGrant[]> { await tick(); return this.grants.filter((g) => g.collectionId === collectionId).map(clone); }
@@ -1762,6 +1856,14 @@ export class MemoryRepository implements Repository {
     return [...this.renders.values()].filter((r) => r.ownerId === ownerId && r.sourceMediaId === sourceMediaId)
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id))
       .map(({ id, sourceMediaId: source, ownerId: owner, sizeBytes, createdAt }) => ({ id, sourceMediaId: source, ownerId: owner, sizeBytes, createdAt: clone(createdAt) }));
+  }
+  async listRenderOutputPreviewsForOwner(ownerId: string, sourceMediaIds: string[]): Promise<{ id: string; sourceMediaId: string; settingsHash: string }[]> {
+    await tick();
+    const sourceIds = new Set(sourceMediaIds);
+    return [...this.renders.values()]
+      .filter((render) => render.ownerId === ownerId && sourceIds.has(render.sourceMediaId))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id))
+      .map(({ id, sourceMediaId, settingsHash }) => ({ id, sourceMediaId, settingsHash }));
   }
   async createRenderJob(job: RenderJobRecord): Promise<CreateRenderJobResult> {
     await tick();

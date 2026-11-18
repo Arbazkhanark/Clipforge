@@ -116,6 +116,12 @@ export class S3MediaStorage implements MediaStorage {
     catch { throw new Error("Private storage could not remove the unreferenced upload."); }
   }
 
+  async deleteCommittedMediaObject(key: string): Promise<void> {
+    this.validate(key);
+    try { await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key })); }
+    catch { throw new Error("Private storage could not permanently remove the media file."); }
+  }
+
   async runWithCommittedFile<T>(key: string, work: (filePath: string) => Promise<T>): Promise<T> {
     return this.withDownloadedFile(key, work, "No such object.");
   }

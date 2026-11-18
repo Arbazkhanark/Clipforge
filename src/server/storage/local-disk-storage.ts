@@ -79,6 +79,7 @@ export class LocalDiskMediaStorage implements MediaStorage {
     return Readable.toWeb(createReadStream(target, range ? { start: range.start, end: range.end } : {})) as unknown as ReadableStream<Uint8Array>;
   }
   async deleteUnreferencedUpload(finalKey: string): Promise<void> { await rm(await this.resolveInside(finalKey, false), { force: true }); }
+  async deleteCommittedMediaObject(key: string): Promise<void> { await rm(await this.resolveInside(key, false), { force: true }); }
   async runWithCommittedFile<T>(key: string, work: (filePath: string) => Promise<T>): Promise<T> {
     const target = await this.resolveInside(key, false);
     if (!(await stat(target).then((s) => s.isFile(), () => false))) throw new Error("No such object.");
@@ -134,6 +135,7 @@ export class UnavailableDiskStorage implements MediaStorage {
   getPrivateMetadata(): Promise<null> { return this.reject(); }
   openRead(): Promise<ReadableStream<Uint8Array>> { return this.reject(); }
   deleteUnreferencedUpload(): Promise<void> { return this.reject(); }
+  deleteCommittedMediaObject(): Promise<void> { return this.reject(); }
   runWithCommittedFile<T>(): Promise<T> { return this.reject(); }
   importLocalFile(): Promise<number> { return this.reject(); }
   copyCommittedToStaging(): Promise<number> { return this.reject(); }

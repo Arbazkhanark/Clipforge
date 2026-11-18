@@ -15,13 +15,14 @@ import { requireUser, type MediaStorageDestination, type RequestContext } from "
 import { readCollectionListQuery, readCollectionVideoQuery, readMediaListQuery, type CollectionSort, type MediaListQuery } from "./library-query.ts";
 import { notFound } from "./errors.ts";
 import { describeStorage, type StorageDescription } from "./storage/media-storage.ts";
-import { computePreviewLayout, DEFAULT_EDITING_SETTINGS, isReservedTemplateName, parseEditingSettings, parseEditorQuery, trimDurationProblems, videoSettingsName, type EditingSettings, type PreviewLayout } from "../lib/domain/editing-settings.ts";
+import { computePreviewLayout, DEFAULT_EDITING_SETTINGS, isReservedTemplateName, parseEditingSettings, parseEditorQuery, toRenderSettings, trimDurationProblems, videoSettingsName, type EditingSettings, type PreviewLayout } from "../lib/domain/editing-settings.ts";
 import type { MaxResolution } from "../lib/render/ffmpeg-command.ts";
 import { buildPreflightReport } from "./preflight-service.ts";
 import { localDateKey, localDateOf } from "../lib/domain/schedule.ts";
 import type { CycleRecord, MediaVerificationState, Repository, RenderOutputRecord } from "./repository.ts";
+import { hashExportSettings } from "../lib/render/render-limits.ts";
 
-export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; /** "incomplete" until the verification job completes all mandatory checks. */ validation: "verified" | "incomplete" | "unknown"; hasThumbnail: boolean; width: number | null; height: number | null; createdAt?: Date | null; verification?: MediaVerificationState; }
+export interface MediaCard { id: string; title: string; kind: "video" | "image"; sizeBytes: number; durationMs: number | null; status: MediaAsset["status"]; /** "incomplete" until the verification job completes all mandatory checks. */ validation: "verified" | "incomplete" | "unknown"; hasThumbnail: boolean; width: number | null; height: number | null; createdAt?: Date | null; verification?: MediaVerificationState; collectionMemberships?: { id: string; name: string }[]; matchingTemplateName?: string | null; hasSavedEditorSettings?: boolean; templateDetailsAvailable?: boolean; renderedPreviewId?: string | null; canPlayPreview?: boolean; }
 const toMediaCard = (m: MediaAsset): MediaCard => ({ id: m.id, title: m.title ?? "Untitled", kind: m.kind ?? "video", sizeBytes: m.sizeBytes, durationMs: m.durationMs ?? null, status: m.status, validation: m.validation ?? "unknown", hasThumbnail: m.hasThumbnail === true, width: m.width ?? null, height: m.height ?? null, createdAt: m.createdAt ?? null });
 
 export interface UsageLine { used: number; limit: number; }
@@ -66,15 +67,28 @@ export async function getDashboardData(ctx: RequestContext, timeZone = "Asia/Kol
 }
 
 export const MEDIA_PAGE_SIZE = 24;
-export interface MediaLibraryData { items: MediaCard[]; total: number; page: number; pageCount: number; pageSize: number; search?: string; sort?: MediaListQuery["sort"]; kind?: "all" | "video" | "image"; filtered?: boolean; }
+export interface MediaLibraryData { items: MediaCard[]; total: number; page: number; pageCount: number; pageSize: number; search?: string; sort?: MediaListQuery["sort"]; kind?: "all" | "video" | "image"; filtered?: boolean; templates?: { id: string; name: string }[]; collections?: { id: string; name: string }[]; }
 
 export async function getMediaLibrary(ctx: RequestContext, requested: unknown): Promise<MediaLibraryData> {
   const userId = requireUser(ctx);
   const query = readMediaListQuery(typeof requested === "object" && requested !== null ? requested : { page: requested });
   const { items, total } = await ctx.repo.listMediaForOwner(userId, { limit: MEDIA_PAGE_SIZE, offset: (query.page - 1) * MEDIA_PAGE_SIZE, ...(query.kind ? { kind: query.kind } : {}), ...(query.search ? { search: query.search } : {}), sort: query.sort });
-  const verifications = await ctx.repo.listMediaVerificationsForOwner(userId, items.map((item) => item.id));
+  const [verifications, ownedCollections, storedTemplates] = await Promise.all([
+    ctx.repo.listMediaVerificationsForOwner(userId, items.map((item) => item.id)),
+    ctx.repo.listCollectionsForOwner(userId),
+    ctx.repo.listTemplatesForOwner(userId),
+  ]);
   const verificationById = new Map(verifications.map((state) => [state.mediaId, state]));
-  return { items: items.map((item) => ({ ...toMediaCard(item), verification: verificationById.get(item.id) })), total, page: query.page, pageSize: MEDIA_PAGE_SIZE, pageCount: Math.max(1, Math.ceil(total / MEDIA_PAGE_SIZE)), search: query.search, sort: query.sort, kind: query.kind ?? "all", filtered: query.filtered };
+  const namedTemplates = storedTemplates.filter((template) => !isReservedTemplateName(template.name));
+  const templates = namedTemplates.map(({ id, name }) => ({ id, name }));
+  const settingsByVideo = new Map(storedTemplates.filter((template) => isReservedTemplateName(template.name)).map((template) => [template.name.slice(2), template.settings]));
+  const collections = ownedCollections.map((collection) => ({ id: collection.id, name: collection.name ?? "Untitled collection" }));
+  return { items: items.map((item) => {
+    const savedSettings = settingsByVideo.get(item.id);
+    const savedParsed = savedSettings === undefined ? null : parseEditingSettings(savedSettings);
+    const matchedTemplate = savedParsed?.ok ? namedTemplates.find((template) => { const parsed = parseEditingSettings(template.settings); return parsed.ok && JSON.stringify(parsed.settings) === JSON.stringify(savedParsed.settings); }) : null;
+    return { ...toMediaCard(item), verification: verificationById.get(item.id), collectionMemberships: ownedCollections.filter((collection) => collection.mediaIds.includes(item.id)).map((collection) => ({ id: collection.id, name: collection.name ?? "Untitled collection" })), matchingTemplateName: matchedTemplate?.name ?? null, hasSavedEditorSettings: savedSettings !== undefined };
+  }), total, page: query.page, pageSize: MEDIA_PAGE_SIZE, pageCount: Math.max(1, Math.ceil(total / MEDIA_PAGE_SIZE)), search: query.search, sort: query.sort, kind: query.kind ?? "all", filtered: query.filtered, templates, collections };
 }
 
 export interface CollectionCard { id: string; name: string; description: string | null; videoCount: number; visibility: CollectionVisibility; archived: boolean; sharedByAnotherUser: boolean; capabilities: Capability[]; createdAt: Date | null; previewMediaId: string | null; }
@@ -128,7 +142,7 @@ export async function getCollectionsOverview(ctx: RequestContext, requested?: un
   };
 }
 
-export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; itemSettings: { mediaAssetId: string; captionText: string; coverMediaId: string | null; version: number }[]; settingsVersion: number; captionMode: "individual" | "shared"; sharedCaptionText: string; coverMode: "individual" | "shared"; sharedCoverMediaId: string | null; coverChoices: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canRequestImport?: boolean; canDownload: boolean; isOwner: boolean }; importJobs?: { id: string; sourceMediaId: string; resultMediaAssetId: string; status: import("./repository.ts").MediaImportStatus; failureReason: string | null; createdAt: Date; updatedAt: Date }[]; pendingAccessRequests?: { id: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[]; shareLinks?: import("./repository.ts").CollectionShareLinkSummary[]; sharingManagement?: { grants: { granteeId: string; capabilities: Capability[]; status: "active" | "revoked"; expiresAt: Date | null; grantedById: string | null }[]; activeRecipients: number; recipientLimit: number; expiringGrants: boolean; delegatedManagement: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
+export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; itemSettings: { mediaAssetId: string; captionText: string; coverMediaId: string | null; version: number }[]; settingsVersion: number; captionMode: "individual" | "shared"; sharedCaptionText: string; coverMode: "individual" | "shared"; sharedCoverMediaId: string | null; coverChoices: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canRequestImport?: boolean; canDownload: boolean; canManage?: boolean; isOwner: boolean }; importJobs?: { id: string; sourceMediaId: string; resultMediaAssetId: string; status: import("./repository.ts").MediaImportStatus; failureReason: string | null; createdAt: Date; updatedAt: Date }[]; pendingAccessRequests?: { id: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[]; shareLinks?: import("./repository.ts").CollectionShareLinkSummary[]; sharingManagement?: { grants: { granteeId: string; capabilities: Capability[]; status: "active" | "revoked"; expiresAt: Date | null; grantedById: string | null }[]; activeRecipients: number; recipientLimit: number; expiringGrants: boolean; delegatedManagement: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
 
 const COLLECTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -159,6 +173,51 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
   }
   const members = (await ctx.repo.getMediaByIds(collection.mediaIds)).filter((m) => m.status !== "deleted");
   const media = members.filter((m) => videoQuery.search.length === 0 || mediaMatchesSearch(m, videoQuery.search)).sort((a, b) => compareMedia(videoQuery.sort, a, b));
+  let collectionVideos = media.map((item) => ({ ...toMediaCard(item), canPlayPreview: item.ownerId === userId || capabilities.has("download"), templateDetailsAvailable: collection.ownerId === userId && item.ownerId === userId }));
+  if (collection.ownerId === userId) {
+    const ownedVideoIds = media.filter((item) => item.ownerId === userId && (item.kind ?? "video") === "video").map((item) => item.id);
+    if (ownedVideoIds.length > 0) {
+      const [storedTemplates, planId, renderedOutputs] = await Promise.all([
+        ctx.repo.listTemplatesForOwner(userId),
+        ctx.repo.getPlanIdForUser(userId, ctx.now),
+        ctx.repo.listRenderOutputPreviewsForOwner(userId, ownedVideoIds),
+      ]);
+      const namedTemplates = storedTemplates.filter((template) => !isReservedTemplateName(template.name));
+      const settingsByVideo = new Map(storedTemplates.filter((template) => isReservedTemplateName(template.name)).map((template) => [template.name.slice(2), template.settings]));
+      const plan = getPlan(planId);
+      const outputBySettings = new Map(renderedOutputs.map((output) => [`${output.sourceMediaId}:${output.settingsHash}`, output.id]));
+      collectionVideos = media.map((item) => {
+        const canPlayPreview = item.ownerId === userId || capabilities.has("download");
+        const card = { ...toMediaCard(item), canPlayPreview, templateDetailsAvailable: true };
+        if ((item.kind ?? "video") !== "video" || item.ownerId !== userId) return card;
+        const rawSettings = settingsByVideo.get(item.id);
+        if (rawSettings === undefined) return card;
+        const parsedSettings = parseEditingSettings(rawSettings);
+        if (!parsedSettings.ok) return { ...card, hasSavedEditorSettings: true, matchingTemplateName: null, renderedPreviewId: null };
+        const matchedTemplate = namedTemplates.find((template) => {
+          const parsed = parseEditingSettings(template.settings);
+          return parsed.ok && JSON.stringify(parsed.settings) === JSON.stringify(parsedSettings.settings);
+        });
+        const durationSeconds = (item.durationMs ?? 0) / 1000;
+        const normalizedSettings = parsedSettings.settings.trim.startSeconds === 0 && parsedSettings.settings.trim.endSeconds === durationSeconds
+          ? { ...parsedSettings.settings, trim: { startSeconds: 0, endSeconds: null } }
+          : parsedSettings.settings;
+        const settingsHash = hashExportSettings(
+          item.id,
+          toRenderSettings(normalizedSettings, plan.features.maxResolution),
+          parsedSettings.settings.logo?.mediaId ?? null,
+          parsedSettings.settings.background.kind === "image" ? parsedSettings.settings.background.mediaId : null,
+        );
+        return {
+          ...card,
+          hasSavedEditorSettings: true,
+          matchingTemplateName: matchedTemplate?.name ?? null,
+          renderedPreviewId: outputBySettings.get(`${item.id}:${settingsHash}`) ?? null,
+          canPlayPreview,
+        };
+      });
+    }
+  }
   const ownCycles = capabilities.has("use_in_cycle") ? await ctx.repo.listCyclesForOwner(userId) : [];
   const library = collection.ownerId === userId ? await ctx.repo.listMediaForOwner(userId, { limit: 200, offset: 0, sort: "name" }) : { items: [], total: 0 };
   const coverChoices = library.items.filter((item) => item.kind === "image" && item.status === "active").map(toMediaCard);
@@ -177,13 +236,13 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
     coverMode: collection.ownerId === userId ? collection.coverMode ?? "individual" : "individual",
     sharedCoverMediaId: collection.ownerId === userId ? collection.sharedCoverMediaId ?? null : null,
     coverChoices,
-    collection: await toCollectionCard(ctx, userId, collection), videos: media.map(toMediaCard), memberIds: members.map((m) => m.id),
+    collection: await toCollectionCard(ctx, userId, collection), videos: collectionVideos, memberIds: members.map((m) => m.id),
     videoSearch: videoQuery.search, videoSort: videoQuery.sort, videoFiltered: videoQuery.filtered,
-    permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canDownload: capabilities.has("download"), isOwner: collection.ownerId === userId },
+    permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canDownload: capabilities.has("download"), canManage: capabilities.has("manage"), isOwner: collection.ownerId === userId },
     ...(sharingManagement ? { sharingManagement } : {}),
     ...(pendingAccessRequests ? { pendingAccessRequests } : {}),
     ...(shareLinks ? { shareLinks } : {}),
-    ...(collection.ownerId !== userId ? { importJobs, permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canRequestImport: directImport, canDownload: capabilities.has("download"), isOwner: false } } : {}),
+    ...(collection.ownerId !== userId ? { importJobs, permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canRequestImport: directImport, canDownload: capabilities.has("download"), canManage: capabilities.has("manage"), isOwner: false } } : {}),
   };
 }
 
@@ -209,7 +268,7 @@ export async function getSharedCollectionDetail(ctx: RequestContext, rawToken: s
   return {
     collection: collectionCard, videos: videos.map(toMediaCard), memberIds: members.map((media) => media.id),
     itemSettings: [], settingsVersion: 1, captionMode: "individual", sharedCaptionText: "", coverMode: "individual", sharedCoverMediaId: null, coverChoices: [],
-    permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canRequestImport: false, canDownload: capabilities.has("download"), isOwner: false },
+    permissions: { canUseInCycle: capabilities.has("use_in_cycle"), canImport: capabilities.has("import_copy"), canRequestImport: false, canDownload: capabilities.has("download"), canManage: false, isOwner: false },
     cycleChoices: ownCycles.filter((cycle) => cycle.status === "draft" || cycle.status === "running" || cycle.status === "paused").map((cycle) => ({ id: cycle.id, name: cycle.name })),
     libraryChoices: [], videoSearch: videoQuery.search, videoSort: videoQuery.sort, videoFiltered: videoQuery.filtered,
   };

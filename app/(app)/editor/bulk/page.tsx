@@ -8,6 +8,7 @@ import { getEditorPageData } from "../../../../src/server/queries.ts";
 import { notFound } from "../../../../src/server/errors.ts";
 import { getPlan } from "../../../../src/lib/billing/catalog.ts";
 import { requireCustomerPage } from "../../../../src/server/auth/customer-page.ts";
+import { DEFAULT_EDITING_SETTINGS, isReservedTemplateName, parseEditingSettings, videoSettingsName } from "../../../../src/lib/domain/editing-settings.ts";
 
 export const metadata = { title: "Bulk edit" };
 export const dynamic = "force-dynamic";
@@ -28,18 +29,28 @@ export default async function BulkPage(props: { searchParams?: Promise<Search> }
       if (!draft || draft.ownerId !== userId) throw notFound("Bulk edit");
       return { kind: "draft" as const, draft };
     }
+    const storedTemplates = await ctx.repo.listTemplatesForOwner(userId);
     const videos = [];
     for (const id of idList(search?.["media"])) {
       const media = await ctx.repo.getMedia(id);
-      if (media && media.ownerId === userId && media.status === "active" && (media.kind ?? "video") === "video") videos.push({ id: media.id, title: media.title ?? "Untitled", kind: "video" as const, sizeBytes: media.sizeBytes, durationMs: media.durationMs ?? null, status: media.status, validation: media.validation ?? "unknown" as const, hasThumbnail: media.hasThumbnail === true, width: media.width ?? null, height: media.height ?? null });
+      if (media && media.ownerId === userId && media.status === "active" && (media.kind ?? "video") === "video") {
+        const savedRow = storedTemplates.find((template) => template.name === videoSettingsName(media.id));
+        const saved = savedRow ? parseEditingSettings(savedRow.settings) : null;
+        videos.push({ id: media.id, title: media.title ?? "Untitled", kind: "video" as const, sizeBytes: media.sizeBytes, durationMs: media.durationMs ?? null, status: media.status, validation: media.validation ?? "unknown" as const, hasThumbnail: media.hasThumbnail === true, width: media.width ?? null, height: media.height ?? null, settings: saved?.ok ? saved.settings : DEFAULT_EDITING_SETTINGS });
+      }
     }
-    return { kind: "form" as const, videos, images: editor.logoChoices, templates: editor.templates, batchSize: plan.limits.batchSize };
+    const templates = editor.templates.map((template) => {
+      const stored = storedTemplates.find((entry) => entry.id === template.id && !isReservedTemplateName(entry.name));
+      const parsed = stored ? parseEditingSettings(stored.settings) : null;
+      return { ...template, ...(parsed?.ok ? { settings: parsed.settings } : {}) };
+    });
+    return { kind: "form" as const, videos, images: editor.logoChoices, templates, batchSize: plan.limits.batchSize, maxResolution: editor.maxResolution };
   });
   if (!result.ok) return <ErrorState error={result.error} />;
   return (
     <>
       <FlashMessage flash={parseFlash(search)} />
-      {result.data.kind === "draft" ? <BulkConfirmation draft={result.data.draft} /> : result.data.videos.length === 0 ? <p>Choose videos in the <a href="/media">media library</a> first. Images are not edited here.</p> : <BulkForm videos={result.data.videos} images={result.data.images} templates={result.data.templates} batchSize={result.data.batchSize} />}
+      {result.data.kind === "draft" ? <BulkConfirmation draft={result.data.draft} /> : result.data.videos.length === 0 ? <main className="bulk-editor-page"><header className="bulk-editor-header"><a className="bulk-editor-back" href="/media">← Media library</a><p className="bulk-editor-eyebrow">CLIPFORGE STUDIO · BATCH EDIT</p><h1>Choose videos to edit</h1><p>Select videos from your Media Library first. Images cannot be edited here.</p></header><section className="bulk-no-templates"><strong>No eligible videos selected</strong><p><a href="/media">Open the Media Library</a>, select one or more of your active videos, then choose Bulk edit.</p></section></main> : <BulkForm videos={result.data.videos} images={result.data.images} templates={result.data.templates} batchSize={result.data.batchSize} maxResolution={result.data.maxResolution} />}
     </>
   );
 }

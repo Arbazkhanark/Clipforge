@@ -287,6 +287,11 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     assert.deepEqual(updated?.mediaIds, ["m2", "m1"]);
     assert.equal(await h.repo.replaceCollectionMedia("c-new", ["m1", "m2"]), true);
     assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2"]);
+    await h.seedMedia(media("m3", "owner"));
+    assert.equal(await h.repo.addOwnedMediaToCollection({ collectionId: "c-new", mediaAssetId: "m3", ownerId: "owner", actorId: "owner", now: T0 }), "added");
+    assert.equal(await h.repo.addOwnedMediaToCollection({ collectionId: "c-new", mediaAssetId: "m3", ownerId: "owner", actorId: "owner", now: T0 }), "existing");
+    assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2", "m3"]);
+    assert.equal(await h.repo.addOwnedMediaToCollection({ collectionId: "c-new", mediaAssetId: "m3", ownerId: "eve", actorId: "eve", now: T0 }), "not_found");
     assert.equal(await h.repo.replaceCollectionMedia("c-new", ["m1", "m2"]), true);
     assert.equal(await h.repo.replaceCollectionMedia("c-new", ["m1", "m1"]), false);
     assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2"]);

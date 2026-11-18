@@ -62,3 +62,31 @@ export async function saveCurrentVideoSettings(ctx: RequestContext, rawInput: un
   await ctx.repo.appendAudit({ actorId: userId, action: "editor.saved", entityType: "MediaAsset", entityId: mediaId, metadata: { aspect: parsed.settings.aspect } });
   return { mediaId };
 }
+
+/** Copies an owner's named template to one owned video's saved editor settings; source media stays untouched. */
+export async function applyEditingTemplateToVideo(ctx: RequestContext, rawInput: unknown): Promise<{ mediaId: string; templateId: string }> {
+  const userId = requireUser(ctx); const problems = new Problems(); const input = readObject(rawInput, problems);
+  if (Object.keys(input).some((key) => key !== "mediaId" && key !== "templateId")) problems.add("The request contains unsupported fields.");
+  const mediaId = readText(input, "mediaId", problems, { min: 1, max: 64 }); const templateId = readText(input, "templateId", problems, { min: 1, max: 64 });
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(mediaId) || !/^[A-Za-z0-9_-]{1,64}$/.test(templateId)) problems.add("Choose a video and a saved template.");
+  problems.throwIfAny();
+  const media = await ctx.repo.getMedia(mediaId);
+  if (!media || media.ownerId !== userId || media.status !== "active" || (media.kind ?? "video") !== "video") throw notFound("Video");
+  const template = (await ctx.repo.listTemplatesForOwner(userId)).find((item) => item.id === templateId && !isReservedTemplateName(item.name));
+  if (!template) throw notFound("Template");
+  const parsed = parseEditingSettings(template.settings);
+  if (!parsed.ok) throw validationFailed(["This saved template is no longer valid."]);
+  const trimProblems = trimDurationProblems(parsed.settings.trim, (media.durationMs ?? 0) / 1000);
+  if (trimProblems.length > 0) throw validationFailed(trimProblems);
+  if (parsed.settings.logo) {
+    const logo = await ctx.repo.getMedia(parsed.settings.logo.mediaId);
+    if (!logo || logo.ownerId !== userId || logo.status !== "active" || logo.kind !== "image") throw validationFailed(["The template logo is no longer available in your library."]);
+  }
+  if (parsed.settings.background.kind === "image") {
+    const image = await ctx.repo.getMedia(parsed.settings.background.mediaId);
+    if (!image || image.ownerId !== userId || image.status !== "active" || image.kind !== "image") throw validationFailed(["The template background image is no longer available in your library."]);
+  }
+  await ctx.repo.saveVideoSettings({ id: ctx.newId(), ownerId: userId, name: videoSettingsName(mediaId), settings: parsed.settings, createdAt: ctx.now });
+  await ctx.repo.appendAudit({ actorId: userId, action: "editor.template_applied", entityType: "MediaAsset", entityId: mediaId, metadata: { templateId } });
+  return { mediaId, templateId };
+}
