@@ -2457,6 +2457,14 @@ body.clipforge-public.clipforge-dark:has(.media-page) {
 }
 
 .media-upload-storage-note { overflow-wrap: anywhere; }
+.upload-collection-note { padding: .55rem .7rem; border-radius: .65rem; background: var(--media-accent-soft); color: var(--media-text) !important; }
+.collection-direct-upload { margin: 1rem 0 1.5rem; padding: 1rem; border: 1px solid var(--media-border); border-radius: .9rem; background: var(--media-card); }
+.collection-direct-upload > h3 { margin: 0; color: var(--media-text); font-size: 1rem; }
+.collection-direct-upload > p { margin: .35rem 0 .8rem; color: var(--media-muted); font-size: .85rem; }
+.media-bulk-collection { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; padding-top: .65rem; border-top: 1px solid var(--media-border); }
+.media-bulk-collection label { color: var(--media-text); font-weight: 650; }
+.media-bulk-collection select { min-width: min(100%, 220px); }
+.media-bulk-collection [role="status"] { flex-basis: 100%; margin: 0; color: var(--media-muted); }
 .media-upload-storage-note strong { color: var(--media-text); }
 .media-upload-form { display: grid; gap: .8rem; }
 .media-storage-info { display: grid; gap: .75rem; padding: .85rem 1rem; border: 1px solid var(--media-border); border-radius: .75rem; background: var(--media-bg); }
@@ -7965,3 +7973,25 @@ body.clipforge-dark .collection-video-source-label { color: var(--muted, #b9aaa0
   .bulk-form-footer button { flex: 1; }
 }
 @media (prefers-reduced-motion: reduce) { .collection-detail-actions .collection-primary-button { transition: none !important; } }
+
+.edited-retention { display: grid; gap: 1rem; margin-top: 1.25rem; padding: 1.25rem; border: 1px solid var(--line, #e8d9ca); border-radius: 1rem; background: var(--surface, #fffdfa); }
+.edited-retention-heading { display: flex; align-items: flex-start; gap: .9rem; }
+.edited-retention-heading h2 { margin: .15rem 0 .35rem; font-size: clamp(1.05rem, 2vw, 1.35rem); line-height: 1.25; }
+.edited-retention-heading p:last-child, .edited-retention-confirm p { margin: .25rem 0; color: var(--muted, #71665d); }
+.edited-retention-mark { display: grid; flex: 0 0 2.25rem; height: 2.25rem; place-items: center; border-radius: .75rem; color: #246b4b; background: #e5f3eb; font-weight: 800; }
+.edited-retention-actions { display: flex; flex-wrap: wrap; align-items: stretch; gap: .75rem; }
+.edited-retention-actions button, .edited-retention-secondary, .edited-retention-danger, .edited-retention-recommended { min-height: 2.9rem; padding: .7rem 1rem; border: 1px solid var(--line, #e8d9ca); border-radius: .75rem; font: inherit; font-weight: 700; cursor: pointer; }
+.edited-retention-secondary { color: var(--foreground, #29231f); background: var(--surface, #fffdfa); }
+.edited-retention-recommended { display: grid; gap: .15rem; border-color: #d84b24; color: #fff; background: linear-gradient(110deg, #ff8745, #c9361d); text-align: left; }
+.edited-retention-recommended-label { font-size: .78rem; font-weight: 500; opacity: .92; }
+.edited-retention-danger { border-color: #a92f24; color: #fff; background: #a92f24; }
+.edited-retention-confirm { display: grid; gap: .65rem; padding: 1rem; border: 1px solid #df927e; border-radius: .8rem; background: color-mix(in srgb, #fff4ef 80%, var(--surface, #fffdfa)); }
+.edited-retention-confirm h3 { margin: 0; }
+.edited-retention-confirm ul { max-height: 10rem; overflow: auto; margin: 0; padding-left: 1.3rem; }
+.edited-retention-error { color: #a92f24; }
+.edited-retention-results { display: grid; gap: .5rem; }
+.edited-retention-results p { margin: 0; padding: .65rem .8rem; border-radius: .65rem; background: #f4f0e9; }
+.edited-retention-results p[data-status="blocked"] { color: #9a3825; background: #fff0eb; }
+.edited-retention button:disabled { cursor: wait; opacity: .65; }
+@media (max-width: 600px) { .edited-retention-actions { display: grid; } .edited-retention-actions button { width: 100%; } }
+@media (prefers-reduced-motion: reduce) { .edited-retention *, .edited-retention *::before, .edited-retention *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }

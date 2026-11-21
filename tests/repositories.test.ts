@@ -61,14 +61,22 @@ test("fake Prisma bulk settings transaction rolls back on audit failure and seri
 
 test("cycle import unique conflict rolls back earlier order updates", async () => {
   const client = new FakePrismaClient(); const repo = new PrismaRepository(client);
+  await client.user.create({ data: { id: "bob", email: "bob@example.test" } });
+  for (const id of ["cycle-video-first", "cycle-video-existing"]) {
+    await client.mediaAsset.create({ data: mediaToRow(makeMedia({ id, ownerId: "bob", kind: "video" }), { storageKey: `key/${id}`, thumbnailKey: null }) });
+  }
+  await client.videoCollection.create({ data: { id: "cycle-import-source", ownerId: "bob", name: "Cycle source", description: null, visibility: "private", archived: false, captionMode: "individual", sharedCaptionText: null, coverMode: "individual", sharedCoverMediaId: null, settingsVersion: 1 } });
+  for (const [position, mediaAssetId] of ["cycle-video-first", "cycle-video-existing"].entries()) {
+    await client.collectionItem.create({ data: { collectionId: "cycle-import-source", mediaAssetId, position, captionText: "", coverMediaId: null, version: 1 } });
+  }
   await repo.createCycle({ ...makeCycle({ id: "cycle-import-atomic", status: "draft", finalReviewConfirmed: false }), name: "Atomic import test", socialAccountId: "account-import-atomic" });
-  const first = makeItem({ id: "cycle-item-first", cycleId: "cycle-import-atomic", cycleOwnerId: "bob", sourceKind: "owned", sourceCollectionId: null, position: 1 });
-  const existing = makeItem({ id: "cycle-item-existing", cycleId: "cycle-import-atomic", cycleOwnerId: "bob", sourceKind: "owned", sourceCollectionId: null, position: 2 });
-  await repo.addCycleItems([first, existing]);
+  const first = makeItem({ id: "cycle-item-first", cycleId: "cycle-import-atomic", cycleOwnerId: "bob", mediaAssetId: "cycle-video-first", sourceKind: "owned", sourceCollectionId: "cycle-import-source", position: 1 });
+  const existing = makeItem({ id: "cycle-item-existing", cycleId: "cycle-import-atomic", cycleOwnerId: "bob", mediaAssetId: "cycle-video-existing", sourceKind: "owned", sourceCollectionId: "cycle-import-source", position: 2 });
+  await repo.addCycleItems([first, existing], { "cycle-import-source": 1 });
 
   const duplicate = { ...existing, position: 3, version: 2 };
   const reorderedFirst = { ...first, position: 2, version: 2 };
-  assert.equal(await repo.addCycleItems([duplicate], {}, [{ item: reorderedFirst, expectedVersion: 1 }]), false);
+  assert.equal(await repo.addCycleItems([duplicate], { "cycle-import-source": 1 }, [{ item: reorderedFirst, expectedVersion: 1 }]), false);
   assert.deepEqual((await repo.getCycleItems("cycle-import-atomic")).map(({ id, position, version }) => ({ id, position, version })), [
     { id: "cycle-item-first", position: 1, version: 1 },
     { id: "cycle-item-existing", position: 2, version: 1 },
@@ -97,10 +105,17 @@ function prismaHarness(): RepoHarness {
   return {
     repo,
     seedPlan: async (userId, planId) => { const providerSubscriptionId = `sub_${userId}`; await client.subscription.create({ data: { userId, planId, interval: "monthly", status: "active", razorpaySubscriptionId: providerSubscriptionId, currentPeriodEnd: new Date("2026-07-01T12:00:00Z"), lastEventAt: 0n, trialEndsAt: null } }); await client.paymentRecord.create({ data: { userId, providerPaymentId: `pay_${userId}`, providerSubscriptionId, amountPaise: 1, currency: "INR", status: "captured" } }); },
-    seedMedia: async (m, keys) => { await client.mediaAsset.create({ data: mediaToRow(m, keys ?? { storageKey: `k/${m.id}`, thumbnailKey: null }) }); },
+    seedMedia: async (m, keys) => {
+      if (!await client.user.findUnique({ where: { id: m.ownerId } })) await client.user.create({ data: { id: m.ownerId, email: `${m.ownerId}@example.test` } });
+      await client.mediaAsset.create({ data: mediaToRow(m, keys ?? { storageKey: `k/${m.id}`, thumbnailKey: null }) });
+    },
     seedCollection: async (c) => {
-      await client.videoCollection.create({ data: { id: c.id, ownerId: c.ownerId, name: c.name ?? c.id, description: c.description ?? null, visibility: c.visibility, archived: c.archived } });
-      for (const [position, mediaAssetId] of c.mediaIds.entries()) await client.collectionItem.create({ data: { collectionId: c.id, mediaAssetId, position } });
+      if (!await client.user.findUnique({ where: { id: c.ownerId } })) await client.user.create({ data: { id: c.ownerId, email: `${c.ownerId}@example.test` } });
+      await client.videoCollection.create({ data: { id: c.id, ownerId: c.ownerId, name: c.name ?? c.id, description: c.description ?? null, visibility: c.visibility, archived: c.archived, captionMode: c.captionMode ?? "individual", sharedCaptionText: c.sharedCaptionText ?? null, coverMode: c.coverMode ?? "individual", sharedCoverMediaId: c.sharedCoverMediaId ?? null, settingsVersion: c.settingsVersion ?? 1 } });
+      for (const [position, mediaAssetId] of c.mediaIds.entries()) {
+        const settings = c.items?.find((item) => item.mediaAssetId === mediaAssetId);
+        await client.collectionItem.create({ data: { collectionId: c.id, mediaAssetId, position, captionText: settings?.captionText ?? "", coverMediaId: settings?.coverMediaId ?? null, version: settings?.version ?? 1 } });
+      }
     },
     seedGrant: async (g) => { await client.collectionPermission.create({ data: grantToRow(g) }); },
     seedSocialAccount: async (a) => { await client.socialAccount.create({ data: { id: a.id, userId: a.userId, status: a.status, platform: "instagram", externalAccountId: a.id } }); },
@@ -292,14 +307,14 @@ test("the template-limit insert also takes the user-row lock inside ONE transact
   assert.deepEqual(calls, ["begin", "lock:true", "end"]);
 });
 
-test("every version-checked save is a single conditional UPDATE keyed by id AND version (never a read-then-write)", async () => {
+test("every version-checked save is a single conditional UPDATE keyed by id, version, and immutable cycle-item provenance", async () => {
   const client = new FakePrismaClient(); const seen: unknown[] = [];
   const original = client.cycleItem.updateMany.bind(client.cycleItem);
   client.cycleItem.updateMany = async (args) => { seen.push(args.where); return original(args); };
   client.cycleItem.update = async () => { throw new Error("must not use plain update for versioned saves"); };
   const repo = new PrismaRepository(client); await client.cycleItem.create({ data: itemToRow(makeItem({ id: "i1", version: 4 })) });
   await repo.saveCycleItemsIfVersionMatches([{ item: makeItem({ id: "i1", version: 5, captionText: "x" }), expectedVersion: 4 }]);
-  assert.deepEqual(seen, [{ id: "i1", version: 4 }]);
+  assert.deepEqual(seen, [{ id: "i1", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "media1", sourceKind: "shared_reference", sourceCollectionId: "col1", selectedRenderOutputId: null, version: 4 }]);
 });
 
 test("mappers: media, grants, collections and items round-trip; bigint sizes become numbers; missing display fields get safe defaults", () => {

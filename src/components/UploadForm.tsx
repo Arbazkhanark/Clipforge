@@ -33,7 +33,7 @@ function safeResponseError(xhr: XMLHttpRequest): { message: string; uncertain: b
   return { message: xhr.status >= 500 ? "The server could not confirm whether this file was saved. Check your library before retrying." : "This file could not be uploaded.", uncertain: xhr.status >= 500 };
 }
 
-function uploadOne(file: File, onProgress: (percent: number) => void): Promise<{ mediaId: string; storage: string }> {
+function uploadOne(file: File, onProgress: (percent: number) => void, collectionId?: string): Promise<{ mediaId: string; storage: string; collectionId?: string }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/forms/media-upload");
@@ -49,9 +49,10 @@ function uploadOne(file: File, onProgress: (percent: number) => void): Promise<{
         return;
       }
       try {
-        const body = JSON.parse(xhr.responseText) as { mediaId?: unknown; storage?: unknown; verificationStatus?: unknown };
+        const body = JSON.parse(xhr.responseText) as { mediaId?: unknown; storage?: unknown; verificationStatus?: unknown; collectionId?: unknown };
         if (typeof body.mediaId !== "string" || typeof body.storage !== "string" || body.verificationStatus !== "processing") throw new Error("invalid upload response");
-        resolve({ mediaId: body.mediaId, storage: body.storage });
+        if (collectionId && body.collectionId !== collectionId) throw new Error("collection association was not confirmed");
+        resolve({ mediaId: body.mediaId, storage: body.storage, ...(typeof body.collectionId === "string" ? { collectionId: body.collectionId } : {}) });
       } catch {
         reject(Object.assign(new Error("The server may have saved this file, but its result could not be confirmed. Check your library before retrying."), { uncertain: true }));
       }
@@ -60,6 +61,7 @@ function uploadOne(file: File, onProgress: (percent: number) => void): Promise<{
     xhr.addEventListener("abort", () => reject(Object.assign(new Error("The upload was interrupted. Check your library before retrying."), { uncertain: true })));
     const form = new FormData();
     form.append("file", file, file.name);
+    if (collectionId) form.append("collectionId", collectionId);
     xhr.send(form);
   });
 }
@@ -76,7 +78,7 @@ function storageProviderLabel(info: UploadInfo): string {
 }
 
 /** Reuses the existing, server-validated single-file endpoint with bounded client concurrency. */
-export function UploadForm({ info }: { info: UploadInfo }) {
+export function UploadForm({ info, collectionId, collectionName }: { info: UploadInfo; collectionId?: string; collectionName?: string }) {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [uploaded, setUploaded] = useState<UploadedItem[]>([]);
   const [dragActive, setDragActive] = useState(false);
@@ -124,7 +126,7 @@ export function UploadForm({ info }: { info: UploadInfo }) {
     let failed = 0;
     await runBoundedUploads(items, UPLOAD_CONCURRENCY, async (item) => {
       try {
-        const result = await uploadOne(item.file, (progress) => setQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, progress } : candidate)));
+        const result = await uploadOne(item.file, (progress) => setQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, progress } : candidate)), collectionId);
         const destinationConfirmed = result.storage === info.storageKind && info.destination !== null;
         setUploaded((current) => [...current, { id: item.id, name: item.file.name, mediaId: result.mediaId, storage: result.storage, destinationConfirmed, verification: { mediaId: result.mediaId, status: "processing", stage: "queued", completedStages: [], errorCode: null, errorMessage: null, attempts: 0, retryable: false, updatedAt: null, thumbnailStatus: "pending" } }]);
         setQueue((current) => current.filter((candidate) => candidate.id !== item.id));
@@ -149,6 +151,7 @@ export function UploadForm({ info }: { info: UploadInfo }) {
       <div className="media-upload-details">
         <h3 id="upload-heading">Upload your media</h3>
         <p>Drag and drop your videos or images here, or browse files from your device.</p>
+        {collectionId && <p className="upload-collection-note">Uploads will be added to <strong>{collectionName ?? "this collection"}</strong> after the media and verification job are saved together.</p>}
         <p className="media-upload-limits">MP4, MOV or WebM video · JPEG, PNG or WebP images · Up to {info.maxMegabytes} MB per file</p>
       </div>
 

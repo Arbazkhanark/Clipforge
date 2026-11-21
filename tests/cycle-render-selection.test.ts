@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRepository } from "../src/server/memory-repository.ts";
 import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
 import { FakePrismaClient } from "./helpers/fake-prisma.ts";
+import { itemToRow } from "../src/server/prisma/mappers.ts";
 import { makeCycle, makeItem, makeMedia, NOW } from "./helpers.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
 import { buildPreflightReport } from "../src/server/preflight-service.ts";
@@ -256,7 +257,7 @@ test("Prisma repository over fake client validates output relationships and maps
   const client = new FakePrismaClient();
   const repo = new PrismaRepository(client);
   await repo.createCycle({ ...makeCycle({ status: "draft" }), name: "Cycle", socialAccountId: "account1" });
-  await repo.addCycleItems([makeItem({ id: "item1", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "media1", sourceKind: "owned", sourceCollectionId: null })]);
+  await client.cycleItem.create({ data: itemToRow(makeItem({ id: "item1", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "media1", sourceKind: "owned", sourceCollectionId: null })) });
   const derivative = (id: string, ownerId: string, mediaAssetId: string) => client.mediaDerivative.create({ data: { id, ownerId, mediaAssetId, kind: "render", sizeBytes: 400n, storageKey: `render/${ownerId}/${id}`, settingsHash: id, createdAt: NOW } });
   await derivative("valid", "bob", "media1"); await derivative("wrong-owner", "mallory", "media1"); await derivative("wrong-source", "bob", "other-media");
   const base = { cycleId: "cycle1", itemId: "item1", ownerId: "bob", expectedVersion: 1 };

@@ -28,8 +28,10 @@ export function uploadRoute(runtime: () => Runtime = getRuntime): (request: Requ
       try { form = await request.formData(); } catch { throw new AppError(422, "validation_failed", "The upload could not be read."); }
       const file = form.get("file");
       if (!(file instanceof File)) throw new AppError(422, "validation_failed", "Choose a file to upload.");
-      const result = await uploadMedia(ctx, { filename: file.name, declaredMimeType: file.type, data: new Uint8Array(await file.arrayBuffer()) });
-      if (wantsHtml) return redirectResponse(buildFlashLocation("/media", "notice", result.validation === "verified" ? "upload_ok" : "upload_incomplete"));
+      const rawCollectionId = form.get("collectionId");
+      const collectionId = typeof rawCollectionId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(rawCollectionId) ? rawCollectionId : undefined;
+      const result = await uploadMedia(ctx, { filename: file.name, declaredMimeType: file.type, data: new Uint8Array(await file.arrayBuffer()), ...(rawCollectionId ? { collectionId: rawCollectionId } : {}) });
+      if (wantsHtml) return redirectResponse(buildFlashLocation(result.collectionId ? `/collections/${result.collectionId}` : "/media", "notice", result.validation === "verified" ? "upload_ok" : "upload_incomplete"));
       return Response.json(result, { headers: { "Cache-Control": "no-store" } });
     } catch (error) {
       if (wantsHtml) return redirectResponse(buildFlashLocation("/media", "error", flashCodeForError(error)));

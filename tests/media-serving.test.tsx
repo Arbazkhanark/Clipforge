@@ -209,6 +209,53 @@ test("ROUTE: GET /api/media/file works end to end; cross-site, bad ids and signe
   const body = await denied.json() as { error: { code: string } }; assert.equal(body.error.code, "not_found"); assert.equal(denied.headers.get("cache-control"), "no-store");
 });
 
+test("ROUTE: unexpected storage failure logs only safe diagnostics and keeps the HTTP 500 generic", async () => {
+  const { repo, storage, ctxFor } = setup();
+  const sensitiveMessage = "secret-token signed-url https://private.example/key media/owner/m1 uploaded-name.mp4";
+  const failingStorage = new Proxy(storage, {
+    get(target, property) {
+      if (property === "statSize") return async () => { throw Object.assign(new Error(sensitiveMessage), { name: "AccessDenied", code: "AccessDenied", $metadata: { httpStatusCode: 403 }, secret: "aws-secret" }); };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as MemoryMediaStorage;
+  const runtime = (userId: string | null): Runtime => ({ mode: "demo", repo, currentUserId: async () => userId, newId: () => "x", now: () => NOW, media: async () => ({ storage: failingStorage, probe: null, maxUploadBytes: 1e9 }) });
+  const lines: string[] = [];
+  const oldError = console.error;
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  try {
+    const response = await mediaFileRoute(() => runtime("owner"))(new Request("http://localhost:3000/api/media/file?id=m1&variant=thumbnail"));
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: { code: "internal_error", message: "Something went wrong on our side. Please try again." } });
+    const requestId = response.headers.get("x-request-id");
+    assert.match(requestId ?? "", /^[0-9a-f-]{36}$/i);
+    assert.equal(lines.length, 1);
+    const log = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.deepEqual(log, {
+      event: "media_file_serve_failed", requestId, variant: "thumbnail",
+      errorCategory: "unexpected_media_serve_failure", errorType: "exception",
+      errorName: "AccessDenied", errorCode: "AccessDenied", storageHttpStatus: 403,
+    });
+    assert.equal(lines.join(" ").includes(sensitiveMessage), false);
+    assert.doesNotMatch(lines.join(" "), /aws-secret|private\.example|media\/owner\/m1|uploaded-name\.mp4|secret-token/);
+  } finally { console.error = oldError; }
+});
+
+test("ROUTE: missing thumbnail remains a 404 and does not emit an unexpected-failure log", async () => {
+  const { repo, storage } = setup({ thumbnail: false });
+  const runtime: Runtime = { mode: "demo", repo, currentUserId: async () => "owner", newId: () => "x", now: () => NOW, media: async () => ({ storage, probe: null, maxUploadBytes: 1e9 }) };
+  const lines: string[] = [];
+  const oldError = console.error;
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  try {
+    const response = await mediaFileRoute(() => runtime)(new Request("http://localhost:3000/api/media/file?id=m1&variant=thumbnail"));
+    assert.equal(response.status, 404);
+    assert.equal((await response.json() as { error: { code: string } }).error.code, "not_found");
+    assert.equal(response.headers.has("x-request-id"), false);
+    assert.equal(lines.length, 0);
+  } finally { console.error = oldError; }
+});
+
 // ---------- thumbnails at upload ----------
 const needReal = { skip: !ffmpegAvailable || !ffprobeInstalled ? "ffmpeg/ffprobe not installed" : false };
 

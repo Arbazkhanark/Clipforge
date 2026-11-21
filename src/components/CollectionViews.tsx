@@ -294,6 +294,7 @@ import { CollectionCreateDialog } from "./CollectionCreateDialog.tsx";
 import { CollectionCaptionCoverEditor } from "./CollectionCaptionCoverEditor.tsx";
 import { CollectionVideoRemoveAction } from "./CollectionVideoRemoveAction.tsx";
 import { CollectionVideoPreview } from "./CollectionVideoPreview.tsx";
+import { UploadForm } from "./UploadForm.tsx";
 import {
   CAPABILITY_LABELS,
   VISIBILITY_LABELS,
@@ -1249,6 +1250,14 @@ function CollectionVideos({ detail }: { detail: CollectionDetail }) {
         description="Browse and manage the videos included in this collection."
         count={videos.length}
       />
+
+      {permissions.isOwner && !collection.archived && detail.uploadInfo && (
+        <div className="collection-direct-upload">
+          <h3>Upload directly to this collection</h3>
+          <p>Each uploaded file is added to your library and this collection in one confirmed save.</p>
+          <UploadForm info={detail.uploadInfo} collectionId={collection.id} collectionName={collection.name} />
+        </div>
+      )}
 
       <form
         method="get"

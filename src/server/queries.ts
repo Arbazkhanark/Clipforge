@@ -142,7 +142,7 @@ export async function getCollectionsOverview(ctx: RequestContext, requested?: un
   };
 }
 
-export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; itemSettings: { mediaAssetId: string; captionText: string; coverMediaId: string | null; version: number }[]; settingsVersion: number; captionMode: "individual" | "shared"; sharedCaptionText: string; coverMode: "individual" | "shared"; sharedCoverMediaId: string | null; coverChoices: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canRequestImport?: boolean; canDownload: boolean; canManage?: boolean; isOwner: boolean }; importJobs?: { id: string; sourceMediaId: string; resultMediaAssetId: string; status: import("./repository.ts").MediaImportStatus; failureReason: string | null; createdAt: Date; updatedAt: Date }[]; pendingAccessRequests?: { id: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[]; shareLinks?: import("./repository.ts").CollectionShareLinkSummary[]; sharingManagement?: { grants: { granteeId: string; capabilities: Capability[]; status: "active" | "revoked"; expiresAt: Date | null; grantedById: string | null }[]; activeRecipients: number; recipientLimit: number; expiringGrants: boolean; delegatedManagement: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
+export interface CollectionDetail { collection: CollectionCard; videos: MediaCard[]; memberIds: string[]; itemSettings: { mediaAssetId: string; captionText: string; coverMediaId: string | null; version: number }[]; settingsVersion: number; captionMode: "individual" | "shared"; sharedCaptionText: string; coverMode: "individual" | "shared"; sharedCoverMediaId: string | null; coverChoices: MediaCard[]; permissions: { canUseInCycle: boolean; canImport: boolean; canRequestImport?: boolean; canDownload: boolean; canManage?: boolean; isOwner: boolean }; uploadInfo?: UploadInfo; importJobs?: { id: string; sourceMediaId: string; resultMediaAssetId: string; status: import("./repository.ts").MediaImportStatus; failureReason: string | null; createdAt: Date; updatedAt: Date }[]; pendingAccessRequests?: { id: string; requesterId: string; requestedCapabilities: Capability[]; createdAt: Date }[]; shareLinks?: import("./repository.ts").CollectionShareLinkSummary[]; sharingManagement?: { grants: { granteeId: string; capabilities: Capability[]; status: "active" | "revoked"; expiresAt: Date | null; grantedById: string | null }[]; activeRecipients: number; recipientLimit: number; expiringGrants: boolean; delegatedManagement: boolean }; /** Your own cycles that can still receive videos (for the "add to cycle" form). */ cycleChoices: { id: string; name: string }[]; /** The owner's own files, used to choose collection membership. Empty for everyone else. */ libraryChoices: MediaCard[]; libraryTruncated?: boolean; videoSearch?: string; videoSort?: MediaListQuery["sort"]; videoFiltered?: boolean; }
 
 const COLLECTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -226,6 +226,7 @@ export async function getCollectionDetail(ctx: RequestContext, collectionId: str
     ? (await ctx.repo.listMediaImportJobsForOwner(userId)).filter((job) => job.sourceCollectionId === collection.id).map((job) => ({ id: job.id, sourceMediaId: job.sourceMediaId, resultMediaAssetId: job.resultMediaAssetId, status: job.status, failureReason: job.failureReason, createdAt: job.createdAt, updatedAt: job.updatedAt }))
     : [];
   return {
+    ...(collection.ownerId === userId ? { uploadInfo: getUploadInfo(ctx) } : {}),
     cycleChoices: ownCycles.filter((c) => c.status === "draft" || c.status === "running" || c.status === "paused").map((c) => ({ id: c.id, name: c.name })),
     libraryChoices: library.items.map(toMediaCard),
     libraryTruncated: library.total > library.items.length,
@@ -428,10 +429,19 @@ export async function getInstagramAccounts(ctx: RequestContext): Promise<Instagr
 }
 
 /** The user's own connected accounts for the "new cycle" form. External ids are never shown. */
-export async function getCycleCreationOptions(ctx: RequestContext): Promise<{ accounts: { id: string; label: string }[] }> {
+export async function getCycleCreationOptions(ctx: RequestContext): Promise<{ accounts: { id: string; label: string }[]; collections: { id: string; name: string; videoCount: number }[] }> {
   const userId = requireUser(ctx);
-  const accounts = await ctx.repo.listSocialAccountsForOwner(userId);
-  return { accounts: accounts.filter((a) => a.status === "connected").map((a, index) => ({ id: a.id, label: `Connected account ${index + 1}` })) };
+  const [accounts, owned, shared] = await Promise.all([ctx.repo.listSocialAccountsForOwner(userId), ctx.repo.listCollectionsForOwner(userId), ctx.repo.listCollectionsSharedWith(userId, ctx.now)]);
+  const collections = [...owned, ...shared].filter((collection) => !collection.archived);
+  // Shared permissions are stored separately; only expose shared collections with the actual capability.
+  const permitted = await Promise.all(collections.map(async (collection) => {
+    if (collection.ownerId === userId) return collection;
+    return getCollectionCapabilities(userId, collection, await ctx.repo.getGrants(collection.id), ctx.now).has("use_in_cycle") ? collection : null;
+  }));
+  return {
+    accounts: accounts.filter((a) => a.status === "connected").map((a, index) => ({ id: a.id, label: `Connected account ${index + 1}` })),
+    collections: permitted.flatMap((collection) => collection ? [{ id: collection.id, name: collection.name ?? "Untitled collection", videoCount: collection.mediaIds.length }] : []),
+  };
 }
 
 export interface MediaDetail { media: MediaCard; mimeType: string | null; addedAt: Date | null; status?: MediaAsset["status"]; deleteAfter?: Date | null; importedCopy?: boolean; }
@@ -445,6 +455,7 @@ export async function getMediaDetail(ctx: RequestContext, mediaId: string): Prom
 }
 
 export interface TemplateCard { id: string; name: string; summary: string; }
+export type EditedRetentionStatus = "available" | "queued" | "processing" | "deleted" | "failed" | "unavailable";
 export interface EditorPageData {
   /** The video being edited, or null (then the page lets you choose one). */
   source: MediaCard | null;
@@ -462,7 +473,7 @@ export interface EditorPageData {
   /** Where the settings on screen came from. A preview or template is not saved until the user saves or renders. */
   settingsSource: "saved" | "preview" | "template";
   /** Finished exports whose files were checked. */
-  exports: { id: string; sourceTitle: string; aspect: string; createdOn: string }[];
+  exports: { id: string; sourceMediaId: string; sourceTitle: string; aspect: string; createdOn: string; retentionStatus: EditedRetentionStatus; retentionMessage: string }[];
   /** The render started from this page, if it is still known in this process. */
   job: { id: string; status: "queued" | "processing" | "completed" | "failed"; message: string | null; outputId: string | null; refreshPath: string | null } | null;
 }
@@ -470,17 +481,38 @@ export interface EditorPageData {
 async function verifiedExports(ctx: RequestContext, userId: string): Promise<EditorPageData["exports"]> {
   const rows = await ctx.repo.listRenderOutputsForOwner(userId);
   const audits = await ctx.repo.listAuditsForEntities("MediaDerivative", rows.map((row) => row.id));
+  const renderJobs = await ctx.repo.listRenderJobsForOwner(userId);
   const ready: EditorPageData["exports"] = [];
   for (const row of rows) {
     const info = await ctx.repo.getRenderOutput(row.id);
     if (!info) continue;
-    if (ctx.media && !ctx.media.unavailable) {
-      const size = await ctx.media.storage.statSize(info.storageKey);
-      if (size !== info.sizeBytes) continue;
-    }
+    const completed = renderJobs.some((job) => job.status === "succeeded" && job.mediaAssetId === row.sourceMediaId && job.outputDerivativeId === row.id);
+    if (!completed || !ctx.media || ctx.media.unavailable) continue;
+    const size = await ctx.media.storage.statSize(info.storageKey);
+    if (size === null || size !== info.sizeBytes) continue;
     const source = await ctx.repo.getMedia(row.sourceMediaId);
+    if (!source || source.ownerId !== userId) continue;
     const aspect = audits.find((entry) => entry.entityId === row.id && entry.action === "render.completed")?.metadata?.["aspect"];
-    ready.push({ id: row.id, sourceTitle: source?.title ?? "Untitled video", aspect: typeof aspect === "string" ? aspect : "Saved export", createdOn: row.createdAt.toISOString().slice(0, 10) });
+    const cleanup = await ctx.repo.getMediaCleanupJobForOwner(userId, source.id);
+    const replacement = await ctx.repo.getEditedMediaReplacementForOwner(userId, source.id, row.id);
+    let retentionStatus: EditedRetentionStatus = source.status === "active" && source.validation === "verified" ? "available" : "unavailable";
+    let retentionMessage = retentionStatus === "available" ? "Original and edited versions are available. You can keep both or replace the original with the verified edit." : "This original is not eligible for replacement; keep the saved edited version.";
+    if (replacement && replacement.status !== "completed") {
+      retentionStatus = replacement.status === "copying" || replacement.status === "verifying" ? "processing" : replacement.status === "failed" || replacement.status === "blocked" ? "failed" : "queued";
+      retentionMessage = retentionStatus === "queued" ? "Edited replacement is queued. The original remains available." : retentionStatus === "processing" ? "Edited copy is being verified. The original remains available." : "Replacement could not be completed safely. The original and its collection memberships remain available.";
+    } else if (cleanup) {
+      retentionStatus = cleanup.status === "queued" ? "queued"
+        : cleanup.status === "running" ? "processing"
+          : cleanup.status === "succeeded" ? "deleted" : "failed";
+      retentionMessage = retentionStatus === "queued" ? "Replacement is complete. Original object cleanup is queued in private storage."
+        : retentionStatus === "processing" ? "Original storage cleanup is in progress."
+          : retentionStatus === "deleted" ? "Replacement is complete and original object cleanup has finished."
+            : "Original cleanup needs attention. No new deletion request was submitted.";
+    } else if (source.status === "deleted") {
+      retentionStatus = "unavailable";
+      retentionMessage = "Original is marked deleted; cleanup status is unavailable.";
+    }
+    ready.push({ id: row.id, sourceMediaId: source.id, sourceTitle: source.title ?? "Untitled video", aspect: typeof aspect === "string" ? aspect : "Saved export", createdOn: row.createdAt.toISOString().slice(0, 10), retentionStatus, retentionMessage });
   }
   return ready;
 }

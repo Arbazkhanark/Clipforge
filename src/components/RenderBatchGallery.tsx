@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { MediaThumbnail } from "./MediaThumbnail.tsx";
+import { EditedMediaRetentionChoice } from "./EditedMediaRetentionChoice.tsx";
 
 export type RenderBatchGalleryItem = {
   title: string;
@@ -91,6 +92,9 @@ export function RenderBatchGallery({ items }: { items: RenderBatchGalleryItem[] 
               </article>
             ))}
           </div>
+        )}
+        {finished === items.length && items.some((item) => item.status === "completed" && item.outputId) && (
+          <EditedMediaRetentionChoice items={items.filter((item): item is RenderBatchGalleryItem & { outputId: string } => item.status === "completed" && Boolean(item.outputId)).map(({ mediaId, outputId, title }) => ({ mediaId, outputId, title }))} />
         )}
       </section>
 

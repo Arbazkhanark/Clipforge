@@ -146,6 +146,7 @@ import { formatEditorZoomPercent } from "../lib/domain/editor-gestures.ts";
 import { EditorSession } from "./EditorSession.tsx";
 import { EditorVideoPreview } from "./EditorVideoPreview.tsx";
 import { Thumbnail } from "./MediaTable.tsx";
+import { EditedMediaRetentionChoice } from "./EditedMediaRetentionChoice.tsx";
 import type { EditorPageData } from "../server/queries.ts";
 
 const ASPECT_LABELS: Record<(typeof ASPECT_RATIOS)[number], string> = {
@@ -689,12 +690,15 @@ export function EditorView({ data }: { data: EditorPageData }) {
                   )}
                   {data.job.message && <p>{data.job.message}</p>}
                   {data.job.status === "completed" && data.job.outputId && (
-                    <a
-                      className="editor-primary-button"
-                      href={`/api/renders/file?id=${encodeURIComponent(data.job.outputId)}`}
-                    >
-                      Download export
-                    </a>
+                    <>
+                      <a
+                        className="editor-primary-button"
+                        href={`/api/renders/file?id=${encodeURIComponent(data.job.outputId)}`}
+                      >
+                        Download export
+                      </a>
+                      {data.source && <EditedMediaRetentionChoice items={[{ mediaId: data.source.id, outputId: data.job.outputId, title: data.source.title }]} />}
+                    </>
                   )}
                 </section>
               )}
@@ -766,6 +770,10 @@ export function EditorView({ data }: { data: EditorPageData }) {
                   <span>{item.aspect} · {item.createdOn}</span>
                 </div>
                 <a href={`/api/renders/file?id=${encodeURIComponent(item.id)}`}>Download ↓</a>
+                <EditedMediaRetentionChoice
+                  presentation="history"
+                  items={[{ mediaId: item.sourceMediaId, outputId: item.id, title: item.sourceTitle, retentionStatus: item.retentionStatus, retentionMessage: item.retentionMessage }]}
+                />
               </li>
             ))}
           </ul>

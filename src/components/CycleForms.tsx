@@ -3,16 +3,17 @@ import { CycleItemsTable } from "./CycleItemsTable.tsx";
 import { isEditableItem } from "../lib/domain/cycle-state.ts";
 import type { CycleDetail } from "../server/queries.ts";
 
-export function CreateCycleForm({ accounts }: { accounts: { id: string; label: string }[] }) {
+export function CreateCycleForm({ accounts, collections, preselectedCollectionId }: { accounts: { id: string; label: string }[]; collections: { id: string; name: string; videoCount: number }[]; preselectedCollectionId?: string }) {
   return (
     <section aria-labelledby="new-cycle-heading" className="cycles-create-panel">
-      <div className="cycles-create-copy"><p className="cycles-eyebrow">GET STARTED</p><h2 id="new-cycle-heading">Create a publishing cycle</h2><p>Choose a name and Instagram account. You can add videos and plan dates after the cycle is created. Nothing is published by creating a cycle.</p></div>
-      {accounts.length === 0 ? <div className="cycles-account-empty"><strong>No Instagram account is connected</strong><p>Connect an account from Instagram settings before creating a cycle. Live publishing is not configured here, so connecting an account does not send a Reel.</p><a className="cycles-secondary-link" href="/instagram">Open Instagram settings <span aria-hidden="true">→</span></a></div> : (
+      <div className="cycles-create-copy"><p className="cycles-eyebrow">GET STARTED</p><h2 id="new-cycle-heading">Create a publishing cycle</h2><p>Choose collections to build the cycle from. Videos and saved collection captions and covers are added automatically. Creating a cycle does not publish anything.</p></div>
+      {accounts.length === 0 ? <div className="cycles-account-empty"><strong>No Instagram account is connected</strong><p>Connect an account from Instagram settings before creating a cycle. Live publishing is not configured here, so connecting an account does not send a Reel.</p><a className="cycles-secondary-link" href="/instagram">Open Instagram settings <span aria-hidden="true">→</span></a></div> : collections.length === 0 ? <div className="cycles-account-empty"><strong>Create or access a collection first</strong><p>Publishing cycles are built from videos in collections. Standalone media cannot be added directly.</p><a className="cycles-secondary-link" href="/collections">Open collections <span aria-hidden="true">→</span></a></div> : (
         <form method="post" action="/api/forms/cycle-create" className="cycles-create-form">
           <label className="cycles-field">Cycle name<input type="text" name="name" required maxLength={100} placeholder="e.g. Weekly product tips" /></label>
           <label className="cycles-field">Instagram account<select name="socialAccountId" required>{accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}</select></label>
+          <fieldset className="cycles-collection-picker"><legend>Collections for this cycle</legend><p>Select one or more collections. Each eligible video is included once.</p>{collections.map((collection) => <label key={collection.id} className="cycles-collection-choice"><input type="checkbox" name="collectionIds" value={collection.id} defaultChecked={collection.id === preselectedCollectionId} /><span><strong>{collection.name}</strong><small>{collection.videoCount} {collection.videoCount === 1 ? "video" : "videos"}</small></span></label>)}</fieldset>
           <button className="cycles-primary-button" type="submit">Create cycle <span aria-hidden="true">→</span></button>
-          <p className="cycles-form-hint">You can review and schedule the videos next. No Reel is published at this step.</p>
+          <p className="cycles-form-hint">Only collection videos are included. You can review and schedule them next; no Reel is published at this step.</p>
         </form>
       )}
     </section>

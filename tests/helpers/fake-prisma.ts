@@ -128,7 +128,7 @@ class FakeDelegate implements ModelDelegate {
 
 export class FakePrismaClient implements PrismaClientLike {
   user = new FakeDelegate([["email"]]); session = new FakeDelegate([["tokenHash"]]); authToken = new FakeDelegate([["tokenHash"]]); googleIdentity = new FakeDelegate([["userId"], ["googleSub"]]);
-  mediaAsset = new FakeDelegate([["storageKey"]]); mediaDerivative = new FakeDelegate([["storageKey"], ["mediaAssetId", "ownerId", "kind", "settingsHash"], ["id", "ownerId", "mediaAssetId"]]); mediaImportJob = new FakeDelegate([["idempotencyKey"], ["resultMediaAssetId"]]); videoCollection = new FakeDelegate([]); collectionItem = new FakeDelegate([["collectionId", "mediaAssetId"]], { collectionId_mediaAssetId: ["collectionId", "mediaAssetId"] });
+  mediaAsset = new FakeDelegate([["storageKey"]]); mediaDerivative = new FakeDelegate([["storageKey"], ["mediaAssetId", "ownerId", "kind", "settingsHash"], ["id", "ownerId", "mediaAssetId"]]); mediaImportJob = new FakeDelegate([["idempotencyKey"], ["resultMediaAssetId"]]); editedMediaReplacement = new FakeDelegate([["idempotencyKey"], ["plannedReplacementMediaAssetId"], ["replacementMediaAssetId"], ["ownerId", "sourceMediaAssetId", "sourceDerivativeId"]]); videoCollection = new FakeDelegate([]); collectionItem = new FakeDelegate([["collectionId", "mediaAssetId"]], { collectionId_mediaAssetId: ["collectionId", "mediaAssetId"] });
   collectionPermission = new FakeDelegate([["collectionId", "granteeId"]], { collectionId_granteeId: ["collectionId", "granteeId"] }); collectionAccessRequest = new FakeDelegate([]); collectionShareLink = new FakeDelegate([["tokenHash"]]);
   publishingCycle = new FakeDelegate([]); cycleItem = new FakeDelegate([]); publishingJob = new FakeDelegate([["idempotencyKey"], ["cycleItemId", "attemptNumber"]]); processingJob = new FakeDelegate([["idempotencyKey"]]); captionRevision = new FakeDelegate([]); auditLog = new FakeDelegate([]); editingTemplate = new FakeDelegate([]);
   socialAccount = new FakeDelegate([]); subscription = new FakeDelegate([["userId"], ["razorpaySubscriptionId"]]); razorpaySubscriptionIntent = new FakeDelegate([["userId", "idempotencyKey"], ["providerSubscriptionId"], ["subscriptionId"]], { userId_idempotencyKey: ["userId", "idempotencyKey"] }); razorpaySubscriptionContinuation = new FakeDelegate([["subscriptionId", "cycleEnd"]], { subscriptionId_cycleEnd: ["subscriptionId", "cycleEnd"] }); manualPaymentIntent = new FakeDelegate([["userId", "idempotencyKey"], ["providerPaymentLinkId"]], { userId_idempotencyKey: ["userId", "idempotencyKey"] }); manualPlanAccess = new FakeDelegate([["intentId"], ["providerPaymentId"]]); webhookEvent = new FakeDelegate([["providerEventId"]]); paymentRecord = new FakeDelegate([["providerPaymentId"]]); usageRecord = new FakeDelegate([["idempotencyKey"]]);
@@ -178,6 +178,12 @@ export class FakePrismaClient implements PrismaClientLike {
       const ownerId = values[1];
       const cycle = typeof cycleId === "string" ? await this.publishingCycle.findUnique({ where: { id: cycleId } }) : null;
       if (cycle && (typeof ownerId !== "string" || cycle["ownerId"] === ownerId)) { this.lockLog.push(`cycle:${String(cycleId)}`); return [{ id: cycleId }]; }
+      return [];
+    }
+    if (strings.join("?").includes('FROM "VideoCollection"') && strings.join("?").includes("FOR SHARE")) {
+      const collectionId = values[0];
+      const collection = typeof collectionId === "string" ? await this.videoCollection.findUnique({ where: { id: collectionId } }) : null;
+      if (collection) { this.lockLog.push(`collection-share:${String(collectionId)}`); return [{ settingsVersion: collection["settingsVersion"] }]; }
       return [];
     }
     if (strings.join("?").includes('FROM "VideoCollection"') && strings.join("?").includes("FOR UPDATE")) {

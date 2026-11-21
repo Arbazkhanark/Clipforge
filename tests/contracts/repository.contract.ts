@@ -2,7 +2,7 @@
 // over real PostgreSQL later) must pass the very same tests.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Repository, CycleRecord, PersistedCycleSchedule, SocialAccountRecord } from "../../src/server/repository.ts";
+import type { Repository, CycleRecord, MediaVerificationJobRecord, PersistedCycleSchedule, SocialAccountRecord } from "../../src/server/repository.ts";
 import type { PlanId } from "../../src/lib/billing/catalog.ts";
 import { DEFAULT_EDITING_SETTINGS } from "../../src/lib/domain/editing-settings.ts";
 import type { CollectionPermissionGrant, CycleItem, MediaAsset, VideoCollection } from "../../src/lib/domain/types.ts";
@@ -122,14 +122,16 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
   t("cycle items: ordered by position; version-checked save changes only when the version matches; races have one winner; identity never changes", async (h) => {
     await h.seedCycle(cycle("cy1", "bob"));
     await h.seedCycle(cycle("cy2", "bob"));
-    await h.repo.addCycleItems([item("b", "cy1", { position: 2 }), item("a", "cy1", { position: 1, scheduledFor: new Date(T0.getTime() + day) })]);
-    await h.repo.addCycleItems([item("z", "cy2")]);
+    await h.seedItems([item("b", "cy1", { position: 2 }), item("a", "cy1", { position: 1, scheduledFor: new Date(T0.getTime() + day) }), item("z", "cy2")]);
     await h.repo.addCycleItems([]);
     const items = await h.repo.getCycleItems("cy1"); assert.deepEqual(items.map((i) => i.id), ["a", "b"]); assert.equal(items[0]!.scheduledFor!.getTime(), T0.getTime() + day);
     const a = items[0]!;
-    const edited = { ...a, captionText: "New", captionSource: "bulk" as const, version: 2, cycleId: "HACK", cycleOwnerId: "HACK" };
+    const edited = { ...a, captionText: "New", captionSource: "bulk" as const, version: 2 };
     assert.deepEqual(await h.repo.saveCycleItemsIfVersionMatches([{ item: edited, expectedVersion: 1 }]), [{ itemId: "a", saved: true }]);
     const saved = (await h.repo.getCycleItems("cy1"))[0]!; assert.deepEqual([saved.captionText, saved.version, saved.cycleId, saved.cycleOwnerId], ["New", 2, "cy1", "bob"]);
+    const identityChanged = { ...saved, mediaAssetId: "standalone-media", sourceCollectionId: null, version: 3 };
+    assert.deepEqual(await h.repo.saveCycleItemsIfVersionMatches([{ item: identityChanged, expectedVersion: 2 }]), [{ itemId: "a", saved: false }]);
+    assert.deepEqual([(await h.repo.getCycleItems("cy1"))[0]!.mediaAssetId, (await h.repo.getCycleItems("cy1"))[0]!.sourceCollectionId], [a.mediaAssetId, a.sourceCollectionId]);
     assert.deepEqual(await h.repo.saveCycleItemsIfVersionMatches([{ item: { ...a, captionText: "Stale", version: 2 }, expectedVersion: 1 }]), [{ itemId: "a", saved: false }]);
     assert.equal((await h.repo.getCycleItems("cy1"))[0]!.captionText, "New");
     assert.deepEqual(await h.repo.saveCycleItemsIfVersionMatches([{ item: { ...a, id: "ghost", version: 2 }, expectedVersion: 1 }]), [{ itemId: "ghost", saved: false }]);
@@ -142,7 +144,7 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
   t("stop cycle: owned status change and item cancellation are atomic and version checked", async (h) => {
     await h.repo.createCycle(cycle("stop-cycle", "bob"));
     const queued = item("stop-item", "stop-cycle", { cycleOwnerId: "bob", status: "scheduled", scheduledFor: new Date(T0.getTime() + day) });
-    await h.repo.addCycleItems([queued]);
+    await h.seedItems([queued]);
     const cancelled = { ...queued, status: "cancelled" as const, scheduledFor: null, version: 2 };
     assert.equal(await h.repo.stopCycle("stop-cycle", "eve", "draft", false, [{ item: cancelled, expectedVersion: 1 }]), false);
     assert.equal((await h.repo.getCycle("stop-cycle"))!.status, "draft");
@@ -155,7 +157,7 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
   t("cycle schedule: settings and assigned item times save atomically for the owner while draft; stale item/status/owner changes reject", async (h) => {
     await h.repo.createCycle(cycle("schedule-cycle", "bob"));
     const queued = item("schedule-item", "schedule-cycle", { cycleOwnerId: "bob" });
-    await h.repo.addCycleItems([queued]);
+    await h.seedItems([queued]);
     const scheduled = { ...queued, status: "scheduled" as const, scheduledFor: new Date("2026-06-02T03:30:00Z"), version: 2 };
     assert.equal(await h.repo.saveCycleSchedule("schedule-cycle", "bob", sampleSchedule, [{ item: scheduled, expectedVersion: 1 }]), true);
     assert.deepEqual((await h.repo.getCycle("schedule-cycle"))!.scheduleSettings, sampleSchedule);
@@ -176,7 +178,7 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     await h.seedMedia(media("m-src1", "bob"), { storageKey: "media/bob/src1", thumbnailKey: null });
     await h.seedMedia(media("m-src2", "bob"), { storageKey: "media/bob/src2", thumbnailKey: null });
     const item1 = item("ci-1", "output-cycle", { cycleOwnerId: "bob", mediaAssetId: "m-src1", version: 1 });
-    await h.repo.addCycleItems([item1]);
+    await h.seedItems([item1]);
     await h.repo.saveRenderOutput({ id: "deriv-1", ownerId: "bob", sourceMediaId: "m-src1", storageKey: "render/bob/deriv-1", sizeBytes: 500, settingsHash: "h1", createdAt: T0 }, 1_000_000);
     await h.repo.saveRenderOutput({ id: "deriv-wrong-owner", ownerId: "eve", sourceMediaId: "m-src1", storageKey: "render/eve/d", sizeBytes: 500, settingsHash: "h2", createdAt: T0 }, 1_000_000);
     await h.repo.saveRenderOutput({ id: "deriv-wrong-source", ownerId: "bob", sourceMediaId: "m-src2", storageKey: "render/bob/d2", sizeBytes: 500, settingsHash: "h3", createdAt: T0 }, 1_000_000);
@@ -281,9 +283,9 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     assert.equal(await h.repo.createCollection(collection("c-dup-media", "owner", ["m1", "m1"])), false);
     assert.equal(await h.repo.getCollection("c-dup-media"), null);
     assert.equal(await h.repo.createCollection(collection("c-missing-media", "owner", ["no-such-file"])), false);
-    assert.equal(await h.repo.updateCollection("c-new", { name: "Renamed", description: null, visibility: "link", archived: true }), true);
+    assert.equal(await h.repo.updateCollection("c-new", { name: "Renamed", description: null, visibility: "link", archived: false }), true);
     const updated = await h.repo.getCollection("c-new");
-    assert.equal(updated?.name, "Renamed"); assert.equal(updated?.description, undefined); assert.equal(updated?.visibility, "link"); assert.equal(updated?.archived, true);
+    assert.equal(updated?.name, "Renamed"); assert.equal(updated?.description, undefined); assert.equal(updated?.visibility, "link"); assert.equal(updated?.archived, false);
     assert.deepEqual(updated?.mediaIds, ["m2", "m1"]);
     assert.equal(await h.repo.replaceCollectionMedia("c-new", ["m1", "m2"]), true);
     assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2"]);
@@ -298,13 +300,115 @@ export function runRepositoryContract(name: string, factory: () => Promise<RepoH
     assert.equal(await h.repo.replaceCollectionMedia("c-new", ["missing-media"]), false);
     assert.deepEqual((await h.repo.getCollection("c-new"))?.mediaIds, ["m1", "m2"]);
     assert.equal(await h.repo.replaceCollectionMedia("missing", []), false);
+    assert.equal(await h.repo.replaceCollectionMedia("c-new", ["foreign-media"]), false);
     assert.equal(await h.repo.updateCollection("missing", { name: "x", description: null, visibility: "private", archived: false }), false);
     assert.equal(await h.repo.createCollection(collection("c-keep", "owner", ["m1"])), true);
+    assert.equal(await h.repo.updateCollection("c-new", { name: "Renamed", description: null, visibility: "link", archived: true }), true);
     assert.equal(await h.repo.deleteCollection("c-new"), true);
     assert.equal(await h.repo.getCollection("c-new"), null);
     assert.equal((await h.repo.getMedia("m1"))?.id, "m1");
     assert.deepEqual((await h.repo.getCollection("c-keep"))?.mediaIds, ["m1"]);
     assert.equal(await h.repo.deleteCollection("missing"), false);
+  });
+
+  t("collection-only cycle creation derives items from authorized memberships and rejects standalone items atomically", async (h) => {
+    await h.seedMedia(media("cycle-video", "owner"));
+    await h.seedCollection(collection("cycle-source", "owner", ["cycle-video"]));
+    const requestedCycle = cycle("collection-cycle", "owner");
+    const derivedItem = item("collection-cycle-item", requestedCycle.id, { cycleOwnerId: "owner", mediaAssetId: "cycle-video", sourceCollectionId: "cycle-source" });
+    assert.equal(await h.repo.createCycleWithCollectionItemsWithinLimit(requestedCycle, [derivedItem], 3, { "cycle-source": 1 }), true);
+    assert.deepEqual((await h.repo.getCycleItems(requestedCycle.id)).map((entry) => [entry.mediaAssetId, entry.sourceCollectionId]), [["cycle-video", "cycle-source"]]);
+
+    const directCycle = cycle("standalone-cycle", "owner");
+    const standaloneItem = item("standalone-item", directCycle.id, { cycleOwnerId: "owner", mediaAssetId: "cycle-video", sourceCollectionId: null });
+    assert.equal(await h.repo.createCycleWithCollectionItemsWithinLimit(directCycle, [standaloneItem], 3, {}), false);
+    assert.equal(await h.repo.getCycle(directCycle.id), null);
+    assert.deepEqual(await h.repo.getCycleItems(directCycle.id), []);
+  });
+
+  t("cycle item insertion requires a video membership in an authorized source collection", async (h) => {
+    await h.seedCycle(cycle("guarded-cycle", "owner"));
+    await h.seedMedia(media("guarded-video", "owner"));
+    await h.seedCollection(collection("guarded-source", "owner", ["guarded-video"]));
+    const valid = item("guarded-item", "guarded-cycle", { cycleOwnerId: "owner", mediaAssetId: "guarded-video", sourceCollectionId: "guarded-source", sourceKind: "owned" });
+    assert.equal(await h.repo.addCycleItems([valid], { "guarded-source": 1 }), true);
+
+    const unprovenanced = item("no-source-item", "guarded-cycle", { cycleOwnerId: "owner", mediaAssetId: "guarded-video", sourceCollectionId: null });
+    assert.equal(await h.repo.addCycleItems([unprovenanced]), false);
+    await h.seedMedia(media("guarded-video-2", "owner"));
+    assert.equal(await h.repo.replaceCollectionMedia("guarded-source", ["guarded-video", "guarded-video-2"]), true);
+    const wrongSourceKind = item("wrong-source-kind", "guarded-cycle", { cycleOwnerId: "owner", mediaAssetId: "guarded-video-2", sourceCollectionId: "guarded-source", sourceKind: "shared_reference" });
+    assert.equal(await h.repo.addCycleItems([wrongSourceKind], { "guarded-source": 1 }), false);
+    const scheduledAtCreation = item("pre-scheduled-item", "guarded-cycle", { cycleOwnerId: "owner", mediaAssetId: "guarded-video", sourceCollectionId: "guarded-source", sourceKind: "owned", status: "scheduled", scheduledFor: T0 });
+    assert.equal(await h.repo.createCycleWithCollectionItemsWithinLimit(cycle("scheduled-at-create", "owner"), [scheduledAtCreation], 3, { "guarded-source": 1 }), false);
+    assert.equal(await h.repo.createCycleWithCollectionItemsWithinLimit(cycle("reviewed-at-create", "owner", { finalReviewConfirmed: true }), [
+      item("reviewed-item", "reviewed-at-create", { cycleOwnerId: "owner", mediaAssetId: "guarded-video", sourceCollectionId: "guarded-source", sourceKind: "owned" }),
+    ], 3, { "guarded-source": 1 }), false);
+  });
+
+  t("collection upload is atomic with membership and verification job; invalid collection and quota leave no records", async (h) => {
+    await h.seedCollection(collection("upload-target", "owner", []));
+    const uploaded = media("uploaded-video", "owner", { validation: "incomplete" });
+    const job: MediaVerificationJobRecord = {
+      id: "verify-uploaded-video", ownerId: "owner", mediaAssetId: uploaded.id, status: "queued", progressPercent: 0,
+      attempts: 0, idempotencyKey: `media-verification:${uploaded.id}`, lockedBy: null, lockToken: null, lockExpiresAt: null,
+      errorMessage: null, createdAt: T0, finishedAt: null, payload: { stage: "queued" },
+    };
+    const audit = { actorId: "owner", action: "media.uploaded", entityType: "MediaAsset", entityId: uploaded.id };
+    const keys = { storageKey: "private/owner/uploaded-video", thumbnailKey: null };
+    assert.equal(await h.repo.addMediaWithVerificationJobIfStorageWithin(uploaded, keys, job, audit, 1000, "upload-target"), true);
+    assert.deepEqual((await h.repo.getCollection("upload-target"))?.mediaIds, [uploaded.id]);
+    assert.deepEqual(await h.repo.getMediaStorageInfo(uploaded.id), { ...keys, mimeType: "video/mp4" });
+    assert.equal((await h.repo.getMediaVerificationForOwner("owner", uploaded.id))?.status, "processing");
+    assert.equal(await h.repo.addMediaWithVerificationJobIfStorageWithin(uploaded, keys, { ...job, id: "duplicate-job" }, audit, 1000, "upload-target"), false);
+
+    const unavailable = media("unavailable-upload", "owner", { validation: "incomplete" });
+    const unavailableJob = { ...job, id: "unavailable-job", mediaAssetId: unavailable.id, idempotencyKey: `media-verification:${unavailable.id}` };
+    assert.equal(await h.repo.addMediaWithVerificationJobIfStorageWithin(unavailable, { storageKey: "private/owner/unavailable", thumbnailKey: null }, unavailableJob, { ...audit, entityId: unavailable.id }, 1000, "missing-collection"), "collection_unavailable");
+    assert.equal(await h.repo.getMedia(unavailable.id), null);
+    assert.equal(await h.repo.getMediaVerificationForOwner("owner", unavailable.id), null);
+
+    const overQuota = media("over-quota-upload", "owner", { validation: "incomplete", sizeBytes: 1001 });
+    const quotaJob = { ...job, id: "quota-job", mediaAssetId: overQuota.id, idempotencyKey: `media-verification:${overQuota.id}` };
+    assert.equal(await h.repo.addMediaWithVerificationJobIfStorageWithin(overQuota, { storageKey: "private/owner/over-quota", thumbnailKey: null }, quotaJob, { ...audit, entityId: overQuota.id }, 1000), false);
+    assert.equal(await h.repo.getMedia(overQuota.id), null);
+  });
+
+  t("membership add/remove preserves the media, storage reference, grants, and other collection memberships", async (h) => {
+    await h.seedMedia(media("shared-video", "owner"), { storageKey: "private/owner/shared-video", thumbnailKey: "private/owner/shared-thumb" });
+    await h.seedCollection(collection("first-collection", "owner", ["shared-video"]));
+    await h.seedCollection(collection("second-collection", "owner", []));
+    const existingGrant = grant("first-collection", "viewer", { capabilities: ["view"], grantedById: "owner" });
+    await h.seedGrant(existingGrant);
+    assert.equal(await h.repo.addOwnedMediaToCollection({ collectionId: "second-collection", mediaAssetId: "shared-video", ownerId: "owner", actorId: "owner", now: T0 }), "added");
+    assert.equal(await h.repo.addOwnedMediaToCollection({ collectionId: "second-collection", mediaAssetId: "shared-video", ownerId: "owner", actorId: "owner", now: T0 }), "existing");
+    assert.deepEqual((await h.repo.getCollection("second-collection"))?.mediaIds, ["shared-video"]);
+    assert.equal(await h.repo.removeCollectionItem({ collectionId: "first-collection", mediaAssetId: "shared-video", actorId: "owner", now: T0 }), "removed");
+    assert.equal(await h.repo.removeCollectionItem({ collectionId: "first-collection", mediaAssetId: "shared-video", actorId: "owner", now: T0 }), "already_absent");
+    assert.equal((await h.repo.getMedia("shared-video"))?.id, "shared-video");
+    assert.deepEqual(await h.repo.getMediaStorageInfo("shared-video"), { storageKey: "private/owner/shared-video", thumbnailKey: "private/owner/shared-thumb", mimeType: "video/mp4" });
+    assert.deepEqual((await h.repo.getCollection("first-collection"))?.mediaIds, []);
+    assert.deepEqual((await h.repo.getCollection("second-collection"))?.mediaIds, ["shared-video"]);
+    assert.deepEqual(await h.repo.getGrants("first-collection"), [existingGrant]);
+  });
+
+  t("active cycle references block collection membership removal/deletion while published history is preserved", async (h) => {
+    await h.seedMedia(media("active-video", "owner"));
+    await h.seedCollection(collection("active-source", "owner", ["active-video"]));
+    await h.seedCycle(cycle("active-cycle", "owner", { status: "running" }));
+    await h.seedItems([item("active-cycle-item", "active-cycle", { cycleOwnerId: "owner", mediaAssetId: "active-video", sourceCollectionId: "active-source", status: "scheduled" })]);
+    assert.equal(await h.repo.removeCollectionItem({ collectionId: "active-source", mediaAssetId: "active-video", actorId: "owner", now: T0 }), "conflict");
+    assert.equal(await h.repo.replaceCollectionMedia("active-source", []), false);
+    assert.equal(await h.repo.deleteCollection("active-source"), false);
+    assert.deepEqual((await h.repo.getCollection("active-source"))?.mediaIds, ["active-video"]);
+
+    await h.seedMedia(media("historical-video", "owner"));
+    await h.seedCollection(collection("historical-source", "owner", ["historical-video"]));
+    await h.seedCycle(cycle("historical-cycle", "owner", { status: "completed" }));
+    await h.seedItems([item("published-history", "historical-cycle", { cycleOwnerId: "owner", mediaAssetId: "historical-video", sourceCollectionId: "historical-source", status: "published" })]);
+    assert.equal(await h.repo.deleteCollection("historical-source"), true);
+    assert.deepEqual((await h.repo.getCycleItems("historical-cycle")).map((entry) => [entry.id, entry.sourceCollectionId, entry.mediaAssetId]), [["published-history", "historical-source", "historical-video"]]);
+    assert.equal((await h.repo.getMedia("historical-video"))?.id, "historical-video");
   });
 
   t("audit and caption revisions are appended", async (h) => {

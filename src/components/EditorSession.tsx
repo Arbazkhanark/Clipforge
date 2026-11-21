@@ -47,18 +47,11 @@ export function EditorSession({ formId }: { formId: string }) {
       // Notify the preview without recording the restore as a new user edit.
       form.dispatchEvent(new Event("change", { bubbles: true }));
     };
-    const onSubmit = (event: SubmitEvent) => {
-      const submitter = event.submitter;
-      if (!(submitter instanceof HTMLButtonElement) || !submitter.formAction.endsWith("/api/forms/editor-save")) return;
-      submitter.disabled = true;
-      submitter.textContent = "Saving template…";
-    };
     form.addEventListener("input", onInput);
     form.addEventListener("clipforge:gesturestart", onGestureStart);
     form.addEventListener("clipforge:gestureend", onGestureEnd);
-    form.addEventListener("submit", onSubmit);
     undo.addEventListener("click", onClick);
-    return () => { form.removeEventListener("input", onInput); form.removeEventListener("clipforge:gesturestart", onGestureStart); form.removeEventListener("clipforge:gestureend", onGestureEnd); form.removeEventListener("submit", onSubmit); undo.removeEventListener("click", onClick); };
+    return () => { form.removeEventListener("input", onInput); form.removeEventListener("clipforge:gesturestart", onGestureStart); form.removeEventListener("clipforge:gestureend", onGestureEnd); undo.removeEventListener("click", onClick); };
   }, [formId]);
   return <button type="button" id="editor-undo">Undo</button>;
 }

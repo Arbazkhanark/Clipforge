@@ -56,7 +56,7 @@ test("view models contain ONLY whitelisted fields (no storage keys, urls, owner 
   const everything = JSON.stringify([await getMediaLibrary(ctx, 1), await getCollectionsOverview(ctx), await getCollectionDetail(ctx, "demo-shared-col-1"), await getDashboardData(ctx)]);
   assert.ok(!/storageKey|ownerId|granteeId|grantedById|https?:|s3/i.test(everything), everything.slice(0, 200));
   const media = (await getMediaLibrary(ctx, 1)).items[0]!;
-  assert.deepEqual(Object.keys(media).sort(), ["createdAt", "durationMs", "hasThumbnail", "height", "id", "kind", "sizeBytes", "status", "title", "validation", "verification", "width"]);
+  assert.deepEqual(Object.keys(media).sort(), ["collectionMemberships", "createdAt", "durationMs", "hasSavedEditorSettings", "hasThumbnail", "height", "id", "kind", "matchingTemplateName", "sizeBytes", "status", "title", "validation", "verification", "width"]);
   assert.equal(media.verification?.status, "legacy_unverified");
 });
 
@@ -86,7 +86,7 @@ test("a collection you cannot view is indistinguishable from a missing one; expi
 test("public-view collections are visible to others but give them no use/import/download", async () => {
   repo.collections.set("pub", { id: "pub", ownerId: "someone", visibility: "public_view", archived: false, name: "Public one", mediaIds: ["demo-shared-1"] });
   const detail = await getCollectionDetail(await ctxFor("eve"), "pub");
-  assert.deepEqual(detail.permissions, { canUseInCycle: false, canImport: false, canRequestImport: false, canDownload: false, isOwner: false });
+  assert.deepEqual(detail.permissions, { canUseInCycle: false, canImport: false, canRequestImport: false, canDownload: false, canManage: false, isOwner: false });
 });
 
 test("deleted media is hidden from collections and the library", async () => {
@@ -102,7 +102,7 @@ const post = (body: unknown, headers: Record<string, string> = {}, raw?: string)
 const route = (handler: Parameters<typeof jsonRoute>[0], userId: string | null = DEMO_USER_ID) => jsonRoute(handler, () => runtimeFor(userId));
 
 test("route: works end to end and never caches", async () => {
-  const response = await route(createCycle)(post({ name: "Via route", socialAccountId: "demo-account" }));
+  const response = await route(createCycle)(post({ name: "Via route", socialAccountId: "demo-account", collectionIds: ["demo-col-1"] }));
   assert.equal(response.status, 200); assert.equal(response.headers.get("cache-control"), "no-store");
   const { cycleId } = await response.json() as { cycleId: string };
   assert.equal(repo.cycles.get(cycleId)!.name, "Via route");
@@ -110,7 +110,7 @@ test("route: works end to end and never caches", async () => {
 
 test("route: CSRF protections - cross-site Origin, Sec-Fetch-Site and non-JSON content types are refused", async () => {
   const handler = route(createCycle);
-  const body = { name: "x", socialAccountId: "demo-account" };
+  const body = { name: "x", socialAccountId: "demo-account", collectionIds: ["demo-col-1"] };
   assert.equal((await handler(post(body, { origin: "https://evil.example" }))).status, 403);
   assert.equal((await handler(post(body, { origin: "not a url" }))).status, 403);
   assert.equal((await handler(post(body, { "sec-fetch-site": "cross-site" }))).status, 403);
@@ -119,6 +119,14 @@ test("route: CSRF protections - cross-site Origin, Sec-Fetch-Site and non-JSON c
   assert.equal((await handler(post(body, { origin: "http://localhost:3000", "sec-fetch-site": "same-origin" }))).status, 200);
   assert.equal(repo.cycles.size, 2); // seed cycle + the one allowed request; the refused ones created nothing
   assert.equal(checkSameOrigin(post(body)), null);
+});
+
+test("cycle creation API rejects standalone media IDs and creates nothing", async () => {
+  const before = repo.cycles.size;
+  const response = await route(createCycle)(post({ name: "Direct media", socialAccountId: "demo-account", mediaIds: ["demo-media-1"] }));
+  assert.equal(response.status, 422);
+  assert.equal(repo.cycles.size, before);
+  assert.equal([...repo.items.values()].filter((item) => item.cycleId.startsWith("id")).length, 0);
 });
 
 test("route: bad JSON, huge bodies and invalid fields get clean 4xx errors", async () => {
@@ -138,9 +146,10 @@ test("route: unexpected errors become a generic 500 with no internals", async ()
 });
 
 test("route: not signed in = 401; unconfigured database = 503; neither touches data", async () => {
-  assert.equal((await route(createCycle, null)(post({ name: "x", socialAccountId: "demo-account" }))).status, 401);
+  const validBody = { name: "x", socialAccountId: "demo-account", collectionIds: ["demo-col-1"] };
+  assert.equal((await route(createCycle, null)(post(validBody))).status, 401);
   const unconfigured = jsonRoute(createCycle, () => ({ ...runtimeFor(DEMO_USER_ID), mode: "unconfigured" as const, repo: new Proxy({}, { get: () => () => { throw new AppError(503, "not_configured", "no db"); } }) as MemoryRepository }));
-  assert.equal((await unconfigured(post({ name: "x", socialAccountId: "demo-account" }))).status, 503);
+  assert.equal((await unconfigured(post(validBody))).status, 503);
   assert.equal(repo.cycles.size, 1);
 });
 

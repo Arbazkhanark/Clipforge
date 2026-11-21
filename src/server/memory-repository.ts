@@ -7,7 +7,7 @@ import type { CaptionRevision } from "../lib/domain/caption-cover-updates.ts";
 import { compareMedia, mediaMatchesSearch, type MediaSort } from "../lib/domain/media-list.ts";
 import type { Capability, CollectionPermissionGrant, CycleItem, CycleStatus, MediaAsset, VideoCollection } from "../lib/domain/types.ts";
 import type { UsageRecordDraft } from "../lib/domain/usage-accounting.ts";
-import type { ApplyVideoSettingsBatchInput, AuditEntry, ClaimPublishingAttemptInput, CreatePublishingAttemptInput, CreateRenderJobResult, CycleRecord, EditingTemplateRecord, InstagramConnectionWrite, MediaCleanupJobRecord, PersistedCycleSchedule, PublishingAttemptRecord, PublishingJobRecord, PublishingAttemptUpdate, RenderJobClaim, RenderJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SelectCycleItemRenderOutputInput, SocialAccountRecord, RazorpaySubscriptionIntentRecord, ReserveRazorpaySubscriptionIntentInput, RazorpayIntentStatus, ManualPaymentIntentRecord, ManualIntentStatus, SettleManualPaymentInput, TransitionCouponStatusResult } from "./repository.ts";
+import type { ApplyVideoSettingsBatchInput, AuditEntry, ClaimPublishingAttemptInput, CreatePublishingAttemptInput, CreateRenderJobResult, CycleRecord, EditingTemplateRecord, InstagramConnectionWrite, MediaCleanupJobRecord, PermanentMediaDeletionResult, PersistedCycleSchedule, PublishingAttemptRecord, PublishingJobRecord, PublishingAttemptUpdate, RenderJobClaim, RenderJobRecord, RenderOutputRecord, Repository, SaveRenderResult, SelectCycleItemRenderOutputInput, SocialAccountRecord, RazorpaySubscriptionIntentRecord, ReserveRazorpaySubscriptionIntentInput, RazorpayIntentStatus, ManualPaymentIntentRecord, ManualIntentStatus, SettleManualPaymentInput, TransitionCouponStatusResult, EditedMediaReplacementRecord, EditedReplacementRequest, EditedReplacementMembership, EditedReplacementClaim, EditedReplacementCommitInput } from "./repository.ts";
 import { canTransitionPublishingAttempt, isActivePublishingAttempt, publishingOutcomeForStage, safePublishingError } from "../lib/domain/publishing-attempt.ts";
 import { buildPublishIdempotencyKey, isCycleFinished } from "../lib/domain/cycle-state.ts";
 import { decideSettledCycle, itemsEligibleForRepeat } from "../lib/domain/publish-workflow.ts";
@@ -17,7 +17,7 @@ import { accessPeriodEnd } from "../lib/billing/access-period.ts";
 import { resolveDeferredAccessState, resolveEffectiveEntitlement } from "../lib/billing/entitlement-resolver.ts";
 import { parseEditingSettings } from "../lib/domain/editing-settings.ts";
 import { planGrantCreation, planGrantRevocation } from "../lib/domain/sharing-management.ts";
-import { canCreateAccessRequest, canImportVideo, decideAccessRequest, getCollectionCapabilities, validateShareLinkSettings } from "../lib/domain/sharing-permissions.ts";
+import { canAddVideoToCycle, canCreateAccessRequest, canImportVideo, decideAccessRequest, getCollectionCapabilities, validateShareLinkSettings } from "../lib/domain/sharing-permissions.ts";
 import { mediaKeyFor, stagingKeyFor } from "./storage/media-storage.ts";
 import { calculateDiscountAmounts, normalizePromotionCode, promotionRedemptionTransitionAllowed, samePromotionDefinition, validDiscountSnapshot, validPromotionEventMetadata, validPromotionRecord } from "../lib/domain/promotions.ts";
 import type { CreatePromotionRedemptionInput, CreatePromotionalAccessGrantInput, PromotionLifecycleEventInput, PromotionLifecycleEventRecord, PromotionRecord, PromotionRedemptionRecord, PromotionalAccessGrantRecord, RedeemFreeAccessCouponInput, RedeemFreeAccessCouponResult, ReserveDiscountedManualPaymentIntentInput, ReserveDiscountedManualPaymentIntentResult } from "./repository.ts";
@@ -29,7 +29,7 @@ const clone = <T>(value: T): T => structuredClone(value);
 const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]` : typeof value === "object" && value !== null ? `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}` : JSON.stringify(value) ?? "undefined";
 const promotionMetadataKey = (metadata: Record<string, unknown> | null | undefined): string => JSON.stringify(metadata ? Object.fromEntries(Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right))) : null);
 /** Fields a version-checked save may change; identity fields (id, cycleId, cycleOwnerId) never do. */
-const MUTABLE_ITEM_FIELDS = ["mediaAssetId", "selectedRenderOutputId", "sourceKind", "sourceCollectionId", "status", "position", "version", "scheduledFor", "captionText", "captionSource", "coverMediaId", "coverIsCustom", "coverState", "lockedBy", "lockExpiresAt", "reviewReason"] as const;
+const MUTABLE_ITEM_FIELDS = ["status", "position", "version", "scheduledFor", "captionText", "captionSource", "coverMediaId", "coverIsCustom", "coverState", "lockedBy", "lockExpiresAt", "reviewReason"] as const;
 const tick = (): Promise<void> => Promise.resolve();
 
 export class MemoryRepository implements Repository {
@@ -58,6 +58,7 @@ export class MemoryRepository implements Repository {
   collectionShareLinks = new Map<string, CollectionShareLinkRecord>();
   mediaImportJobs = new Map<string, MediaImportJobRecord>();
   mediaVerificationJobs = new Map<string, MediaVerificationJobRecord>();
+  editedMediaReplacements = new Map<string, EditedMediaReplacementRecord>();
   socialAccounts = new Map<string, SocialAccountRecord>();
   publishingJobs = new Map<string, PublishingAttemptRecord>();
   /** Ciphertext only. Never copied onto SocialAccountRecord. */
@@ -852,6 +853,40 @@ export class MemoryRepository implements Repository {
       return true;
     });
   }
+  async createCycleWithCollectionItemsWithinLimit(cycle: CycleRecord, items: CycleItem[], activeCycleLimit: number, expectedCollectionSettingsVersions: Record<string, number>): Promise<boolean> {
+    return this.withPromotionLock(`user:${cycle.ownerId}`, async () => {
+      const collectionIds = Object.keys(expectedCollectionSettingsVersions).sort();
+      const create = async (): Promise<boolean> => {
+        await tick();
+        if (!Number.isInteger(activeCycleLimit) || activeCycleLimit < 1 || this.cycles.has(cycle.id) || cycle.status !== "draft" || cycle.finalReviewConfirmed || items.length === 0 || items.some((item) => item.cycleId !== cycle.id || item.cycleOwnerId !== cycle.ownerId || item.status !== "upcoming" || item.scheduledFor !== null || !Number.isInteger(item.position) || item.position < 1)) return false;
+        if (new Set(items.map((item) => item.id)).size !== items.length || new Set(items.map((item) => item.mediaAssetId)).size !== items.length || new Set(items.map((item) => item.position)).size !== items.length) return false;
+        if (items.some((item) => !item.sourceCollectionId || !Object.hasOwn(expectedCollectionSettingsVersions, item.sourceCollectionId))) return false;
+        const active = [...this.cycles.values()].filter((entry) => entry.ownerId === cycle.ownerId && (entry.status === "draft" || entry.status === "running" || entry.status === "paused")).length;
+        if (active >= activeCycleLimit || new Set(items.map((item) => item.mediaAssetId)).size !== items.length) return false;
+        for (const [collectionId, version] of Object.entries(expectedCollectionSettingsVersions)) {
+          const collection = this.collections.get(collectionId);
+          if (!collection || collection.archived || (collection.settingsVersion ?? 1) !== version) return false;
+          const permitted = collection.ownerId === cycle.ownerId || this.grants.some((grant) => grant.collectionId === collectionId && grant.granteeId === cycle.ownerId && grant.status === "active" && grant.capabilities.includes("use_in_cycle") && (!grant.expiresAt || (cycle.createdAt !== undefined && grant.expiresAt > cycle.createdAt)));
+          if (!permitted) return false;
+        }
+        for (const item of items) {
+          const collection = item.sourceCollectionId ? this.collections.get(item.sourceCollectionId) : null;
+          const media = this.media.get(item.mediaAssetId);
+          if (!collection || !collection.mediaIds.includes(item.mediaAssetId) || !media || media.status !== "active" || media.kind !== "video") return false;
+        if (!canAddVideoToCycle(cycle.ownerId, media, collection, this.grants, cycle.createdAt ?? new Date()).allowed) return false;
+          const expectedSourceKind = media.ownerId !== cycle.ownerId ? "shared_reference" : media.importedFromId ? "imported_copy" : "owned";
+          if (item.sourceKind !== expectedSourceKind) return false;
+        }
+        this.cycles.set(cycle.id, clone(cycle));
+        for (const item of items) this.items.set(item.id, clone(item));
+        return true;
+      };
+      const withCollectionLocks = async (index: number): Promise<boolean> => index >= collectionIds.length
+        ? create()
+        : this.withPromotionLock(`collection:${collectionIds[index]}`, () => withCollectionLocks(index + 1));
+      return withCollectionLocks(0);
+    });
+  }
   async listRunningCyclesForSettlement(afterCycleId: string | null, limit: number): Promise<CycleRecord[]> {
     await tick();
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) return [];
@@ -869,7 +904,23 @@ export class MemoryRepository implements Repository {
       if (!isCycleFinished(items)) return "not_ready";
 
       const decision = decideSettledCycle(cycle, items, cycle.repeatBehavior ?? "never");
-      const eligible = decision === "repeat_without_published_items" ? itemsEligibleForRepeat(items) : [];
+      const repeatedMediaIds = new Set<string>();
+      const eligibleCandidates = decision === "repeat_without_published_items" ? itemsEligibleForRepeat(items).filter((item) => {
+        if (repeatedMediaIds.has(item.mediaAssetId)) return false;
+        repeatedMediaIds.add(item.mediaAssetId);
+        return true;
+      }) : [];
+      const collectionIds = [...new Set(eligibleCandidates.flatMap((item) => item.sourceCollectionId ? [item.sourceCollectionId] : []))].sort();
+      const validateRepeatCandidates = (): CycleItem[] => eligibleCandidates.filter((item) => {
+        if (!item.sourceCollectionId) return false;
+        const collection = this.collections.get(item.sourceCollectionId);
+        const media = this.media.get(item.mediaAssetId);
+        if (!collection || collection.archived || !media || media.kind !== "video" || media.status !== "active" || !collection.mediaIds.includes(media.id)) return false;
+        if (!canAddVideoToCycle(cycle.ownerId, media, collection, this.grants, input.now).allowed) return false;
+        const expectedSourceKind = media.ownerId !== cycle.ownerId ? "shared_reference" : media.importedFromId ? "imported_copy" : "owned";
+        return item.sourceKind === expectedSourceKind;
+      });
+      const finish = (eligible: CycleItem[]) => {
       const activeElsewhere = [...this.cycles.values()].filter((entry) => entry.id !== cycle.id && entry.ownerId === cycle.ownerId && (entry.status === "draft" || entry.status === "running" || entry.status === "paused")).length;
       const canQueue = eligible.length > 0 && activeElsewhere < input.activeCycleLimit;
       const nextCycle = canQueue ? {
@@ -890,6 +941,12 @@ export class MemoryRepository implements Repository {
       if (nextCycle) this.audit.push({ actorId: null, action: "cycle.repeat_queued", entityType: "PublishingCycle", entityId: cycle.id, metadata: { nextCycleId: nextCycle.id, items: nextItems.length } });
       else if (eligible.length > 0 && decision === "repeat_without_published_items") this.audit.push({ actorId: null, action: "cycle.repeat_skipped", entityType: "PublishingCycle", entityId: cycle.id, metadata: { reason: "active_cycle_limit" } });
       return nextCycle ? "repeat_queued" : eligible.length > 0 && decision === "repeat_without_published_items" ? "repeat_skipped_limit" : "completed";
+      };
+      const withCollectionLocks = async (index: number): Promise<import("./repository.ts").CompleteSettledCycleResult> => {
+        if (index < collectionIds.length) return this.withPromotionLock(`collection:${collectionIds[index]}`, () => withCollectionLocks(index + 1));
+        return finish(validateRepeatCandidates());
+      };
+      return withCollectionLocks(0);
     }));
   }
   async transitionCycleStatus(cycleId: string, from: CycleStatus, to: CycleStatus, finalReviewConfirmed: boolean): Promise<boolean> {
@@ -927,16 +984,26 @@ export class MemoryRepository implements Repository {
     await tick(); // queue order, like ORDER BY position, id
     return [...this.items.values()].filter((i) => i.cycleId === cycleId).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id)).map(clone);
   }
-  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = []): Promise<boolean> {
+  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = [], now = new Date()): Promise<boolean> {
     if (items.length === 0) return true;
     const cycleId = items[0]!.cycleId;
     const ownerId = items[0]!.cycleOwnerId;
-    if (items.some((item) => item.cycleId !== cycleId || item.cycleOwnerId !== ownerId) || new Set(items.map((item) => item.id)).size !== items.length) return false;
+    if (items.some((item) => item.cycleId !== cycleId || item.cycleOwnerId !== ownerId || !item.sourceCollectionId || !Object.hasOwn(expectedCollectionSettingsVersions, item.sourceCollectionId) || (item.status !== "upcoming" && item.status !== "scheduled")) || new Set(items.map((item) => item.id)).size !== items.length) return false;
+    const collectionIds = [...new Set(items.map((item) => item.sourceCollectionId as string))].sort();
     return this.withPromotionLock(`cycle:${cycleId}`, async () => {
       await tick();
       const cycle = this.cycles.get(cycleId);
       if (!cycle || cycle.ownerId !== ownerId || cycle.status === "completed" || cycle.status === "stopped" || items.some((item) => this.items.has(item.id))) return false;
       if (Object.entries(expectedCollectionSettingsVersions).some(([collectionId, version]) => (this.collections.get(collectionId)?.settingsVersion ?? 1) !== version)) return false;
+      const validateAndWrite = async (): Promise<boolean> => {
+      for (const item of items) {
+        const collection = this.collections.get(item.sourceCollectionId as string);
+        const media = this.media.get(item.mediaAssetId);
+        if (!collection || collection.archived || !media || media.status !== "active" || media.kind !== "video") return false;
+        if (!canAddVideoToCycle(ownerId, media, collection, this.grants, now).allowed) return false;
+        const expectedSourceKind = media.ownerId !== ownerId ? "shared_reference" : media.importedFromId ? "imported_copy" : "owned";
+        if (item.sourceKind !== expectedSourceKind) return false;
+      }
       for (const { item, expectedVersion } of orderUpdates) {
         const stored = this.items.get(item.id);
         if (!stored || item.cycleId !== cycleId || item.cycleOwnerId !== ownerId || stored.cycleId !== cycleId || stored.cycleOwnerId !== ownerId || stored.version !== expectedVersion || (stored.status !== "upcoming" && stored.status !== "scheduled") || (item.status !== "upcoming" && item.status !== "scheduled")) return false;
@@ -947,6 +1014,11 @@ export class MemoryRepository implements Repository {
       }
       for (const item of items) this.items.set(item.id, clone(item));
       return true;
+      };
+      const withCollectionLocks = async (index: number): Promise<boolean> => index >= collectionIds.length
+        ? validateAndWrite()
+        : this.withPromotionLock(`collection:${collectionIds[index]}`, () => withCollectionLocks(index + 1));
+      return withCollectionLocks(0);
     });
   }
   async saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]> {
@@ -955,7 +1027,9 @@ export class MemoryRepository implements Repository {
     // No `await` below: the check-and-write of each item is atomic, like a single SQL UPDATE ... WHERE version = ?.
     return updates.map(({ item, expectedVersion }) => {
       const stored = this.items.get(item.id);
-      if (!stored || stored.version !== expectedVersion) return { itemId: item.id, saved: false };
+      if (!stored || stored.version !== expectedVersion || stored.cycleId !== item.cycleId || stored.cycleOwnerId !== item.cycleOwnerId ||
+        stored.mediaAssetId !== item.mediaAssetId || stored.sourceKind !== item.sourceKind || stored.sourceCollectionId !== item.sourceCollectionId ||
+        stored.selectedRenderOutputId !== item.selectedRenderOutputId) return { itemId: item.id, saved: false };
       const merged = { ...stored } as Record<string, unknown>;
       for (const field of MUTABLE_ITEM_FIELDS) merged[field] = clone(item[field]);
       this.items.set(item.id, merged as unknown as CycleItem);
@@ -982,7 +1056,9 @@ export class MemoryRepository implements Repository {
     const seen = new Set<string>();
     for (const { item, expectedVersion } of updates) {
       const stored = this.items.get(item.id);
-      if (seen.has(item.id) || !stored || stored.cycleId !== cycleId || stored.cycleOwnerId !== ownerId || stored.version !== expectedVersion || (stored.status !== "upcoming" && stored.status !== "scheduled")) return false;
+      if (seen.has(item.id) || !stored || stored.cycleId !== cycleId || stored.cycleOwnerId !== ownerId || stored.version !== expectedVersion ||
+        stored.mediaAssetId !== item.mediaAssetId || stored.sourceKind !== item.sourceKind || stored.sourceCollectionId !== item.sourceCollectionId ||
+        stored.selectedRenderOutputId !== item.selectedRenderOutputId || (stored.status !== "upcoming" && stored.status !== "scheduled")) return false;
       seen.add(item.id);
     }
     // No await between validation and writes: settings and assignments change as one operation.
@@ -1017,13 +1093,22 @@ export class MemoryRepository implements Repository {
     this.media.set(media.id, clone(media)); this.storageKeys.set(media.id, keys.storageKey); this.thumbnailKeys.set(media.id, keys.thumbnailKey);
     return true;
   }
-  async addMediaWithVerificationJobIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, job: MediaVerificationJobRecord, audit: AuditEntry, limitBytes: number): Promise<boolean> {
-    await tick();
-    const key = `media-verification:${media.id}`;
-    const used = [...this.media.values()].filter((m) => m.ownerId === media.ownerId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
-    if (used + media.sizeBytes > limitBytes || media.validation !== "incomplete" || job.ownerId !== media.ownerId || job.mediaAssetId !== media.id || job.status !== "queued" || job.idempotencyKey !== key || [...this.mediaVerificationJobs.values()].some((item) => item.idempotencyKey === key) || this.media.has(media.id)) return false;
-    this.media.set(media.id, clone(media)); this.storageKeys.set(media.id, keys.storageKey); this.thumbnailKeys.set(media.id, keys.thumbnailKey); this.mediaVerificationJobs.set(job.id, clone(job)); this.audit.push(clone(audit));
-    return true;
+  async addMediaWithVerificationJobIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, job: MediaVerificationJobRecord, audit: AuditEntry, limitBytes: number, collectionId?: string): Promise<boolean | "collection_unavailable"> {
+    return this.withPromotionLock(`user:${media.ownerId}`, async () => {
+      await tick();
+      const key = `media-verification:${media.id}`;
+      const used = [...this.media.values()].filter((m) => m.ownerId === media.ownerId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
+      const collection = collectionId ? this.collections.get(collectionId) : null;
+      if (collectionId && (!collection || collection.ownerId !== media.ownerId || collection.archived)) return "collection_unavailable";
+      if (used + media.sizeBytes > limitBytes || media.validation !== "incomplete" || job.ownerId !== media.ownerId || job.mediaAssetId !== media.id || job.status !== "queued" || job.idempotencyKey !== key || [...this.mediaVerificationJobs.values()].some((item) => item.idempotencyKey === key) || this.media.has(media.id) || (collection?.mediaIds.includes(media.id) ?? false)) return false;
+      this.media.set(media.id, clone(media)); this.storageKeys.set(media.id, keys.storageKey); this.thumbnailKeys.set(media.id, keys.thumbnailKey); this.mediaVerificationJobs.set(job.id, clone(job)); this.audit.push(clone(audit));
+      if (collection) {
+        const item = { mediaAssetId: media.id, captionText: "", coverMediaId: null, version: 1 };
+        this.collections.set(collection.id, { ...collection, mediaIds: [...collection.mediaIds, media.id], items: [...(collection.items ?? []), item], settingsVersion: (collection.settingsVersion ?? 1) + 1 });
+        this.audit.push({ actorId: media.ownerId, action: "collection.item_added", entityType: "CollectionItem", entityId: `${collection.id}:${media.id}`, metadata: { collectionId: collection.id, mediaAssetId: media.id, source: "collection_upload" } });
+      }
+      return true;
+    });
   }
   async getMediaVerificationForOwner(ownerId: string, mediaId: string) {
     await tick(); const media = this.media.get(mediaId);
@@ -1075,6 +1160,91 @@ export class MemoryRepository implements Repository {
     await tick();
     const result = { status: input.retryAt ? "queued" as const : "failed" as const, progressPercent: 0, finishedAt: input.retryAt ? null : input.now, lockExpiresAt: input.retryAt ?? null, payload: clone(input.payload), errorMessage: input.errorMessage.slice(0, 200), lockToken: null, lockedBy: null };
     return this.updateClaimedMediaVerification(input, result);
+  }
+  async createOrGetEditedMediaReplacement(input: EditedReplacementRequest) {
+    const key = `edited-replacement:${input.ownerId}:${input.sourceMediaAssetId}:${input.sourceDerivativeId}`;
+    if (input.idempotencyKey !== key) return { status: "conflict" as const };
+    return this.withPromotionLock(`user:${input.ownerId}`, () => this.withPromotionLock(`media:${input.sourceMediaAssetId}`, () => this.withPromotionLock(`replacement:${key}`, async () => {
+      await tick();
+      const existing = [...this.editedMediaReplacements.values()].find((job) => job.idempotencyKey === key);
+      if (existing) return { status: "existing" as const, job: clone(existing) };
+      if (this.media.has(input.plannedReplacementMediaAssetId) || [...this.editedMediaReplacements.values()].some((job) => job.plannedReplacementMediaAssetId === input.plannedReplacementMediaAssetId)) return { status: "conflict" as const };
+      const source = this.media.get(input.sourceMediaAssetId); const output = this.renders.get(input.sourceDerivativeId);
+      const render = [...this.renderJobs.values()].find((job) => job.ownerId === input.ownerId && job.status === "succeeded" && job.mediaAssetId === input.sourceMediaAssetId && job.outputDerivativeId === input.sourceDerivativeId);
+      if (!source || !output || !render) return { status: "missing" as const };
+      if (source.ownerId !== input.ownerId || output.ownerId !== input.ownerId || output.sourceMediaId !== source.id) return { status: "unauthorized" as const };
+      if (source.status !== "active" || source.validation !== "verified" || source.kind !== "video") return { status: "not_verified" as const };
+      const memberships = [...this.collections.values()].flatMap((collection) => {
+        const item = collection.items?.find((entry) => entry.mediaAssetId === source.id);
+        return collection.mediaIds.includes(source.id) && item ? [{ id: `${collection.id}:${source.id}`, collectionId: collection.id, version: item.version }] : [];
+      }).sort((a, b) => a.collectionId.localeCompare(b.collectionId));
+      if ([...this.collections.values()].some((collection) => collection.sharedCoverMediaId === source.id || collection.items?.some((item) => item.coverMediaId === source.id)) || [...this.items.values()].some((item) => item.coverMediaId === source.id)) return { status: "dependency" as const };
+      if ([...this.items.values()].some((item) => item.mediaAssetId === source.id && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status)) || [...this.mediaImportJobs.values()].some((job) => job.sourceMediaId === source.id && ["pending", "copying", "verifying"].includes(job.status)) || [...this.renderJobs.values()].some((job) => job.mediaAssetId === source.id && job.kind === "render" && ["queued", "running"].includes(job.status))) return { status: "dependency" as const };
+      const used = [...this.media.values()].filter((media) => media.ownerId === input.ownerId && media.status !== "deleted").reduce((sum, media) => sum + media.sizeBytes, 0) + [...this.renders.values()].filter((item) => item.ownerId === input.ownerId).reduce((sum, item) => sum + item.sizeBytes, 0);
+      if (used + output.sizeBytes > getPlan(this.resolvePlanIdForUser(input.ownerId, input.now)).limits.storageBytes) return { status: "quota" as const };
+      const job: EditedMediaReplacementRecord = { id: input.id, ownerId: input.ownerId, sourceMediaAssetId: source.id, sourceDerivativeId: output.id, plannedReplacementMediaAssetId: input.plannedReplacementMediaAssetId, replacementMediaAssetId: null, stagingObjectKey: null, status: "queued", idempotencyKey: key, membershipSnapshot: memberships, attempts: 0, lockedBy: null, lockToken: null, lockExpiresAt: null, errorCode: null, createdAt: input.now, updatedAt: input.now, completedAt: null };
+      this.editedMediaReplacements.set(job.id, job); return { status: "created" as const, job: clone(job) };
+    })));
+  }
+  async getEditedMediaReplacementForOwner(ownerId: string, sourceMediaAssetId: string, sourceDerivativeId: string) {
+    await tick(); const job = [...this.editedMediaReplacements.values()].find((entry) => entry.ownerId === ownerId && entry.sourceMediaAssetId === sourceMediaAssetId && entry.sourceDerivativeId === sourceDerivativeId); return job ? clone(job) : null;
+  }
+  async claimNextEditedMediaReplacement(input: EditedReplacementClaim) {
+    await tick(); if (!input.workerId || input.leaseSeconds <= 0) return null;
+    const candidates = [...this.editedMediaReplacements.values()].filter((job) => input.jobId ? job.id === input.jobId : true).filter((job) => (job.status === "queued" && (!job.lockExpiresAt || job.lockExpiresAt <= input.now)) || (["copying", "verifying"].includes(job.status) && job.lockExpiresAt !== null && job.lockExpiresAt <= input.now)).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
+    const job = candidates[0]; if (!job) return null;
+    job.status = job.replacementMediaAssetId ? "verifying" : "copying"; job.lockedBy = input.workerId; job.lockToken = randomUUID(); job.lockExpiresAt = new Date(input.now.getTime() + input.leaseSeconds * 1000); job.attempts += 1; job.updatedAt = input.now; job.errorCode = null;
+    if (!job.stagingObjectKey) job.stagingObjectKey = stagingKeyFor(`replacement-${job.id}-${job.attempts}`);
+    return clone(job);
+  }
+  async heartbeatEditedMediaReplacement(input: { jobId: string; ownerId: string; lockToken: string; now: Date; leaseSeconds: number; stagingObjectKey?: string }) {
+    await tick(); const job = this.editedMediaReplacements.get(input.jobId); if (!job || job.ownerId !== input.ownerId || job.lockToken !== input.lockToken || !job.lockExpiresAt || job.lockExpiresAt <= input.now || !["copying", "verifying"].includes(job.status)) return false;
+    job.lockExpiresAt = new Date(input.now.getTime() + input.leaseSeconds * 1000); job.updatedAt = input.now; if (input.stagingObjectKey) job.stagingObjectKey = input.stagingObjectKey; return true;
+  }
+  async commitEditedMediaReplacement(input: EditedReplacementCommitInput) {
+    const initial = this.editedMediaReplacements.get(input.jobId); if (!initial) return "stale" as const;
+    return this.withPromotionLock(`user:${input.ownerId}`, () => this.withPromotionLock(`media:${initial.sourceMediaAssetId}`, () => this.withPromotionLock(`replacement:${input.jobId}`, async () => {
+      await tick(); const job = this.editedMediaReplacements.get(input.jobId); const source = job ? this.media.get(job.sourceMediaAssetId) : null; const output = job ? this.renders.get(job.sourceDerivativeId) : null;
+      if (!job || !source || !output || job.ownerId !== input.ownerId || job.lockToken !== input.lockToken || !job.lockExpiresAt || job.lockExpiresAt <= input.now || !["copying", "verifying"].includes(job.status)) return "stale" as const;
+      if (source.ownerId !== input.ownerId || source.status !== "active" || input.media.ownerId !== input.ownerId || input.media.id !== job.plannedReplacementMediaAssetId || input.storageKey !== mediaKeyFor(input.ownerId, input.media.id) || input.media.sizeBytes !== output.sizeBytes) return "unauthorized" as const;
+      if (this.media.has(input.media.id)) return job.replacementMediaAssetId === input.media.id ? "existing" as const : "conflict" as const;
+      const used = [...this.media.values()].filter((media) => media.ownerId === input.ownerId && media.status !== "deleted").reduce((sum, media) => sum + media.sizeBytes, 0) + [...this.renders.values()].filter((item) => item.ownerId === input.ownerId).reduce((sum, item) => sum + item.sizeBytes, 0);
+      if (used + input.media.sizeBytes > input.limitBytes) return "quota" as const;
+      if (input.media.validation !== "incomplete" || input.verificationJob.status !== "queued" || input.verificationJob.ownerId !== input.ownerId || input.verificationJob.mediaAssetId !== input.media.id || input.verificationJob.idempotencyKey !== `media-verification:${input.media.id}`) return "conflict" as const;
+      this.media.set(input.media.id, clone(input.media)); this.storageKeys.set(input.media.id, input.storageKey); this.thumbnailKeys.set(input.media.id, null); this.mediaVerificationJobs.set(input.verificationJob.id, clone(input.verificationJob));
+      job.replacementMediaAssetId = input.media.id; job.status = "verifying"; job.updatedAt = input.now; return "applied" as const;
+    })));
+  }
+  async finalizeEditedMediaReplacement(input: { jobId: string; ownerId: string; lockToken: string; now: Date; cleanupJobId: string }) {
+    const initial = this.editedMediaReplacements.get(input.jobId); if (!initial) return "stale" as const;
+    return this.withPromotionLock(`user:${input.ownerId}`, () => this.withPromotionLock(`media:${initial.sourceMediaAssetId}`, () => this.withPromotionLock(`replacement:${input.jobId}`, async () => {
+      await tick(); const job = this.editedMediaReplacements.get(input.jobId); const source = job ? this.media.get(job.sourceMediaAssetId) : null; const replacement = job?.replacementMediaAssetId ? this.media.get(job.replacementMediaAssetId) : null;
+      if (!job || !source || !replacement || job.ownerId !== input.ownerId) return "stale" as const;
+      if (job.status === "completed") return "existing" as const;
+      if (job.lockToken !== input.lockToken || job.status !== "verifying") return "stale" as const;
+      if (replacement.ownerId !== input.ownerId || replacement.status !== "active" || replacement.validation !== "verified") return "unverified" as const;
+      if (source.ownerId !== input.ownerId || source.status !== "active") return "conflict" as const;
+      const current = [...this.collections.values()].flatMap((collection) => { const item = collection.items?.find((entry) => entry.mediaAssetId === source.id); return collection.mediaIds.includes(source.id) && item ? [{ id: `${collection.id}:${source.id}`, collectionId: collection.id, version: item.version }] : []; }).sort((a, b) => a.collectionId.localeCompare(b.collectionId));
+      if (JSON.stringify(current) !== JSON.stringify(job.membershipSnapshot)) return "membership_changed" as const;
+      if ([...this.collections.values()].some((collection) => collection.sharedCoverMediaId === source.id || collection.items?.some((item) => item.coverMediaId === source.id)) || [...this.items.values()].some((item) => item.coverMediaId === source.id) || [...this.items.values()].some((item) => item.mediaAssetId === source.id && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status)) || [...this.mediaImportJobs.values()].some((item) => item.sourceMediaId === source.id && ["pending", "copying", "verifying"].includes(item.status)) || [...this.renderJobs.values()].some((item) => item.mediaAssetId === source.id && item.kind === "render" && ["queued", "running"].includes(item.status))) return "dependency" as const;
+      for (const membership of current) {
+        const collection = this.collections.get(membership.collectionId)!;
+        if (collection.mediaIds.includes(replacement.id)) return "conflict" as const;
+      }
+      for (const membership of current) {
+        const collection = this.collections.get(membership.collectionId)!; const item = collection.items!.find((entry) => entry.mediaAssetId === source.id)!;
+        this.collections.set(collection.id, { ...collection, mediaIds: [...collection.mediaIds.filter((id) => id !== source.id), replacement.id], items: collection.items!.map((entry) => entry.mediaAssetId === source.id ? { ...entry, mediaAssetId: replacement.id, version: entry.version + 1 } : entry), settingsVersion: (collection.settingsVersion ?? 1) + 1 });
+      }
+      const cleanup: MediaCleanupJobRecord = { id: input.cleanupJobId, ownerId: input.ownerId, mediaAssetId: source.id, status: "queued", attempts: 0, lockToken: null, lockExpiresAt: null, createdAt: input.now };
+      const previous = [...this.mediaCleanupJobs.values()].find((item) => item.ownerId === input.ownerId && item.mediaAssetId === source.id);
+      if (previous && previous.id !== input.cleanupJobId) return "conflict" as const;
+      this.mediaCleanupJobs.set(cleanup.id, cleanup); this.media.set(source.id, { ...source, status: "deleted", deleteAfter: null }); job.status = "completed"; job.completedAt = input.now; job.updatedAt = input.now; job.lockToken = null; job.lockedBy = null; job.lockExpiresAt = null;
+      return "applied" as const;
+    })));
+  }
+  async failEditedMediaReplacement(input: { jobId: string; ownerId: string; lockToken: string; now: Date; errorCode: string; retryAt: Date | null }) {
+    await tick(); const job = this.editedMediaReplacements.get(input.jobId); if (!job || job.ownerId !== input.ownerId || job.lockToken !== input.lockToken || !job.lockExpiresAt || job.lockExpiresAt <= input.now || job.status === "completed") return false;
+    job.status = input.retryAt ? "queued" : "blocked"; job.errorCode = input.errorCode.slice(0, 80); job.lockToken = null; job.lockedBy = null; job.lockExpiresAt = input.retryAt; job.updatedAt = input.now; return true;
   }
   async getMediaStorageInfo(mediaId: string): Promise<{ storageKey: string; thumbnailKey: string | null; mimeType: string | null } | null> {
     await tick();
@@ -1183,7 +1353,7 @@ export class MemoryRepository implements Repository {
       media.status = "pending_deletion"; media.deleteAfter = deleteAfter; this.audit.push(entry); return "scheduled" as const;
     }));
   }
-  async requestPermanentMediaDeletion(input: { id: string; mediaId: string; ownerId: string; expectedCollectionIds: string[]; now: Date }) {
+  async requestPermanentMediaDeletion(input: { id: string; mediaId: string; ownerId: string; expectedCollectionIds: string[]; now: Date }): Promise<PermanentMediaDeletionResult> {
     return this.withPromotionLock(`user:${input.ownerId}`, () => this.withPromotionLock(`media:${input.mediaId}`, async () => {
       await tick();
       const media = this.media.get(input.mediaId);
@@ -1193,27 +1363,37 @@ export class MemoryRepository implements Repository {
       if (media.status === "deleted") return { status: "already_deleted" as const };
       const collectionIds = [...this.collections.values()].filter((collection) => collection.mediaIds.includes(media.id)).map((collection) => collection.id).sort();
       if (JSON.stringify(collectionIds) !== JSON.stringify([...new Set(input.expectedCollectionIds)].sort())) return { status: "collections_changed" as const };
-      if ([...this.items.values()].some((item) => item.mediaAssetId === media.id && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status))) return { status: "in_use" as const };
-      if ([...this.mediaImportJobs.values()].some((job) => job.sourceMediaId === media.id && ["pending", "copying", "verifying"].includes(job.status))) return { status: "import_in_progress" as const };
-      if ([...this.renderJobs.values()].some((job) => job.mediaAssetId === media.id && ["queued", "running"].includes(job.status))) return { status: "in_use" as const };
-      if ([...this.collections.values()].some((collection) => collection.sharedCoverMediaId === media.id) || [...this.collections.values()].some((collection) => collection.items?.some((item) => item.coverMediaId === media.id)) || [...this.items.values()].some((item) => item.coverMediaId === media.id)) return { status: "cover_in_use" as const };
-      const job: MediaCleanupJobRecord = { id: input.id, ownerId: input.ownerId, mediaAssetId: media.id, status: "queued", attempts: 0, lockToken: null, lockExpiresAt: null, createdAt: input.now };
-      const collectionSnapshot = collectionIds.map((id) => [id, clone(this.collections.get(id)!)] as const);
-      const auditLength = this.audit.length;
-      try {
-        for (const id of collectionIds) {
-          const collection = this.collections.get(id)!;
-          this.collections.set(id, { ...collection, mediaIds: collection.mediaIds.filter((id) => id !== media.id), items: collection.items?.filter((item) => item.mediaAssetId !== media.id) });
+      const finishDeletion = async () => {
+        const lockedCollectionIds = [...this.collections.values()].filter((collection) => collection.mediaIds.includes(media.id)).map((collection) => collection.id).sort();
+        if (JSON.stringify(lockedCollectionIds) !== JSON.stringify(collectionIds)) return { status: "collections_changed" as const };
+        // Recheck every dependency after collection locks are held. Cycle creation and membership
+        // writes use the same locks, so a new reference cannot slip between preflight and unlink.
+        if ([...this.items.values()].some((item) => item.mediaAssetId === media.id && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status))) return { status: "in_use" as const };
+        if ([...this.mediaImportJobs.values()].some((job) => job.sourceMediaId === media.id && ["pending", "copying", "verifying"].includes(job.status))) return { status: "import_in_progress" as const };
+        if ([...this.renderJobs.values()].some((job) => job.mediaAssetId === media.id && ["queued", "running"].includes(job.status))) return { status: "in_use" as const };
+        if ([...this.collections.values()].some((collection) => collection.sharedCoverMediaId === media.id) || [...this.collections.values()].some((collection) => collection.items?.some((item) => item.coverMediaId === media.id)) || [...this.items.values()].some((item) => item.coverMediaId === media.id)) return { status: "cover_in_use" as const };
+        const job: MediaCleanupJobRecord = { id: input.id, ownerId: input.ownerId, mediaAssetId: media.id, status: "queued", attempts: 0, lockToken: null, lockExpiresAt: null, createdAt: input.now };
+        const collectionSnapshot = collectionIds.map((id) => [id, clone(this.collections.get(id)!)] as const);
+        const auditLength = this.audit.length;
+        try {
+          for (const id of collectionIds) {
+            const collection = this.collections.get(id)!;
+            this.collections.set(id, { ...collection, mediaIds: collection.mediaIds.filter((id) => id !== media.id), items: collection.items?.filter((item) => item.mediaAssetId !== media.id) });
+          }
+          this.media.set(media.id, { ...media, status: "deleted", deleteAfter: null });
+          this.mediaCleanupJobs.set(job.id, job);
+          this.audit.push({ actorId: input.ownerId, action: "media.permanent_deletion_queued", entityType: "MediaAsset", entityId: media.id, metadata: { collectionIds } });
+          return { status: "queued" as const, job: clone(job), removedCollectionIds: collectionIds };
+        } catch {
+          this.media.set(media.id, media); this.mediaCleanupJobs.delete(job.id); this.audit.length = auditLength;
+          for (const [id, collection] of collectionSnapshot) this.collections.set(id, collection);
+          return { status: "conflict" as const };
         }
-        this.media.set(media.id, { ...media, status: "deleted", deleteAfter: null });
-        this.mediaCleanupJobs.set(job.id, job);
-        this.audit.push({ actorId: input.ownerId, action: "media.permanent_deletion_queued", entityType: "MediaAsset", entityId: media.id, metadata: { collectionIds } });
-        return { status: "queued" as const, job: clone(job), removedCollectionIds: collectionIds };
-      } catch {
-        this.media.set(media.id, media); this.mediaCleanupJobs.delete(job.id); this.audit.length = auditLength;
-        for (const [id, collection] of collectionSnapshot) this.collections.set(id, collection);
-        return { status: "conflict" as const };
-      }
+      };
+      const withCollectionLocks = async (index: number): Promise<PermanentMediaDeletionResult> => index >= collectionIds.length
+        ? finishDeletion()
+        : this.withPromotionLock(`collection:${collectionIds[index]}`, () => withCollectionLocks(index + 1));
+      return withCollectionLocks(0);
     }));
   }
   async claimMediaCleanupJob(input: { workerId: string; now: Date; leaseSeconds: number }): Promise<MediaCleanupJobRecord | null> {
@@ -1222,6 +1402,11 @@ export class MemoryRepository implements Repository {
     const job = queued[0]; if (!job) return null;
     const claimed = { ...job, status: "running" as const, attempts: job.attempts + 1, lockToken: randomUUID(), lockExpiresAt: new Date(input.now.getTime() + input.leaseSeconds * 1000) };
     this.mediaCleanupJobs.set(job.id, claimed); return clone(claimed);
+  }
+  async getMediaCleanupJobForOwner(ownerId: string, mediaId: string): Promise<MediaCleanupJobRecord | null> {
+    await tick();
+    const job = [...this.mediaCleanupJobs.values()].find((candidate) => candidate.ownerId === ownerId && candidate.mediaAssetId === mediaId);
+    return job ? clone(job) : null;
   }
   async canCleanupMediaAsset(mediaId: string): Promise<boolean> {
     await tick(); const media = this.media.get(mediaId);
@@ -1260,19 +1445,21 @@ export class MemoryRepository implements Repository {
 
   async getCollection(collectionId: string): Promise<VideoCollection | null> { await tick(); const c = this.collections.get(collectionId); return c ? clone(c) : null; }
   async createCollection(collection: VideoCollection): Promise<boolean> {
-    await tick();
-    if (this.collections.has(collection.id)) return false;
-    if (new Set(collection.mediaIds).size !== collection.mediaIds.length) return false;
-    if (collection.mediaIds.some((id) => !this.media.has(id))) return false;
-    this.collections.set(collection.id, clone({ ...collection, captionMode: collection.captionMode ?? "individual", sharedCaptionText: collection.sharedCaptionText ?? null, coverMode: collection.coverMode ?? "individual", sharedCoverMediaId: collection.sharedCoverMediaId ?? null, settingsVersion: collection.settingsVersion ?? 1, items: collection.mediaIds.map((mediaAssetId) => collection.items?.find((item) => item.mediaAssetId === mediaAssetId) ?? { mediaAssetId, captionText: "", coverMediaId: null, version: 1 }) }));
-    return true;
+    return this.withPromotionLock(`user:${collection.ownerId}`, async () => {
+      await tick();
+      if (this.collections.has(collection.id)) return false;
+      if (new Set(collection.mediaIds).size !== collection.mediaIds.length) return false;
+      if (collection.mediaIds.some((id) => { const media = this.media.get(id); return !media || media.ownerId !== collection.ownerId || media.status !== "active"; })) return false;
+      this.collections.set(collection.id, clone({ ...collection, captionMode: collection.captionMode ?? "individual", sharedCaptionText: collection.sharedCaptionText ?? null, coverMode: collection.coverMode ?? "individual", sharedCoverMediaId: collection.sharedCoverMediaId ?? null, settingsVersion: collection.settingsVersion ?? 1, items: collection.mediaIds.map((mediaAssetId) => collection.items?.find((item) => item.mediaAssetId === mediaAssetId) ?? { mediaAssetId, captionText: "", coverMediaId: null, version: 1 }) }));
+      return true;
+    });
   }
   async addOwnedMediaToCollection(input: { collectionId: string; mediaAssetId: string; ownerId: string; actorId: string; now: Date }): Promise<"added" | "existing" | "not_found" | "not_owned"> {
     if (input.actorId !== input.ownerId) return "not_owned";
-    return this.withPromotionLock(`collection:${input.collectionId}`, async () => {
+    return this.withPromotionLock(`user:${input.ownerId}`, () => this.withPromotionLock(`collection:${input.collectionId}`, async () => {
       await tick();
       const collection = this.collections.get(input.collectionId);
-      if (!collection || collection.ownerId !== input.ownerId) return "not_found";
+      if (!collection || collection.ownerId !== input.ownerId || collection.archived) return "not_found";
       const media = this.media.get(input.mediaAssetId);
       if (!media || media.ownerId !== input.ownerId || media.status !== "active" || media.kind !== "video") return "not_owned";
       if (collection.mediaIds.includes(input.mediaAssetId)) return "existing";
@@ -1282,7 +1469,7 @@ export class MemoryRepository implements Repository {
       this.collections.set(input.collectionId, { ...collection, mediaIds: [...collection.mediaIds, input.mediaAssetId], items: [...items, { mediaAssetId: input.mediaAssetId, captionText: "", coverMediaId: null, version: 1 }], settingsVersion: (collection.settingsVersion ?? 1) + 1 });
       this.audit.push(clone(audit));
       return "added";
-    });
+    }));
   }
   async saveCollectionItemSettings(input: { collectionId: string; ownerId: string; mediaAssetId: string; captionText: string; coverMediaId: string | null; expectedVersion: number }): Promise<boolean> {
     return this.withPromotionLock(`collection:${input.collectionId}`, async () => {
@@ -1308,6 +1495,9 @@ export class MemoryRepository implements Repository {
     return this.withPromotionLock(`collection:${collectionId}`, async () => {
       await tick();
       if ([...this.mediaImportJobs.values()].some((job) => job.sourceCollectionId === collectionId && ["pending", "copying", "verifying"].includes(job.status))) return false;
+      // Keep collection membership stable while an active cycle may still publish from it.
+      // Historical cycle items deliberately remain after deletion and do not block it.
+      if ([...this.items.values()].some((item) => item.sourceCollectionId === collectionId && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status))) return false;
       return this.collections.delete(collectionId);
     });
   }
@@ -1320,17 +1510,20 @@ export class MemoryRepository implements Repository {
     return true;
   }
   async replaceCollectionMedia(collectionId: string, mediaIds: string[]): Promise<boolean> {
-    return this.withPromotionLock(`collection:${collectionId}`, async () => {
+    const ownerId = this.collections.get(collectionId)?.ownerId;
+    if (!ownerId) return false;
+    return this.withPromotionLock(`user:${ownerId}`, () => this.withPromotionLock(`collection:${collectionId}`, async () => {
       await tick();
       const current = this.collections.get(collectionId);
-      if (!current || new Set(mediaIds).size !== mediaIds.length || mediaIds.some((id) => !this.media.has(id))) return false;
+      if (!current || new Set(mediaIds).size !== mediaIds.length || mediaIds.some((id) => { const media = this.media.get(id); return !media || media.ownerId !== ownerId || media.status !== "active"; })) return false;
       const removed = current.mediaIds.filter((id) => !mediaIds.includes(id));
       if ([...this.mediaImportJobs.values()].some((job) => job.sourceCollectionId === collectionId && removed.includes(job.sourceMediaId) && ["pending", "copying", "verifying"].includes(job.status))) return false;
+      if ([...this.items.values()].some((item) => item.sourceCollectionId === collectionId && removed.includes(item.mediaAssetId) && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status))) return false;
       const currentItems = current.items ?? current.mediaIds.map((mediaAssetId) => ({ mediaAssetId, captionText: "", coverMediaId: null, version: 1 }));
       const retained = new Map(currentItems.filter((item) => mediaIds.includes(item.mediaAssetId)).map((item) => [item.mediaAssetId, item]));
       this.collections.set(collectionId, { ...current, mediaIds: [...mediaIds], settingsVersion: (current.settingsVersion ?? 1) + 1, items: mediaIds.map((mediaAssetId) => retained.get(mediaAssetId) ?? { mediaAssetId, captionText: "", coverMediaId: null, version: 1 }) });
       return true;
-    });
+    }));
   }
   async removeCollectionItem(input: { collectionId: string; mediaAssetId: string; actorId: string; now: Date }): Promise<"removed" | "already_absent" | "not_found" | "forbidden" | "conflict"> {
     const initial = this.collections.get(input.collectionId);
@@ -1345,6 +1538,7 @@ export class MemoryRepository implements Repository {
       if (!capabilities.has("manage")) return "forbidden";
       if (!collection.mediaIds.includes(input.mediaAssetId)) return "already_absent";
       if ([...this.mediaImportJobs.values()].some((job) => job.sourceCollectionId === input.collectionId && job.sourceMediaId === input.mediaAssetId && ["pending", "copying", "verifying"].includes(job.status))) return "conflict";
+      if ([...this.items.values()].some((item) => item.sourceCollectionId === input.collectionId && item.mediaAssetId === input.mediaAssetId && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status))) return "conflict";
       const audit: AuditEntry = { actorId: input.actorId, action: "collection.item_removed", entityType: "CollectionItem", entityId: `${input.collectionId}:${input.mediaAssetId}`, metadata: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId } };
       if (this.beforeSharingAuditInsert && !this.beforeSharingAuditInsert(clone(audit))) throw new Error("Collection removal audit insert failed.");
       const items = collection.items ?? collection.mediaIds.map((mediaAssetId) => ({ mediaAssetId, captionText: "", coverMediaId: null, version: 1 }));

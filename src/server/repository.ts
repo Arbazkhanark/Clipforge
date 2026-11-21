@@ -128,6 +128,7 @@ export interface MediaVerificationState {
 }
 export interface MediaCleanupJobRecord { id: string; ownerId: string; mediaAssetId: string; status: "queued" | "running" | "succeeded" | "failed"; attempts: number; lockToken: string | null; lockExpiresAt: Date | null; createdAt: Date; }
 export type PermanentMediaDeletionResult = { status: "queued" | "existing"; job: MediaCleanupJobRecord; removedCollectionIds: string[] } | { status: "missing" | "already_deleted" | "collections_changed" | "in_use" | "cover_in_use" | "import_in_progress" | "conflict" };
+export type MediaUploadPersistResult = boolean | "collection_unavailable";
 export interface MediaVerificationClaim { workerId: string; now: Date; leaseSeconds: number; jobId?: string; }
 export interface RenderJobFence { id: string; ownerId: string; lockToken: string; }
 export interface AuditEntry { actorId: string | null; action: string; entityType: string; entityId: string; metadata?: Record<string, unknown>; }
@@ -143,6 +144,19 @@ export type MediaImportRequestResult = { status: "created" | "existing"; job: Me
 export interface MediaImportClaim { workerId: string; now: Date; leaseSeconds: number; jobId?: string; }
 export interface MediaImportFinalizationInput { jobId: string; lockToken: string; importerId: string; now: Date; media: MediaAsset; storageKey: string; commitStagedObject: () => Promise<void>; }
 export interface MediaImportVerificationInput { jobId: string; lockToken: string; now: Date; }
+export interface EditedReplacementMembership { id: string; collectionId: string; version: number; }
+export interface EditedMediaReplacementRecord {
+  id: string; ownerId: string; sourceMediaAssetId: string; sourceDerivativeId: string; plannedReplacementMediaAssetId: string; replacementMediaAssetId: string | null; stagingObjectKey: string | null;
+  status: "queued" | "copying" | "verifying" | "completed" | "blocked" | "failed"; idempotencyKey: string;
+  membershipSnapshot: EditedReplacementMembership[]; attempts: number; lockedBy: string | null; lockToken: string | null;
+  lockExpiresAt: Date | null; errorCode: string | null; createdAt: Date; updatedAt: Date; completedAt: Date | null;
+}
+export interface EditedReplacementRequest { id: string; ownerId: string; sourceMediaAssetId: string; sourceDerivativeId: string; plannedReplacementMediaAssetId: string; idempotencyKey: string; now: Date; }
+export type EditedReplacementRequestResult = { status: "created" | "existing"; job: EditedMediaReplacementRecord } | { status: "missing" | "unauthorized" | "not_verified" | "dependency" | "quota" | "conflict" };
+export interface EditedReplacementClaim { workerId: string; now: Date; leaseSeconds: number; jobId?: string; }
+export interface EditedReplacementCommitInput { jobId: string; ownerId: string; lockToken: string; now: Date; media: MediaAsset; storageKey: string; verificationJob: MediaVerificationJobRecord; limitBytes: number; }
+export type EditedReplacementCommitResult = "applied" | "existing" | "stale" | "unauthorized" | "quota" | "conflict";
+export type EditedReplacementFinalizeResult = "applied" | "existing" | "stale" | "unverified" | "dependency" | "membership_changed" | "conflict";
 export interface CreateCollectionGrantInput { collectionId: string; actorId: string; granteeId: string; capabilities: Capability[]; expiresAt: Date | null; now: Date; }
 export interface RevokeCollectionGrantInput { collectionId: string; actorId: string; granteeId: string; now: Date; }
 export type CollectionGrantMutationResult =
@@ -305,6 +319,8 @@ export interface Repository {
   createCycle(cycle: CycleRecord): Promise<void>;
   /** Creates a user-owned draft only while the caller's active-cycle limit still has room. */
   createCycleWithinLimit(cycle: CycleRecord, activeCycleLimit: number): Promise<boolean>;
+  /** Creates a collection-derived cycle and its initial items atomically, rechecking membership and access. */
+  createCycleWithCollectionItemsWithinLimit(cycle: CycleRecord, items: CycleItem[], activeCycleLimit: number, expectedCollectionSettingsVersions: Record<string, number>): Promise<boolean>;
   /** Bounded, stable scan used to recover a completion pass after worker interruption. */
   listRunningCyclesForSettlement(afterCycleId: string | null, limit: number): Promise<CycleRecord[]>;
   /** Atomically completes a settled cycle and, when enabled and within limits, queues its next draft round. */
@@ -316,7 +332,7 @@ export interface Repository {
 
   getCycleItems(cycleId: string): Promise<CycleItem[]>;
   /** Adds items only while the parent cycle is still editable; serializes against cycle completion. */
-  addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions?: Record<string, number>, orderUpdates?: { item: CycleItem; expectedVersion: number }[]): Promise<boolean>;
+  addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions?: Record<string, number>, orderUpdates?: { item: CycleItem; expectedVersion: number }[], now?: Date): Promise<boolean>;
   saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]>;
   /** Explicit, owner/source-checked output selection for a versioned item in an owned draft cycle. */
   selectCycleItemRenderOutput(input: SelectCycleItemRenderOutputInput): Promise<boolean>;
@@ -335,7 +351,7 @@ export interface Repository {
    */
   addMediaIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, limitBytes: number): Promise<boolean>;
   /** Atomically creates a not-yet-verified media row and its single idempotent verification job within quota. */
-  addMediaWithVerificationJobIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, job: MediaVerificationJobRecord, audit: AuditEntry, limitBytes: number): Promise<boolean>;
+  addMediaWithVerificationJobIfStorageWithin(media: MediaAsset, keys: { storageKey: string; thumbnailKey: string | null }, job: MediaVerificationJobRecord, audit: AuditEntry, limitBytes: number, collectionId?: string): Promise<MediaUploadPersistResult>;
   getMediaVerificationForOwner(ownerId: string, mediaId: string): Promise<MediaVerificationState | null>;
   listMediaVerificationsForOwner(ownerId: string, mediaIds: string[]): Promise<MediaVerificationState[]>;
   retryMediaVerification(ownerId: string, mediaId: string, now: Date): Promise<"queued" | "existing" | "missing" | "not_retryable">;
@@ -343,6 +359,13 @@ export interface Repository {
   updateMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; now: Date; leaseSeconds: number; payload: unknown }): Promise<boolean>;
   completeMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; finishedAt: Date; payload: unknown; width: number; height: number; durationMs: number | null }): Promise<boolean>;
   failMediaVerificationJob(input: { id: string; ownerId: string; lockToken: string; now: Date; payload: unknown; errorMessage: string; retryAt?: Date }): Promise<boolean>;
+  createOrGetEditedMediaReplacement(input: EditedReplacementRequest): Promise<EditedReplacementRequestResult>;
+  getEditedMediaReplacementForOwner(ownerId: string, sourceMediaAssetId: string, sourceDerivativeId: string): Promise<EditedMediaReplacementRecord | null>;
+  claimNextEditedMediaReplacement(input: EditedReplacementClaim): Promise<EditedMediaReplacementRecord | null>;
+  heartbeatEditedMediaReplacement(input: { jobId: string; ownerId: string; lockToken: string; now: Date; leaseSeconds: number; stagingObjectKey?: string }): Promise<boolean>;
+  commitEditedMediaReplacement(input: EditedReplacementCommitInput): Promise<EditedReplacementCommitResult>;
+  finalizeEditedMediaReplacement(input: { jobId: string; ownerId: string; lockToken: string; now: Date; cleanupJobId: string }): Promise<EditedReplacementFinalizeResult>;
+  failEditedMediaReplacement(input: { jobId: string; ownerId: string; lockToken: string; now: Date; errorCode: string; retryAt: Date | null }): Promise<boolean>;
   /** For the serving routes ONLY. These keys never leave the server. */
   getMediaStorageInfo(mediaId: string): Promise<{ storageKey: string; thumbnailKey: string | null; mimeType: string | null } | null>;
   createOrGetMediaImportJob(input: MediaImportRequestInput): Promise<MediaImportRequestResult>;
@@ -356,6 +379,8 @@ export interface Repository {
   failMediaImportJob(input: { jobId: string; lockToken: string; now: Date; reason: string }): Promise<boolean>;
   scheduleMediaDeletion(input: { mediaId: string; ownerId: string; now: Date; graceDays: number }): Promise<"scheduled" | "missing" | "already_pending" | "import_pending">;
   requestPermanentMediaDeletion(input: { id: string; mediaId: string; ownerId: string; expectedCollectionIds: string[]; now: Date }): Promise<PermanentMediaDeletionResult>;
+  /** Owner-scoped status lookup for an already requested permanent media cleanup. */
+  getMediaCleanupJobForOwner(ownerId: string, mediaId: string): Promise<MediaCleanupJobRecord | null>;
   claimMediaCleanupJob(input: { workerId: string; now: Date; leaseSeconds: number }): Promise<MediaCleanupJobRecord | null>;
   finishMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date }): Promise<boolean>;
   failMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date; errorCode: string; retryAt: Date | null }): Promise<boolean>;

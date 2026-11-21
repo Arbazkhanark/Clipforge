@@ -212,8 +212,10 @@ test("another user's cycle looks exactly like a missing one (404) and nothing ch
 });
 
 test("a cycle cannot be created on someone else's social account", async () => {
-  const { ctxFor } = setup();
-  assert.equal((await errorOf(createCycle(ctxFor("bob"), { name: "x", socialAccountId: "acctEve" }))).status, 404);
+  const { repo, ctxFor } = setup();
+  repo.media.set("cycle-source", makeMedia({ id: "cycle-source", ownerId: "bob" }));
+  repo.collections.set("cycle-source-collection", makeCollection({ id: "cycle-source-collection", ownerId: "bob", mediaIds: ["cycle-source"] }));
+  assert.equal((await errorOf(createCycle(ctxFor("bob"), { name: "x", socialAccountId: "acctEve", collectionIds: ["cycle-source-collection"] }))).status, 404);
 });
 
 // ---------- captions ----------
@@ -395,7 +397,7 @@ test("promotional Creator limits apply to campaign mixing through the existing c
   const { repo, ctxFor } = setup({ bob: "free", owner: "pro" });
   grantActivePlan(repo, "bob", "creator");
   const mediaIds = Array.from({ length: 6 }, (_, index) => `promo-media-${index}`);
-  mediaIds.forEach((id) => repo.media.set(id, makeMedia({ id, ownerId: "bob" })));
+  mediaIds.forEach((id) => repo.media.set(id, makeMedia({ id, ownerId: "bob", kind: "video" })));
   repo.collections.set("bob-collection", makeCollection({ id: "bob-collection", ownerId: "bob", mediaIds }));
   const added = await mixIntoCycle(ctxFor("bob"), { cycleId: "cycle1", videos: mediaIds.map((mediaAssetId) => ({ mediaAssetId, collectionId: "bob-collection" })) });
   assert.equal(added.added, 6, "Creator's catalog batch limit is used instead of Free's limit of five");
@@ -423,27 +425,44 @@ test("delegated manager limits hold through the handler; revoking works and take
 test("creating a cycle enforces the active-campaign limit of the plan (Free: 1)", async () => {
   const { repo, ctxFor } = setup({ bob: "free" });
   repo.cycles.clear();
-  await createCycle(ctxFor("bob"), { name: "First", socialAccountId: "acct1" });
-  const error = await errorOf(createCycle(ctxFor("bob"), { name: "Second", socialAccountId: "acct1" }));
+  repo.media.set("cycle-media", makeMedia({ id: "cycle-media", ownerId: "bob", kind: "video", status: "active" }));
+  repo.collections.set("cycle-collection", makeCollection({ id: "cycle-collection", ownerId: "bob", mediaIds: ["cycle-media"] }));
+  await createCycle(ctxFor("bob"), { name: "First", socialAccountId: "acct1", collectionIds: ["cycle-collection"] });
+  const error = await errorOf(createCycle(ctxFor("bob"), { name: "Second", socialAccountId: "acct1", collectionIds: ["cycle-collection"] }));
   assert.deepEqual([error.status, error.code], [403, "plan_limit"]);
   assert.equal(repo.cycles.size, 1);
-  assert.equal((await errorOf(createCycle(ctxFor("bob"), { name: "", socialAccountId: "acct1" }))).status, 422);
+  assert.equal((await errorOf(createCycle(ctxFor("bob"), { name: "", socialAccountId: "acct1", collectionIds: ["cycle-collection"] }))).status, 422);
 });
 
 const mixSetup = (bobPlan: PlanId = "creator") => {
   const s = setup({ bob: bobPlan, owner: "pro" });
-  s.repo.media.set("own1", makeMedia({ id: "own1", ownerId: "bob" }));
+  s.repo.media.set("own1", makeMedia({ id: "own1", ownerId: "bob", kind: "video" }));
   s.repo.collections.set("mine", makeCollection({ id: "mine", ownerId: "bob", mediaIds: ["own1"] }));
-  s.repo.media.set("shared1", makeMedia({ id: "shared1", ownerId: "owner" }));
+  s.repo.media.set("shared1", makeMedia({ id: "shared1", ownerId: "owner", kind: "video" }));
   s.repo.collections.set("col1", makeCollection({ id: "col1", ownerId: "owner", mediaIds: ["shared1"] }));
   return s;
 };
 
+test("cycle creation supports one or multiple selected collections and deduplicates shared videos", async () => {
+  const { repo, ctxFor } = setup({ bob: "pro", owner: "pro" });
+  for (const id of ["one", "two"]) repo.media.set(id, makeMedia({ id, ownerId: "bob", kind: "video", status: "active" }));
+  repo.collections.set("single", makeCollection({ id: "single", ownerId: "bob", mediaIds: ["one"] }));
+  repo.collections.set("first", makeCollection({ id: "first", ownerId: "bob", mediaIds: ["one", "two"] }));
+  repo.collections.set("second", makeCollection({ id: "second", ownerId: "bob", mediaIds: ["two"] }));
+
+  const oneVideo = await createCycle(ctxFor("bob"), { name: "One video", socialAccountId: "acct1", collectionIds: ["single"] });
+  assert.deepEqual((await repo.getCycleItems(oneVideo.cycleId)).map((item) => item.mediaAssetId), ["one"]);
+
+  const multiple = await createCycle(ctxFor("bob"), { name: "Several collections", socialAccountId: "acct1", collectionIds: ["first", "second"] });
+  assert.notEqual(oneVideo.cycleId, multiple.cycleId);
+  assert.deepEqual((await repo.getCycleItems(multiple.cycleId)).map((item) => item.mediaAssetId).sort(), ["one", "two"]);
+});
+
 test("collection videos added to a cycle use its persisted ordering mode", async () => {
   const { repo, ctxFor } = mixSetup("pro");
   repo.cycles.set("cycle1", { ...repo.cycles.get("cycle1")!, orderMode: "name_asc" });
-  repo.media.set("own1", makeMedia({ id: "own1", ownerId: "bob", title: "Zulu.mp4", sizeBytes: 800, createdAt: new Date("2026-01-02T00:00:00Z") }));
-  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob", title: "Alpha.mp4", sizeBytes: 100, createdAt: new Date("2026-01-01T00:00:00Z") }));
+  repo.media.set("own1", makeMedia({ id: "own1", ownerId: "bob", kind: "video", title: "Zulu.mp4", sizeBytes: 800, createdAt: new Date("2026-01-02T00:00:00Z") }));
+  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob", kind: "video", title: "Alpha.mp4", sizeBytes: 100, createdAt: new Date("2026-01-01T00:00:00Z") }));
   repo.collections.set("mine", makeCollection({ id: "mine", ownerId: "bob", mediaIds: ["own1", "own2"] }));
   assert.equal((await mixIntoCycle(ctxFor("bob"), { cycleId: "cycle1", videos: [{ mediaAssetId: "own1", collectionId: "mine" }, { mediaAssetId: "own2", collectionId: "mine" }] })).added, 2);
   assert.deepEqual((await repo.getCycleItems("cycle1")).map((item) => item.mediaAssetId), ["own2", "own1"]);
@@ -461,7 +480,7 @@ test("mix: Creator may mix owned + shared (with permission); source kinds and ow
 
 test("cycle import snapshots effective collection caption and cover settings; cycle overrides stay isolated", async () => {
   const { repo, ctxFor } = mixSetup("pro");
-  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob" }));
+  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob", kind: "video" }));
   repo.media.set("coverA", makeMedia({ id: "coverA", ownerId: "bob", kind: "image" }));
   repo.media.set("coverB", makeMedia({ id: "coverB", ownerId: "bob", kind: "image" }));
   repo.collections.set("mine", makeCollection({ id: "mine", ownerId: "bob", mediaIds: ["own1", "own2"], items: [
@@ -484,7 +503,7 @@ test("cycle import snapshots effective collection caption and cover settings; cy
 
 test("cycle import resolves shared collection defaults without replacing individual saved settings", async () => {
   const { repo, ctxFor } = mixSetup("pro");
-  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob" }));
+  repo.media.set("own2", makeMedia({ id: "own2", ownerId: "bob", kind: "video" }));
   repo.media.set("coverA", makeMedia({ id: "coverA", ownerId: "bob", kind: "image" }));
   repo.collections.set("mine", makeCollection({ id: "mine", ownerId: "bob", mediaIds: ["own1", "own2"], captionMode: "shared", sharedCaptionText: "Shared caption", coverMode: "shared", sharedCoverMediaId: "coverA", items: [
     { mediaAssetId: "own1", captionText: "Preserved individual A", coverMediaId: null, version: 1 },

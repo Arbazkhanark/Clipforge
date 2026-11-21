@@ -30,6 +30,7 @@ test("a database content failure is reported and does not fall back to memory", 
 test("database mode writes collections through the database client, not a memory repository", async () => {
   const client = new FakePrismaClient();
   const runtime = createDatabaseRuntime("postgresql://127.0.0.1:9/clipforge", async () => client);
+  await client.user.create({ data: { id: "ann", email: "ann@example.test" } });
   await client.mediaAsset.create({ data: { id: "m1", ownerId: "ann", storageKey: "ref/m1", sizeBytes: 10n, status: "active" } });
   assert.equal(await runtime.repo.createCollection({ id: "c1", ownerId: "ann", visibility: "private", archived: false, mediaIds: ["m1"], name: "Saved" }), true);
   assert.equal((await new MemoryRepository().getCollection("c1")), null);
@@ -71,7 +72,7 @@ test("Neon keeps collections, media metadata, and cycles after a new database co
     assert.equal(await first.createCollection({ id: collectionId, ownerId, name: "Persisted collection", description: "Kept", visibility: "private", archived: false, mediaIds: [mediaId] }), true);
     assert.equal(await first.createCollection({ id: collectionId, ownerId, name: "Again", visibility: "private", archived: false, mediaIds: [] }), false);
     await first.createCycle({ id: cycleId, ownerId, name: "Persisted cycle", status: "draft", finalReviewConfirmed: false, socialAccountId: accountId });
-    await first.addCycleItems([makeItem({ id: `item-${stamp}`, cycleId, cycleOwnerId: ownerId, mediaAssetId: mediaId, sourceKind: "owned", sourceCollectionId: collectionId, position: 1 })]);
+    assert.equal(await first.addCycleItems([makeItem({ id: `item-${stamp}`, cycleId, cycleOwnerId: ownerId, mediaAssetId: mediaId, sourceKind: "owned", sourceCollectionId: collectionId, position: 1 })], { [collectionId]: 1 }), true);
     await first.appendAudit({ actorId: ownerId, action: "cycle.created", entityType: "PublishingCycle", entityId: cycleId });
     await closer.$disconnect();
 

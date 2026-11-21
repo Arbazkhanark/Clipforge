@@ -136,7 +136,7 @@ export const collectionShareLinkRevokeForm = formRoute({
 
 export const createCycleForm = formRoute({
   handler: createCycle,
-  toInput: (f) => ({ name: f.get("name") ?? "", socialAccountId: f.get("socialAccountId") ?? "" }),
+  toInput: (f) => ({ name: f.get("name") ?? "", socialAccountId: f.get("socialAccountId") ?? "", collectionIds: f.getAll("collectionIds") }),
   success: (r) => ({ path: `/cycles/${r.cycleId}`, code: "cycle_created" }),
   failurePath: () => "/cycles",
 });

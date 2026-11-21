@@ -24,7 +24,7 @@ export interface ModelDelegate {
 
 export interface PrismaClientLike {
   user: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate; googleIdentity: ModelDelegate;
-  mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; mediaImportJob: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate; collectionAccessRequest: ModelDelegate; collectionShareLink: ModelDelegate;
+  mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; mediaImportJob: ModelDelegate; editedMediaReplacement: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate; collectionAccessRequest: ModelDelegate; collectionShareLink: ModelDelegate;
   publishingCycle: ModelDelegate; cycleItem: ModelDelegate; publishingJob: ModelDelegate; processingJob: ModelDelegate; captionRevision: ModelDelegate;
   auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; razorpaySubscriptionIntent: ModelDelegate; razorpaySubscriptionContinuation: ModelDelegate; manualPaymentIntent: ModelDelegate; manualPlanAccess: ModelDelegate; promotion: ModelDelegate; promotionRedemption: ModelDelegate; promotionalAccessGrant: ModelDelegate; promotionLifecycleEvent: ModelDelegate; webhookEvent: ModelDelegate; paymentRecord: ModelDelegate; usageRecord: ModelDelegate;
   /** Present after the forward-only first-Admin registration migration is applied. */

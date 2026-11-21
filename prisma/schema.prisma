@@ -168,6 +168,15 @@ enum JobKind {
   media_verification
 }
 
+enum EditedMediaReplacementStatus {
+  queued
+  copying
+  verifying
+  completed
+  blocked
+  failed
+}
+
 enum PublishOutcome {
   in_progress
   success
@@ -354,6 +363,7 @@ model User {
   notifications  Notification[]
   usageRecords   UsageRecord[]
   publishingJobs PublishingJob[]
+  editedMediaReplacements EditedMediaReplacement[]
 }
 
 /// Login sessions. Only a SHA-256 hash of the cookie token is stored, so a database leak cannot be replayed as cookies.
@@ -778,6 +788,8 @@ model MediaAsset {
   cycleItems      CycleItem[]       @relation("CycleItemMedia")
   coverForItems   CycleItem[]       @relation("CycleItemCover")
   importJobs      MediaImportJob[]  @relation("ImportSource")
+  replacementSources EditedMediaReplacement[] @relation("EditedReplacementSource")
+  replacementOutputs EditedMediaReplacement[] @relation("EditedReplacementOutput")
 
   @@index([ownerId, status, createdAt])
   @@index([status, deleteAfter])
@@ -801,6 +813,7 @@ model MediaDerivative {
   createdAt    DateTime       @default(now())
 
   selectedByCycleItems CycleItem[] @relation("CycleItemSelectedRenderOutput")
+  replacementSources EditedMediaReplacement[] @relation("EditedReplacementDerivative")
 
   @@unique([mediaAssetId, ownerId, kind, settingsHash])
   @@unique([id, ownerId, mediaAssetId])
@@ -848,6 +861,40 @@ model CollectionItem {
   @@unique([collectionId, mediaAssetId])
   @@index([collectionId, position])
   @@index([coverMediaId])
+}
+
+/// Durable, resumable promotion of one verified render into an independent MediaAsset.
+/// membershipSnapshot stores only collection item IDs, collection IDs, and versions; it
+/// contains no storage keys or user-provided data. Finalization rechecks this snapshot.
+model EditedMediaReplacement {
+  id                     String                       @id
+  ownerId                String
+  owner                  User                         @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  sourceMediaAssetId     String
+  sourceMediaAsset       MediaAsset                   @relation("EditedReplacementSource", fields: [sourceMediaAssetId], references: [id], onDelete: Restrict)
+  sourceDerivativeId     String
+  sourceDerivative       MediaDerivative              @relation("EditedReplacementDerivative", fields: [sourceDerivativeId, ownerId, sourceMediaAssetId], references: [id, ownerId, mediaAssetId], onDelete: Restrict)
+  /// Reserved deterministic ID before the object is copied. This is not an FK because the MediaAsset is created later.
+  plannedReplacementMediaAssetId String                @unique
+  /// Set only after the copied media row and verification job are committed.
+  replacementMediaAssetId String?                     @unique
+  replacementMediaAsset  MediaAsset?                  @relation("EditedReplacementOutput", fields: [replacementMediaAssetId], references: [id], onDelete: Restrict)
+  stagingObjectKey       String?
+  status                 EditedMediaReplacementStatus @default(queued)
+  idempotencyKey         String                       @unique
+  membershipSnapshot     Json                         @db.JsonB
+  attempts               Int                          @default(0)
+  lockedBy               String?
+  lockToken              String?
+  lockExpiresAt          DateTime?
+  errorCode              String?
+  createdAt              DateTime                     @default(now())
+  updatedAt              DateTime                     @updatedAt
+  completedAt            DateTime?
+
+  @@unique([ownerId, sourceMediaAssetId, sourceDerivativeId])
+  @@index([status, lockExpiresAt, createdAt])
+  @@index([ownerId, sourceMediaAssetId])
 }
 
 model CollectionShareLink {

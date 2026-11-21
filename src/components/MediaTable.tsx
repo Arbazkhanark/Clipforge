@@ -326,7 +326,7 @@ export function MediaTable({
                     Choose one or more videos to open them in the editor.
                   </span>
                 </div>
-                <MediaSelection formId="library-form" />
+                <MediaSelection formId="library-form" collections={library.collections ?? []} />
               </div>
             )}
 

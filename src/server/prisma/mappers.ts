@@ -69,18 +69,22 @@ export const rowToCycle = (row: Row): CycleRecord => {
   return { id: row["id"], ownerId: row["ownerId"], status: row["status"], finalReviewConfirmed: row["finalReviewConfirmed"], orderMode, name: row["name"], socialAccountId: row["socialAccountId"], repeatBehavior: row["repeatBehavior"] === "ask" || row["repeatBehavior"] === "automatic" ? row["repeatBehavior"] : "never", timezone, scheduleSettings: scheduleSettings ? { ...scheduleSettings, orderMode } : null, ...(row["createdAt"] instanceof Date ? { createdAt: row["createdAt"] } : {}) };
 };
 
-/** The fields a version-checked update may change. Identity fields (id, cycleId, cycleOwnerId) never change. */
+/** The fields a version-checked update may change. Media/source/render identity is immutable after collection admission. */
 export function itemToMutableData(i: CycleItem): Row {
   return {
-    mediaAssetId: i.mediaAssetId, selectedRenderOutputId: i.selectedRenderOutputId, selectedRenderOwnerId: i.selectedRenderOutputId === null ? null : i.cycleOwnerId,
-    selectedRenderSourceMediaId: i.selectedRenderOutputId === null ? null : i.mediaAssetId,
-    sourceKind: i.sourceKind, sourceCollectionId: i.sourceCollectionId, status: i.status, position: i.position, version: i.version,
+    status: i.status, position: i.position, version: i.version,
     scheduledFor: i.scheduledFor, captionText: i.captionText, captionSource: i.captionSource, coverMediaId: i.coverMediaId, coverIsCustom: i.coverIsCustom,
     coverState: i.coverState, lockedBy: i.lockedBy, lockExpiresAt: i.lockExpiresAt, reviewReason: i.reviewReason,
-    externalPostId: i.externalPostId ?? null, publishedAt: i.publishedAt ?? null,
   };
 }
-export const itemToRow = (i: CycleItem): Row => ({ id: i.id, cycleId: i.cycleId, cycleOwnerId: i.cycleOwnerId, ...itemToMutableData(i) });
+export const itemToRow = (i: CycleItem): Row => ({
+  id: i.id, cycleId: i.cycleId, cycleOwnerId: i.cycleOwnerId, mediaAssetId: i.mediaAssetId,
+  selectedRenderOutputId: i.selectedRenderOutputId,
+  selectedRenderOwnerId: i.selectedRenderOutputId === null ? null : i.cycleOwnerId,
+  selectedRenderSourceMediaId: i.selectedRenderOutputId === null ? null : i.mediaAssetId,
+  sourceKind: i.sourceKind, sourceCollectionId: i.sourceCollectionId,
+  ...itemToMutableData(i), externalPostId: i.externalPostId ?? null, publishedAt: i.publishedAt ?? null,
+});
 export const rowToItem = (row: Row): CycleItem => ({
   id: row["id"], cycleId: row["cycleId"], cycleOwnerId: row["cycleOwnerId"], mediaAssetId: row["mediaAssetId"], selectedRenderOutputId: row["selectedRenderOutputId"] ?? null, sourceKind: row["sourceKind"], sourceCollectionId: row["sourceCollectionId"] ?? null,
   status: row["status"], position: row["position"], version: row["version"], scheduledFor: row["scheduledFor"] ?? null, captionText: row["captionText"], captionSource: row["captionSource"],

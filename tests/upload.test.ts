@@ -14,7 +14,7 @@ import { detectProbe, isFfprobeAvailable, type MediaProbe } from "../src/server/
 import type { MediaStorage } from "../src/server/storage/media-storage.ts";
 import { getPlan } from "../src/lib/billing/catalog.ts";
 import { fakeMp4, ffmpegAvailable, makeFixtures, type Fixtures } from "./helpers/media-fixtures.ts";
-import { NOW, makeMedia } from "./helpers.ts";
+import { NOW, makeCollection, makeMedia } from "./helpers.ts";
 
 const ffprobeInstalled = spawnSync("ffprobe", ["-version"]).status === 0; // decided synchronously so skip conditions are accurate
 let fixtures: Fixtures;
@@ -76,6 +76,29 @@ test("SUCCESS: PNG and JPEG images are accepted (kind image, no duration), also 
   for (const r of [png, jpg]) { assert.equal(r.kind, "image"); assert.equal(r.durationMs, null); }
   assert.equal(repo.media.size, 2);
   if (realProbe) assert.deepEqual([repo.media.get(png.mediaId)!.width, repo.media.get(png.mediaId)!.validation], [64, "incomplete"]);
+});
+
+test("collection upload atomically adds the new media and verification job to the owned collection", needFfmpeg, async () => {
+  const { repo, storage, ctxFor } = setup();
+  assert.equal(await repo.createCollection(makeCollection({ id: "upload-collection", ownerId: "bob", mediaIds: [], items: [], createdAt: NOW })), true);
+  const result = await uploadMedia(ctxFor("bob"), { filename: "collection-clip.mp4", declaredMimeType: "video/mp4", data: fixtures.mp4, collectionId: "upload-collection" });
+  const collection = await repo.getCollection("upload-collection");
+  assert.deepEqual(collection?.mediaIds, [result.mediaId]);
+  assert.equal(collection?.items?.[0]?.mediaAssetId, result.mediaId);
+  assert.equal(repo.mediaVerificationJobs.size, 1);
+  assert.equal(repo.media.get(result.mediaId)?.ownerId, "bob");
+  assert.deepEqual(memoryCounts(storage as MemoryMediaStorage), { staged: 0, objects: 1 });
+  assert.deepEqual(repo.audit.map((entry) => entry.action), ["media.uploaded", "collection.item_added"]);
+});
+
+test("collection upload rejects another owner's collection before storing the file", needFfmpeg, async () => {
+  const { repo, storage, ctxFor } = setup();
+  assert.equal(await repo.createCollection(makeCollection({ id: "other-collection", ownerId: "eve", mediaIds: [], items: [], createdAt: NOW })), true);
+  const error = await errorOf(uploadMedia(ctxFor("bob"), { filename: "clip.mp4", declaredMimeType: "video/mp4", data: fixtures.mp4, collectionId: "other-collection" }));
+  assert.deepEqual([error.status, error.code], [404, "not_found"]);
+  assert.equal(repo.media.size, 0);
+  assert.equal(repo.mediaVerificationJobs.size, 0);
+  assert.deepEqual(memoryCounts(storage as MemoryMediaStorage), { staged: 0, objects: 0 });
 });
 
 test("SUCCESS on local disk: the file really lands in the private folder, under an id-based name", needFfmpeg, async () => {

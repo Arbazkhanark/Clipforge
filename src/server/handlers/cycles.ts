@@ -11,7 +11,7 @@ import { startCycle as startCycleRule } from "../../lib/domain/cycle-state.ts";
 import type { RepeatBehavior } from "../../lib/domain/publish-workflow.ts";
 import type { CollectionPermissionGrant, CycleItem, VideoCollection } from "../../lib/domain/types.ts";
 import { buildPreflightReport } from "../preflight-service.ts";
-import { canKeepUsingSourceForCycleItem } from "../../lib/domain/sharing-permissions.ts";
+import { canKeepUsingSourceForCycleItem, getCollectionCapabilities } from "../../lib/domain/sharing-permissions.ts";
 import { requireUser, type RequestContext } from "../context.ts";
 import { AppError, conflict, forbidden, notFound, planLimit } from "../errors.ts";
 import { Problems, readBoolean, readId, readIdList, readObject, readText } from "../validation.ts";
@@ -26,19 +26,56 @@ export async function createCycle(ctx: RequestContext, rawInput: unknown): Promi
   const userId = requireUser(ctx);
   const problems = new Problems();
   const input = readObject(rawInput, problems);
+  if (Object.keys(input).some((key) => !["name", "socialAccountId", "collectionIds"].includes(key))) problems.add("Publishing cycles can only be created from selected collections.");
   const name = readText(input, "name", problems, { min: 1, max: 100 });
   const socialAccountId = readId(input, "socialAccountId", problems);
+  const collectionIds = readIdList(input, "collectionIds", problems, { min: 1, max: 50 });
   problems.throwIfAny();
 
   const account = await ctx.repo.getSocialAccount(socialAccountId);
   if (!account || account.userId !== userId) throw notFound("Social account");
 
   const planId = await ctx.repo.getPlanIdForUser(userId, ctx.now);
+  const plan = getPlan(planId);
+  const collections = await Promise.all([...new Set(collectionIds)].map((id) => ctx.repo.getCollection(id)));
+  if (collections.some((collection) => !collection)) throw notFound("Collection");
+  const selectedCollections = collections as VideoCollection[];
+  if (selectedCollections.some((collection) => collection.archived)) throw conflict("Archived collections cannot be used to create a cycle.");
+  const grantsByCollection = await Promise.all(selectedCollections.map((collection) => ctx.repo.getGrants(collection.id)));
+  const expectedCollectionSettingsVersions: Record<string, number> = Object.create(null);
+  for (let index = 0; index < selectedCollections.length; index += 1) {
+    const collection = selectedCollections[index]!;
+    expectedCollectionSettingsVersions[collection.id] = collection.settingsVersion ?? 1;
+    if (!getCollectionCapabilities(userId, collection, grantsByCollection[index]!, ctx.now).has("use_in_cycle")) throw forbidden("You do not have permission to use every selected collection in a cycle.");
+  }
+  const candidates: MixCandidate[] = [];
+  const seenMediaIds = new Set<string>();
+  for (const collection of selectedCollections) {
+    for (const media of await ctx.repo.getMediaByIds(collection.mediaIds)) {
+      if (seenMediaIds.has(media.id) || media.status === "deleted" || media.kind !== "video") continue;
+      seenMediaIds.add(media.id);
+      candidates.push({ collection, media, isImportedCopy: Boolean(media.importedFromId) });
+    }
+  }
+  if (candidates.length === 0) throw conflict("Choose at least one collection containing an available video.");
+  const batch = checkLimit(planId, "batchSize", 0, candidates.length);
+  if (!batch.allowed) throw planLimit(`Your plan allows up to ${batch.limit} videos in a cycle creation.`);
+  const mixed = mixVideosIntoCycle({ userId, candidates, existingItems: [], grants: grantsByCollection.flat(), planFeatures: plan.features, now: ctx.now });
+  if (mixed.rejected.length > 0 || mixed.accepted.length !== candidates.length) throw forbidden(mixed.rejected[0]?.reason ?? "Some selected collection videos cannot be used in a cycle.");
+  const cycleId = ctx.newId();
+  const items: CycleItem[] = mixed.accepted.map((draft) => {
+    const collection = selectedCollections.find((entry) => entry.id === draft.sourceCollectionId) as VideoCollection;
+    const member = collection.items?.find((entry) => entry.mediaAssetId === draft.mediaAssetId);
+    const captionMode = collection.captionMode ?? "individual";
+    const coverMode = collection.coverMode ?? "individual";
+    const captionText = captionMode === "shared" ? collection.sharedCaptionText ?? "" : member?.captionText ?? "";
+    const coverMediaId = coverMode === "shared" ? collection.sharedCoverMediaId ?? null : member?.coverMediaId ?? null;
+    return { id: ctx.newId(), cycleId, cycleOwnerId: userId, mediaAssetId: draft.mediaAssetId, selectedRenderOutputId: null, sourceKind: draft.sourceKind, sourceCollectionId: draft.sourceCollectionId, status: "upcoming", position: draft.position, version: 1, scheduledFor: null, captionText, captionSource: captionText ? captionMode === "shared" ? "bulk" : "individual" : "none", coverMediaId, coverIsCustom: coverMediaId !== null, coverState: coverMediaId ? "saved_internally" : "none", lockedBy: null, lockExpiresAt: null, reviewReason: null };
+  });
   const limit = checkLimit(planId, "activeCampaigns", await ctx.repo.countActiveCycles(userId), 1);
   if (!limit.allowed) throw planLimit(limit.message);
 
-  const cycleId = ctx.newId();
-  const created = await ctx.repo.createCycleWithinLimit({ id: cycleId, ownerId: userId, status: "draft", finalReviewConfirmed: false, orderMode: "manual", name: name.trim(), socialAccountId, createdAt: ctx.now }, getPlan(planId).limits.activeCampaigns);
+  const created = await ctx.repo.createCycleWithCollectionItemsWithinLimit({ id: cycleId, ownerId: userId, status: "draft", finalReviewConfirmed: false, orderMode: "manual", name: name.trim(), socialAccountId, createdAt: ctx.now }, items, getPlan(planId).limits.activeCampaigns, expectedCollectionSettingsVersions);
   if (!created) throw planLimit("Your current plan has reached its active campaign limit.");
   await ctx.repo.appendAudit({ actorId: userId, action: "cycle.created", entityType: "PublishingCycle", entityId: cycleId });
   return { cycleId };
@@ -147,7 +184,7 @@ export async function mixIntoCycle(ctx: RequestContext, rawInput: unknown): Prom
     const additions = orderedItems.filter((item) => newIds.has(item.id));
     const orderUpdates = orderedItems.filter((item) => !newIds.has(item.id) && item.version !== beforeById.get(item.id)?.version)
       .map((item) => ({ item, expectedVersion: (beforeById.get(item.id) as CycleItem).version }));
-    if (!(await ctx.repo.addCycleItems(additions, expectedCollectionSettingsVersions, orderUpdates))) throw conflict("This cycle or its collection settings changed while adding videos. Reload and try again.");
+    if (!(await ctx.repo.addCycleItems(additions, expectedCollectionSettingsVersions, orderUpdates, ctx.now))) throw conflict("This cycle or its collection settings changed while adding videos. Reload and try again.");
   }
   await ctx.repo.appendAudit({ actorId: userId, action: "cycle.videos_mixed", entityType: "PublishingCycle", entityId: cycleId, metadata: { added: newItems.length, rejected: mixed.rejected.length + unavailable.length } });
   return { added: newItems.length, rejected: [...unavailable, ...mixed.rejected, ...unavailableCovers] };

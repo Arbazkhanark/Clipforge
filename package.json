@@ -22,6 +22,7 @@
     "worker:render": "node --import tsx scripts/run-render-worker.ts",
     "worker:media-import:once": "node --import tsx scripts/run-media-import-worker.ts",
     "worker:media-verification": "node --env-file-if-exists=.env.local --import tsx scripts/run-media-verification-worker.ts",
+    "worker:media-replacement": "node --env-file-if-exists=.env.local --import tsx scripts/run-media-replacement-worker.ts",
     "worker:media-cleanup": "node --env-file-if-exists=.env.local --import tsx scripts/run-media-cleanup-worker.ts",
     "worker:subscription-continuation": "node --import tsx scripts/run-subscription-continuation.ts"
   },

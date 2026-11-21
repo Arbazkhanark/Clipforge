@@ -14,7 +14,7 @@ import { requireCustomerPage } from "../../../src/server/auth/customer-page.ts";
 export const metadata = { title: "Publishing cycles" };
 export const dynamic = "force-dynamic";
 
-type Search = { notice?: string; error?: string };
+type Search = { notice?: string; error?: string; collectionId?: string };
 
 export default async function CyclesPage(props: {
   searchParams?: Promise<Search>;
@@ -34,7 +34,7 @@ export default async function CyclesPage(props: {
         <div className="cycles-error-panel"><ErrorState error={overview.error} /></div>
       )}
       {overview.ok && options.ok && (
-        <CreateCycleForm accounts={options.data.accounts} />
+        <CreateCycleForm accounts={options.data.accounts} collections={options.data.collections} preselectedCollectionId={searchParams?.collectionId} />
       )}
       {overview.ok && !options.ok && <div className="cycles-error-panel"><ErrorState error={options.error} /></div>}
     </>

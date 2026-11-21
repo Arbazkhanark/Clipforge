@@ -9,11 +9,11 @@ import { getPlan } from "../../lib/billing/catalog.ts";
 import { createHash, randomUUID } from "node:crypto";
 import type { MediaAsset } from "../../lib/domain/types.ts";
 import { requireUser, type RequestContext } from "../context.ts";
-import { AppError, fileTooLarge, invalidMedia, planLimit, unsupportedMediaType, validationFailed } from "../errors.ts";
+import { AppError, fileTooLarge, invalidMedia, notFound, planLimit, unsupportedMediaType, validationFailed } from "../errors.ts";
 import { CANONICAL_MIME, declaredMimeAgrees, sanitizeFilename, sniffMedia } from "../storage/media-inspection.ts";
 import { mediaKeyFor, stagingKeyFor, thumbnailKeyFor } from "../storage/media-storage.ts";
 
-export interface UploadInput { filename: unknown; declaredMimeType: unknown; data: unknown; }
+export interface UploadInput { filename: unknown; declaredMimeType: unknown; data: unknown; collectionId?: unknown; }
 
 export interface UploadResult {
   mediaId: string;
@@ -27,6 +27,7 @@ export interface UploadResult {
   warning: string | null;
   storage: "memory" | "local-disk" | "s3";
   hasThumbnail: boolean;
+  collectionId?: string;
 }
 
 export async function uploadMedia(ctx: RequestContext, input: UploadInput): Promise<UploadResult> {
@@ -35,6 +36,12 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
   if (ctx.media.unavailable) throw new AppError(503, "storage_unavailable", ctx.media.unavailable);
   const { storage, probe, maxUploadBytes } = ctx.media;
   const makeThumbnail = ctx.media.thumbnail ?? null;
+  const collectionId = input.collectionId === undefined || input.collectionId === null || input.collectionId === "" ? undefined : input.collectionId;
+  if (collectionId !== undefined) {
+    if (typeof collectionId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(collectionId)) throw validationFailed(["Choose a valid collection."]);
+    const collection = await ctx.repo.getCollection(collectionId);
+    if (!collection || collection.ownerId !== userId || collection.archived) throw notFound("Collection");
+  }
 
   // 1. Input shape
   const problems: string[] = [];
@@ -114,10 +121,13 @@ export async function uploadMedia(ctx: RequestContext, input: UploadInput): Prom
       },
     };
     const audit = { actorId: userId, action: "media.uploaded", entityType: "MediaAsset", entityId: mediaId, metadata: { sizeBytes: data.length, kind: sniffed.kind, validation: "processing" } };
-    if (!(await ctx.repo.addMediaWithVerificationJobIfStorageWithin(media, { storageKey: finalKey, thumbnailKey: hasThumbnail ? thumbFinalKey : null }, job, audit, limitBytes))) throw planLimit(quotaMessage);
+    const persisted = await ctx.repo.addMediaWithVerificationJobIfStorageWithin(media, { storageKey: finalKey, thumbnailKey: hasThumbnail ? thumbFinalKey : null }, job, audit, limitBytes, collectionId);
+    if (persisted === "collection_unavailable") throw notFound("Collection");
+    if (!persisted) throw planLimit(quotaMessage);
     return {
       mediaId, title, kind: sniffed.kind, sizeBytes: data.length, durationMs: metadata.durationMs, validation: "incomplete", verificationStatus: "processing", storage: storage.kind, hasThumbnail,
       warning: "Upload saved. Private storage and media verification are still in progress.",
+      ...(collectionId ? { collectionId } : {}),
     };
   } catch (error) {
     // Cleanup of THIS upload only. Best effort: a cleanup problem must never hide the real error.
