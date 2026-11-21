@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import nextConfig from "../next.config.ts";
 
 test("Next development request logs suppress query credentials but keep ordinary routes visible", () => {
+  assert.ok(nextConfig.allowedDevOrigins?.includes("127.0.0.1"));
   const incoming = nextConfig.logging.incomingRequests;
   assert.equal(typeof incoming, "object");
   if (typeof incoming === "boolean") return;

@@ -60,6 +60,28 @@ export const loginRoute = (runtime: RuntimeProvider = getRuntime) => (request: R
     return respond(returnTo, { "Set-Cookie": buildSessionCookie(result.sessionToken, result.expiresAt, rt.now(), useSecureCookies(request)) });
   }, "/login");
 
+function isDevelopmentLoopbackAlias(request: Request, origin: URL, requestUrl: URL): boolean {
+  if (process.env["NODE_ENV"] === "production" || origin.protocol !== requestUrl.protocol || origin.port !== requestUrl.port) return false;
+  const aliases = new Set(["localhost", "127.0.0.1"]);
+  if (!aliases.has(origin.hostname.toLowerCase()) || !aliases.has(requestUrl.hostname.toLowerCase()) || origin.hostname.toLowerCase() === requestUrl.hostname.toLowerCase()) return false;
+  const host = request.headers.get("host")?.toLowerCase();
+  return host !== undefined && (host === origin.host.toLowerCase() || host === requestUrl.host.toLowerCase());
+}
+
+function adminLoginOriginFailure(request: Request): "missing_origin" | "invalid_origin" | "origin_url_mismatch" | "cross_site_or_host_mismatch" | null {
+  const rawOrigin = request.headers.get("origin");
+  if (!rawOrigin) return "missing_origin";
+  let origin: URL;
+  let requestUrl: URL;
+  try { origin = new URL(rawOrigin); requestUrl = new URL(request.url); } catch { return "invalid_origin"; }
+
+  const exactUrlOrigin = origin.origin === requestUrl.origin;
+  const sameOriginChecksPass = !checkSameOrigin(request);
+  if (exactUrlOrigin && sameOriginChecksPass) return null;
+  if (isDevelopmentLoopbackAlias(request, origin, requestUrl)) return null;
+  return exactUrlOrigin ? "cross_site_or_host_mismatch" : "origin_url_mismatch";
+}
+
 /** Private admin login. The normal login route remains unchanged; a session cookie is issued only after a fresh role lookup. */
 export const adminLoginRoute = (runtime: RuntimeProvider = getRuntime) => async (request: Request): Promise<Response> => {
   const startedAt = performance.now();
@@ -71,12 +93,10 @@ export const adminLoginRoute = (runtime: RuntimeProvider = getRuntime) => async 
     return respond(buildFlashLocation("/admin/login", "error", "admin_login_failed"));
   };
   if (request.method.toUpperCase() !== "POST") return new Response(null, { status: 405, headers: { "Cache-Control": "no-store", Allow: "POST" } });
-  const origin = request.headers.get("origin");
-  let exactOrigin = false;
-  if (origin) {
-    try { exactOrigin = new URL(origin).origin === new URL(request.url).origin; } catch { exactOrigin = false; }
-  }
-  if (!exactOrigin || checkSameOrigin(request)) {
+  const originFailure = adminLoginOriginFailure(request);
+  if (originFailure) {
+    // Keep local diagnosis useful without recording Origin/Host values or any request content.
+    console.warn(JSON.stringify({ event: "admin_login_origin_rejected", reason: originFailure }));
     return new Response("Cross-site requests are not allowed.", { status: 403, headers: { "Cache-Control": "no-store" } });
   }
 

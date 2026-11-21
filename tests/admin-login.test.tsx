@@ -44,10 +44,10 @@ async function fixture(role: "user" | "admin" = "user") {
   return { auth, repository, runtime };
 }
 
-function postLogin(fields: Record<string, string>, origin = "http://localhost:3000", url = "http://localhost:3000/api/admin/login") {
+function postLogin(fields: Record<string, string>, origin = "http://localhost:3000", url = "http://localhost:3000/api/admin/login", host = new URL(url).host) {
   return new Request(url, {
     method: "POST",
-    headers: { host: "localhost:3000", origin, "content-type": "application/x-www-form-urlencoded" },
+    headers: { host, origin, "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(fields),
   });
 }
@@ -134,6 +134,81 @@ test("admin login rejects missing origin, cross-origin requests, wrong methods, 
   assert.equal(location(malformed), "/admin/login?error=admin_login_failed");
   assert.equal(malformed.headers.get("set-cookie"), null);
   assert.equal(repository.sessions.size, 0);
+});
+
+test("admin login accepts same-origin loopback access and a same-port loopback alias in development", async () => {
+  const environment = process.env as Record<string, string | undefined>;
+  const previousNodeEnv = environment["NODE_ENV"];
+  environment["NODE_ENV"] = "development";
+  try {
+    const { runtime } = await fixture("admin");
+    const route = adminLoginRoute(() => runtime);
+    const direct = await route(postLogin({ email: "admin@example.test", password: PASSWORD }, "http://127.0.0.1:3000", "http://127.0.0.1:3000/api/admin/login"));
+    assert.equal(direct.status, 303);
+    assert.equal(location(direct), "/admin");
+
+    const alias = await route(postLogin(
+      { email: "admin@example.test", password: PASSWORD },
+      "http://localhost:3000",
+      "http://127.0.0.1:3000/api/admin/login",
+      "127.0.0.1:3000",
+    ));
+    assert.equal(alias.status, 303);
+    assert.equal(location(alias), "/admin");
+  } finally {
+    if (previousNodeEnv === undefined) delete environment["NODE_ENV"];
+    else environment["NODE_ENV"] = previousNodeEnv;
+  }
+});
+
+test("admin login keeps loopback alias mismatch rejected in production and rejects external origins in development", async () => {
+  const environment = process.env as Record<string, string | undefined>;
+  const previousNodeEnv = environment["NODE_ENV"];
+  const previousWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const { runtime } = await fixture("admin");
+    const route = adminLoginRoute(() => runtime);
+    environment["NODE_ENV"] = "production";
+    const productionAlias = await route(postLogin(
+      { email: "admin@example.test", password: PASSWORD },
+      "http://localhost:3000",
+      "http://127.0.0.1:3000/api/admin/login",
+      "127.0.0.1:3000",
+    ));
+    assert.equal(productionAlias.status, 403);
+
+    environment["NODE_ENV"] = "development";
+    const external = await route(postLogin(
+      { email: "admin@example.test", password: PASSWORD },
+      "http://attacker.example:3000",
+      "http://127.0.0.1:3000/api/admin/login",
+      "127.0.0.1:3000",
+    ));
+    assert.equal(external.status, 403);
+    const differentPort = await route(postLogin(
+      { email: "admin@example.test", password: PASSWORD },
+      "http://localhost:3001",
+      "http://127.0.0.1:3000/api/admin/login",
+      "127.0.0.1:3000",
+    ));
+    assert.equal(differentPort.status, 403);
+    const differentScheme = await route(postLogin(
+      { email: "admin@example.test", password: PASSWORD },
+      "https://localhost:3000",
+      "http://127.0.0.1:3000/api/admin/login",
+      "127.0.0.1:3000",
+    ));
+    assert.equal(differentScheme.status, 403);
+    assert.match(warnings.join("\n"), /"event":"admin_login_origin_rejected"/);
+    assert.match(warnings.join("\n"), /"reason":"origin_url_mismatch"/);
+    assert.doesNotMatch(warnings.join("\n"), /attacker\.example|admin@example\.test|correct horse battery/);
+  } finally {
+    console.warn = previousWarn;
+    if (previousNodeEnv === undefined) delete environment["NODE_ENV"];
+    else environment["NODE_ENV"] = previousNodeEnv;
+  }
 });
 
 test("admin routes redirect anonymous visitors to the private login and conceal pages from ordinary users", async () => {
