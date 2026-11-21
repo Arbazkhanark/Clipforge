@@ -5,6 +5,8 @@ import { getRuntime } from "../src/server/runtime.ts";
 import { PublicSiteChrome } from "../src/components/PublicSiteChrome.tsx";
 import { getPublicSiteOrigin } from "../src/lib/site-metadata.ts";
 import { PublicFooter } from "../src/components/PublicFooter.tsx";
+import { headers } from "next/headers.js";
+import { isPlanLimitPreviewRequest, PLAN_LIMIT_PREVIEW_HEADER } from "../src/lib/ui/plan-limit-preview.ts";
 
 export const metadata = {
   metadataBase: getPublicSiteOrigin(),
@@ -16,14 +18,16 @@ export const metadata = {
 };
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const signedIn = (await getRuntime().currentUserId()) !== null;
+  const requestHeaders = await headers();
+  const isolatedPreviewRequest = isPlanLimitPreviewRequest(requestHeaders.get(PLAN_LIMIT_PREVIEW_HEADER));
+  const signedIn = isolatedPreviewRequest ? false : (await getRuntime().currentUserId()) !== null;
   return (
     <html lang="en">
       <body>
         <a href="#main" className="skip-link">Skip to main content</a>
-        <PublicSiteChrome signedIn={signedIn} />
+        {!isolatedPreviewRequest && <PublicSiteChrome signedIn={signedIn} />}
         <main id="main">{children}</main>
-        <PublicFooter />
+        {!isolatedPreviewRequest && <PublicFooter />}
       </body>
     </html>
   );

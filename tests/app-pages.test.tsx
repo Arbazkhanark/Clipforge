@@ -16,6 +16,7 @@ import CyclePage from "../app/(app)/cycles/[cycleId]/page.tsx";
 import AppLayout from "../app/(app)/layout.tsx";
 import LoginPage from "../app/login/page.tsx";
 import RegisterPage from "../app/register/page.tsx";
+import PricingPage from "../app/pricing/page.tsx";
 import { NOW } from "./helpers.ts";
 
 const html = (node: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(node);
@@ -162,6 +163,58 @@ test("cycles: overview counts and detail with preflight and the items table", as
   assert.ok(detail.includes("Saved in ClipForge (not confirmed on Instagram)"));
   assert.ok(detail.includes("does not send a Reel")); assert.ok(detail.includes("not connected") || detail.includes("No Instagram access token"));
   assert.ok(!detail.includes("Applied on Instagram"));
+});
+
+test("cycles: confirmed active-cycle plan limit shows clear usage, safe recovery links, and existing-data reassurance", async () => {
+  repo.plans.set(DEMO_USER_ID, "free");
+  const out = html(await CyclesPage({ searchParams: Promise.resolve({ error: "plan_limit" }) }));
+  assert.ok(out.includes("You’re at your cycle limit"));
+  assert.ok(out.includes("Your current plan has reached its publishing cycle limit."));
+  assert.ok(out.includes("Free"));
+  assert.ok(out.includes("<strong>1</strong><span>of</span><strong>1</strong>"));
+  assert.ok(out.includes('role="progressbar" aria-label="Active cycle usage" aria-valuemin="0" aria-valuemax="1" aria-valuenow="1"'));
+  assert.ok(out.includes("Reaching this limit does not delete your existing cycles or media."));
+  assert.ok(out.includes('href="/cycles">Back to cycles</a>'));
+  assert.ok(out.includes('/pricing?returnTo=cycles&amp;currentPlan=free&amp;activeCycles=1&amp;interval=monthly'));
+  assert.ok(!out.includes("Your plan has expired"));
+});
+
+test("cycles: an expired subscription is shown separately only with backend-confirmed expired status", async () => {
+  repo.plans.set(DEMO_USER_ID, "free");
+  repo.razorpaySubscriptions.set("demo-expired-subscription", { userId: DEMO_USER_ID, planId: "creator", interval: "monthly", status: "expired", lastEventAt: 10 });
+  const expired = html(await CyclesPage({ searchParams: Promise.resolve({ error: "plan_limit" }) }));
+  assert.ok(expired.includes("Your plan has expired"));
+  assert.ok(expired.includes("Previously active: Creator"));
+  assert.ok(expired.includes("Subscription status: expired"));
+  assert.ok(expired.includes("href=\"/pricing?returnTo=cycles&amp;currentPlan=free&amp;activeCycles=1&amp;interval=monthly\""));
+
+  repo.razorpaySubscriptions.set("demo-expired-subscription", { userId: DEMO_USER_ID, planId: "creator", interval: "monthly", status: "cancelled", lastEventAt: 11 });
+  const cancelled = html(await CyclesPage({ searchParams: Promise.resolve({ error: "plan_limit" }) }));
+  assert.ok(cancelled.includes("You’re at your cycle limit"));
+  assert.ok(!cancelled.includes("Your plan has expired"));
+});
+
+test("pricing recovery displays every catalog plan, highlights the capacity that resolves usage, preserves interval preference, and keeps unavailable checkout disabled", async () => {
+  const out = html(await PricingPage({ searchParams: Promise.resolve({ returnTo: "cycles", currentPlan: "free", activeCycles: "1", interval: "weekly" }) }));
+  for (const plan of ["free", "creator", "pro", "agency"]) assert.ok(out.includes(`data-plan="${plan}"`), `${plan} card missing`);
+  assert.ok(out.includes("Your current plan is <strong>Free</strong>"));
+  assert.ok(out.includes('data-plan="creator" data-resolves-cycle-limit="true"'));
+  assert.ok(out.includes("Fits your cycle usage"));
+  assert.ok(out.includes("Google Drive imports"));
+  assert.ok(out.includes("Advanced scheduling and repeat"));
+  assert.ok(out.includes("Weekly")); assert.ok(out.includes("Monthly"));
+  assert.ok(out.includes('data-preferred-interval="weekly"'));
+  assert.ok(out.includes("Subscribe weekly — renews every 7 days until cancelled · selected"));
+  assert.ok(out.includes('href="/cycles">← Back to cycles</a>'));
+  assert.ok(out.includes("Checkout stays unavailable until the relevant payment configuration is complete."));
+  assert.ok(out.includes('disabled=""'));
+});
+
+test("cycles without a limit error keep the normal overview and do not show upgrade recovery", async () => {
+  const out = html(await CyclesPage({}));
+  assert.ok(out.includes("Sample cycle (nothing is published)"));
+  assert.ok(!out.includes("You’re at your cycle limit"));
+  assert.ok(!out.includes("Explore plans"));
 });
 
 test("cycle detail: someone else's cycle looks like a missing one", async () => {

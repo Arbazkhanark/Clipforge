@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ChangeEvent } from "react";
-import type { BillingInterval, PlanId } from "../lib/billing/catalog.ts";
+import { BILLING_INTERVALS, type BillingInterval, type PlanId } from "../lib/billing/catalog.ts";
 
 type CouponSnapshot = { redemptionId: string; status: string; listPricePaise: number | null; discountPaise: number | null; payablePaise: number | null; currency: string | null };
 type RedemptionStatus = {
@@ -47,7 +47,7 @@ export function PromotionStatusPanel({ coupon, status, message, checkoutUrl, bus
   </section>;
 }
 
-export function SubscriptionCheckoutButtons({ planId, subscriptionEnabled, manualEnabled }: { planId: PlanId; subscriptionEnabled: boolean; manualEnabled: boolean }) {
+export function SubscriptionCheckoutButtons({ planId, subscriptionEnabled, manualEnabled, preferredInterval = "monthly" }: { planId: PlanId; subscriptionEnabled: boolean; manualEnabled: boolean; preferredInterval?: BillingInterval }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [autoRenewConsent, setAutoRenewConsent] = useState(false);
@@ -124,18 +124,18 @@ export function SubscriptionCheckoutButtons({ planId, subscriptionEnabled, manua
 
   if (planId === "free") return <p>Free plan</p>;
 
-  return <div className="checkout-actions">
+  const intervalOrder = [preferredInterval, ...BILLING_INTERVALS.filter((interval) => interval !== preferredInterval)];
+  const intervalLabel = (interval: BillingInterval) => interval === preferredInterval ? " · selected" : "";
+  return <div className="checkout-actions" data-preferred-interval={preferredInterval}>
     <fieldset><legend>Auto-renew subscription</legend>
       <label><input type="checkbox" checked={autoRenewConsent} onChange={(event: ChangeEvent<HTMLInputElement>) => setAutoRenewConsent(event.currentTarget.checked)} /> I agree to automatic renewal at the displayed amount and frequency until I cancel. Cancellation follows the period-end policy.</label>
-      <button type="button" disabled={!subscriptionEnabled || busy || !autoRenewConsent} onClick={() => void start("weekly", "subscription")}>Subscribe weekly — renews every 7 days until cancelled</button>
-      <button type="button" disabled={!subscriptionEnabled || busy || !autoRenewConsent} onClick={() => void start("monthly", "subscription")}>Subscribe monthly — renews monthly until cancelled</button>
+      {intervalOrder.map((interval) => <button key={interval} type="button" data-preferred={interval === preferredInterval ? "true" : "false"} disabled={!subscriptionEnabled || busy || !autoRenewConsent} onClick={() => void start(interval, "subscription")}>{interval === "weekly" ? `Subscribe weekly — renews every 7 days until cancelled${intervalLabel(interval)}` : `Subscribe monthly — renews monthly until cancelled${intervalLabel(interval)}`}</button>)}
       {!subscriptionEnabled && <small>Auto-renew checkout is unavailable until sandbox plan configuration is complete.</small>}
     </fieldset>
     <fieldset><legend>Pay once / Manual renewal</legend>
       <p>One payment only. No automatic deductions. Weekly access lasts 7 days; monthly access lasts one calendar month. Access then expires unless you pay again.</p>
       <label>Discount coupon for manual payment<input type="text" autoComplete="off" maxLength={64} value={couponCode} onChange={(event: ChangeEvent<HTMLInputElement>) => setCouponCode(event.currentTarget.value)} placeholder="Optional discount code" /></label>
-      <button type="button" disabled={!manualEnabled || busy} onClick={() => void start("weekly", "manual")}>Pay once weekly</button>
-      <button type="button" disabled={!manualEnabled || busy} onClick={() => void start("monthly", "manual")}>Pay once monthly</button>
+      {intervalOrder.map((interval) => <button key={interval} type="button" data-preferred={interval === preferredInterval ? "true" : "false"} disabled={!manualEnabled || busy} onClick={() => void start(interval, "manual")}>{interval === "weekly" ? `Pay once weekly${intervalLabel(interval)}` : `Pay once monthly${intervalLabel(interval)}`}</button>)}
       {!manualEnabled && <small>Manual payment checkout is unavailable until sandbox billing is configured.</small>}
       <label>Free-access coupon code<input type="text" autoComplete="off" maxLength={64} value={freeAccessCode} onChange={(event: ChangeEvent<HTMLInputElement>) => setFreeAccessCode(event.currentTarget.value)} placeholder="Access coupon code" /></label>
       <button type="button" disabled={busy || !freeAccessCode.trim()} onClick={() => void redeemFreeAccess()}>Redeem free-access coupon</button>

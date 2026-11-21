@@ -245,7 +245,7 @@ test("pages render: home is honest, pricing uses the catalog, layout is accessib
   assert.ok(home.includes("You Focus on Creating."));
   assert.ok(home.includes("We do not publish invented reviews or customer counts."));
   assert.ok(!/trusted by|\d+\+ (creators|users)/i.test(home));
-  assert.ok(html(<PricingPage />).includes("₹3,999"));
+  assert.ok(html(await PricingPage({})).includes("₹3,999"));
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(null);
     const layout = html(await RootLayout({ children: <p>child</p> }));

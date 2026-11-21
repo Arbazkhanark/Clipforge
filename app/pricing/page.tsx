@@ -1,14 +1,30 @@
 import { PricingTable } from "../../src/components/PricingTable.tsx";
 import { readRazorpayTestConfig } from "../../src/server/billing/razorpay-client.ts";
 import { publicPageMetadata } from "../../src/lib/site-metadata.ts";
+import { isBillingInterval, isPlanId, type BillingInterval, type PlanId } from "../../src/lib/billing/catalog.ts";
 
 export const metadata = publicPageMetadata({ title: "Plans and pricing", description: "Compare ClipForge plan prices and limits from the current product catalog.", path: "/pricing" });
 
-export default function PricingPage() {
+type PricingSearch = { returnTo?: string; currentPlan?: string; activeCycles?: string; interval?: string };
+
+export default async function PricingPage(props: { searchParams?: Promise<PricingSearch> } = {}) {
+  const search = await props.searchParams;
+  const returnToCycles = search?.returnTo === "cycles";
+  const currentPlanId: PlanId | undefined = returnToCycles && typeof search?.currentPlan === "string" && isPlanId(search.currentPlan) ? search.currentPlan : undefined;
+  const activeCyclesUsed: number | undefined = (() => {
+    if (!returnToCycles || !search?.activeCycles || !/^\d{1,7}$/.test(search.activeCycles)) return undefined;
+    const count = Number(search.activeCycles);
+    return Number.isSafeInteger(count) && count >= 0 ? count : undefined;
+  })();
+  const preferredInterval: BillingInterval = typeof search?.interval === "string" && isBillingInterval(search.interval) ? search.interval : "monthly";
+  const config = readRazorpayTestConfig();
+  const subscriptionPurchasable = Boolean(config?.webhookSecret && config.subscriptionTotalCount && ["creator", "pro", "agency"].every((p) => config.subscriptionPlanIds[p as "creator" | "pro" | "agency"]?.weekly && config.subscriptionPlanIds[p as "creator" | "pro" | "agency"]?.monthly));
   return (
     <div className="public-page pricing-page">
+      {returnToCycles && <a className="pricing-back-link" href="/cycles">← Back to cycles</a>}
       <header className="public-page-heading"><p className="eyebrow">Simple, visible plan limits</p><h1>Plans and pricing</h1><p className="public-page-intro">Prices are in Indian rupees. Weekly and monthly are separate choices; your billing interval never changes unless you change it.</p></header>
-      <PricingTable manualPurchasable={Boolean(readRazorpayTestConfig()?.webhookSecret)} subscriptionPurchasable={(() => { const c = readRazorpayTestConfig(); return Boolean(c?.webhookSecret && c.subscriptionTotalCount && ["creator", "pro", "agency"].every((p) => c.subscriptionPlanIds[p as "creator" | "pro" | "agency"]?.weekly && c.subscriptionPlanIds[p as "creator" | "pro" | "agency"]?.monthly)); })()} />
+      {activeCyclesUsed !== undefined && <p className="pricing-cycle-context" role="status">Comparing plans for {activeCyclesUsed} active {activeCyclesUsed === 1 ? "cycle" : "cycles"}. Plans with enough active-cycle capacity are marked for you.</p>}
+      <PricingTable currentPlanId={currentPlanId} activeCyclesUsed={activeCyclesUsed} preferredInterval={preferredInterval} manualPurchasable={Boolean(config?.webhookSecret)} subscriptionPurchasable={subscriptionPurchasable} />
       <p className="pricing-page-note">Plan features and limits are read from the current catalog. Payment availability depends on server configuration.</p>
     </div>
   );
