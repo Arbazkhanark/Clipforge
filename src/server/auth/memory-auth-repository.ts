@@ -8,6 +8,7 @@ export class MemoryAuthRepository implements AuthRepository {
   sessions = new Map<string, SessionRecord>();
   tokens = new Map<string, AuthTokenRecord>();
   googleIdentities = new Map<string, GoogleIdentityRecord>();
+  suspendedUsers = new Set<string>();
 
   async createUser(user: UserRecord): Promise<boolean> {
     await tick();
@@ -16,6 +17,7 @@ export class MemoryAuthRepository implements AuthRepository {
   }
   async getUserByEmail(email: string): Promise<UserRecord | null> { await tick(); const u = [...this.users.values()].find((x) => x.email === email); return u ? clone(u) : null; }
   async getUserById(userId: string): Promise<UserRecord | null> { await tick(); const u = this.users.get(userId); return u ? clone(u) : null; }
+  async isUserSuspended(userId: string): Promise<boolean> { await tick(); return this.suspendedUsers.has(userId); }
   async markEmailVerified(userId: string, at: Date): Promise<void> { await tick(); const u = this.users.get(userId); if (u && !u.emailVerifiedAt) u.emailVerifiedAt = at; }
   async setPasswordHash(userId: string, passwordHash: string): Promise<void> { await tick(); const u = this.users.get(userId); if (u) u.passwordHash = passwordHash; }
 

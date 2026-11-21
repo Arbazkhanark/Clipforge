@@ -59,6 +59,7 @@ export const FLASH_ERRORS = {
   admin_login_failed: "Sign-in failed. Check your credentials and try again.",
   invalid_credentials: "Email or password is not correct.",
   email_not_verified: "Please confirm your email address before signing in.",
+  account_suspended: "This account is suspended. Contact ClipForge support if you believe this is a mistake.",
   rate_limited: "Too many attempts. Please wait a few minutes and try again.",
   invalid_token: "That link is not valid or has expired.",
   weak_password: "Choose a stronger password: at least 10 characters, not a common password, not your email address.",

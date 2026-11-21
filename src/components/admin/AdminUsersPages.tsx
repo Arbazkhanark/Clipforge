@@ -3,7 +3,9 @@ import { AdminShell } from "./AdminShell.tsx";
 import { getRuntime } from "../../server/runtime.ts";
 import { requireAdminPage } from "../../server/admin/page-authorization.ts";
 import { parseAdminListQuery } from "../../server/admin/data-service.ts";
-import type { AdminUserDetails } from "../../server/admin/data-repository.ts";
+import type { AdminPlanEntitlementRow, AdminUserDetails } from "../../server/admin/data-repository.ts";
+import { PLAN_CATALOG } from "../../lib/billing/catalog.ts";
+import { AdminUserSuspensionControl } from "./AdminUserSuspensionControl.tsx";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 const text = (value: string | string[] | undefined): string | undefined => Array.isArray(value) ? value[0] : value;
@@ -48,19 +50,27 @@ export async function renderAdminUserDetailsPage(userId: string) {
   await requireAdminPage();
   const runtime = getRuntime();
   const detail = runtime.adminData ? await (await runtime.adminData()).getUserDetails(userId) : null;
+  let entitlement: AdminPlanEntitlementRow | null = null;
+  let entitlementUnavailable = false;
+  if (detail && runtime.adminData) {
+    try {
+      const page = await (await runtime.adminData()).listPlanEntitlements({ page: 1, pageSize: 1, search: detail.profile.id });
+      entitlement = page.items.find((item) => item.userId === detail.profile.id) ?? null;
+    } catch { entitlementUnavailable = true; }
+  }
   return <AdminShell activeSection="users" dataStatus={detail ? "available" : "unavailable"}>
-    <div className="admin-page-heading"><div><p className="admin-eyebrow">CLIPFORGE ADMIN / USERS</p><h1>{detail?.profile.name || "User details"}</h1><p>Read-only profile, billing, connected accounts and activity history.</p></div><span className="admin-readonly-pill">◉ Read-only</span></div>
+    <div className="admin-page-heading"><div><p className="admin-eyebrow">CLIPFORGE ADMIN / USERS</p><h1>{detail?.profile.name || "User details"}</h1><p>Profile, billing, connected accounts and activity history.</p></div><span className="admin-readonly-pill">Stored records</span></div>
     <a className="admin-user-back" href="/admin/users">← Back to users</a>
     {!runtime.adminData ? <div className="admin-user-unavailable">User detail data is unavailable in this runtime. No sample data is shown.</div>
       : !detail ? <div className="admin-user-unavailable">This user record is unavailable or does not exist.</div>
-      : <UserDetail detail={detail} />}
+      : <><AdminUserSuspensionControl userId={detail.profile.id} email={detail.profile.email} /><UserDetail detail={detail} entitlement={entitlement} entitlementUnavailable={entitlementUnavailable} /></>}
   </AdminShell>;
 }
 
-function UserDetail({ detail }: { detail: AdminUserDetails }) {
+function UserDetail({ detail, entitlement, entitlementUnavailable }: { detail: AdminUserDetails; entitlement: AdminPlanEntitlementRow | null; entitlementUnavailable: boolean }) {
   const profile = detail.profile;
   return <div className="admin-user-detail">
-    <section className="admin-user-profile"><div><p className="admin-eyebrow">ACCOUNT PROFILE</p><h2>{profile.name || "Name unavailable"}</h2><p>{profile.email}</p></div><dl><div><dt>User ID</dt><dd>{profile.id}</dd></div><div><dt>Role</dt><dd>{profile.role}</dd></div><div><dt>Email status</dt><dd>{profile.emailVerified ? "Verified" : "Unverified"}</dd></div><div><dt>Account created</dt><dd>{displayDate(profile.createdAt)}</dd></div></dl></section>
+    <section className="admin-user-profile"><div><p className="admin-eyebrow">ACCOUNT PROFILE</p><h2>{profile.name || "Name unavailable"}</h2><p>{profile.email}</p><p><strong>Effective plan:</strong> {entitlement ? (entitlement.planDefinitionAvailable && entitlement.planId in PLAN_CATALOG ? PLAN_CATALOG[entitlement.planId as keyof typeof PLAN_CATALOG].name : "Unknown / unavailable") : entitlementUnavailable ? "Unavailable — entitlement data could not be verified" : "No entitlement record"}</p>{entitlement && <p><strong>Entitlement source:</strong> {entitlement.source.replaceAll("_", " ")}</p>}</div><dl><div><dt>User ID</dt><dd>{profile.id}</dd></div><div><dt>Role</dt><dd>{profile.role}</dd></div><div><dt>Email status</dt><dd>{profile.emailVerified ? "Verified" : "Unverified"}</dd></div><div><dt>Account created</dt><dd>{displayDate(profile.createdAt)}</dd></div></dl></section>
     <div className="admin-user-detail-grid">
       <Section title="Current subscription" hasData={Boolean(detail.subscription)} empty="No subscription record is stored.">{detail.subscription && <dl className="admin-user-facts"><div><dt>Plan / interval</dt><dd>{detail.subscription.planId} · {detail.subscription.interval}</dd></div><div><dt>Status</dt><dd>{detail.subscription.status}</dd></div><div><dt>Current period ends</dt><dd>{displayDate(detail.subscription.currentPeriodEnd)}</dd></div><div><dt>Cancellation requested</dt><dd>{detail.subscription.cancelAtPeriodEnd || detail.subscription.cancellationRequestedAt ? "Yes" : "No recorded request"}</dd></div></dl>}</Section>
       <Section title="Subscription checkout history" hasData={detail.subscriptionIntents.length > 0} empty="No recurring subscription intents are stored."><ul className="admin-user-list">{detail.subscriptionIntents.map((item) => <li key={item.id}><strong>{item.planId} · {item.interval}</strong><span>{item.status} · {item.amountPaise === null ? "Unknown — manual review" : amount(item.amountPaise, item.currency)} · {displayDate(item.createdAt)}</span></li>)}</ul></Section>

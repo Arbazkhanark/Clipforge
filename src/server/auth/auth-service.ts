@@ -35,11 +35,11 @@ export interface AuthDeps { repo: AuthRepository; email: EmailSender; limiter: R
 export type RegisterResult = { ok: true } | { ok: false; problems: string[] };
 export type LoginResult =
   | { ok: true; sessionToken: string; expiresAt: Date; userId: string }
-  | { ok: false; code: "invalid_credentials" | "email_not_verified" | "rate_limited"; retryAfterSeconds?: number };
+  | { ok: false; code: "invalid_credentials" | "email_not_verified" | "account_suspended" | "rate_limited"; retryAfterSeconds?: number };
 
 /** Claims read from a verified Google ID token. No access token is included. */
 export interface GoogleProfile { sub: string; email: string; emailVerified: boolean; name: string | null; }
-export type GoogleSignInCode = "google_email_unverified" | "google_account_exists" | "google_identity_taken" | "google_link_mismatch" | "google_invalid_profile";
+export type GoogleSignInCode = "google_email_unverified" | "google_account_exists" | "google_identity_taken" | "google_link_mismatch" | "google_invalid_profile" | "account_suspended";
 export type GoogleSignInResult =
   | { ok: true; sessionToken: string; expiresAt: Date; userId: string; created: boolean }
   | { ok: false; code: GoogleSignInCode };
@@ -115,6 +115,7 @@ export class AuthService {
     const passwordOk = await verifyPassword(password, user?.passwordHash ?? (await this.dummyHash));
     if (!user || !user.passwordHash || !passwordOk) { for (const key of keys) limiter.recordFailure(key, now); return { ok: false, code: "invalid_credentials" }; }
     if (config.requireVerifiedEmail && !user.emailVerifiedAt) return { ok: false, code: "email_not_verified" };
+    if (await repo.isUserSuspended(user.id)) return { ok: false, code: "account_suspended" };
 
     for (const key of keys) limiter.reset(key);
     if (needsRehash(user.passwordHash, config.scrypt)) await repo.setPasswordHash(user.id, await hashPassword(password, config.scrypt));
@@ -146,18 +147,23 @@ export class AuthService {
     const existing = await repo.getGoogleIdentityBySub(sub);
     if (existing) {
       if (linkUserId && linkUserId !== existing.userId) return { ok: false, code: "google_identity_taken" };
+      if (await repo.isUserSuspended(existing.userId)) return { ok: false, code: "account_suspended" };
       return { ok: true, created: false, ...(await this.openSession(existing.userId)) };
     }
 
     if (linkUserId) {
       const user = await repo.getUserById(linkUserId);
       if (!user || !user.emailVerifiedAt || normaliseEmail(user.email) !== email) return { ok: false, code: "google_link_mismatch" };
+      if (await repo.isUserSuspended(user.id)) return { ok: false, code: "account_suspended" };
       const already = await repo.getGoogleIdentityByUserId(user.id);
       if (already) return { ok: false, code: "google_identity_taken" };
       const linked = await repo.linkGoogleIdentity({ id: this.deps.newId(), userId: user.id, googleSub: sub, createdAt: this.deps.now() });
       if (!linked) {
         const winner = await repo.getGoogleIdentityBySub(sub);
-        if (winner?.userId === user.id) return { ok: true, created: false, ...(await this.openSession(user.id)) };
+        if (winner?.userId === user.id) {
+          if (await repo.isUserSuspended(user.id)) return { ok: false, code: "account_suspended" };
+          return { ok: true, created: false, ...(await this.openSession(user.id)) };
+        }
         return { ok: false, code: "google_identity_taken" };
       }
       return { ok: true, created: false, ...(await this.openSession(user.id)) };
@@ -174,6 +180,7 @@ export class AuthService {
     if (outcome === "sub_taken") {
       const winner = await repo.getGoogleIdentityBySub(sub);
       if (!winner) return { ok: false, code: "google_identity_taken" };
+      if (await repo.isUserSuspended(winner.userId)) return { ok: false, code: "account_suspended" };
       return { ok: true, created: false, ...(await this.openSession(winner.userId)) };
     }
     return { ok: true, created: true, ...(await this.openSession(userId)) };
@@ -189,6 +196,7 @@ export class AuthService {
       if (!session.revokedAt) await repo.revokeSession(session.id, now);
       return null;
     }
+    if (await repo.isUserSuspended(session.userId)) return null;
     if (now.getTime() - session.lastUsedAt.getTime() > config.touchEveryMs) await repo.touchSession(session.id, now);
     return session.userId;
   }

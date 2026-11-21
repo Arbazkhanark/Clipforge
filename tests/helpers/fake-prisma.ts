@@ -128,6 +128,7 @@ class FakeDelegate implements ModelDelegate {
 
 export class FakePrismaClient implements PrismaClientLike {
   user = new FakeDelegate([["email"]]); session = new FakeDelegate([["tokenHash"]]); authToken = new FakeDelegate([["tokenHash"]]); googleIdentity = new FakeDelegate([["userId"], ["googleSub"]]);
+  userSuspension = new FakeDelegate([["userId"]]);
   mediaAsset = new FakeDelegate([["storageKey"]]); mediaDerivative = new FakeDelegate([["storageKey"], ["mediaAssetId", "ownerId", "kind", "settingsHash"], ["id", "ownerId", "mediaAssetId"]]); mediaImportJob = new FakeDelegate([["idempotencyKey"], ["resultMediaAssetId"]]); editedMediaReplacement = new FakeDelegate([["idempotencyKey"], ["plannedReplacementMediaAssetId"], ["replacementMediaAssetId"], ["ownerId", "sourceMediaAssetId", "sourceDerivativeId"]]); videoCollection = new FakeDelegate([]); collectionItem = new FakeDelegate([["collectionId", "mediaAssetId"]], { collectionId_mediaAssetId: ["collectionId", "mediaAssetId"] });
   collectionPermission = new FakeDelegate([["collectionId", "granteeId"]], { collectionId_granteeId: ["collectionId", "granteeId"] }); collectionAccessRequest = new FakeDelegate([]); collectionShareLink = new FakeDelegate([["tokenHash"]]);
   publishingCycle = new FakeDelegate([]); cycleItem = new FakeDelegate([]); publishingJob = new FakeDelegate([["idempotencyKey"], ["cycleItemId", "attemptNumber"]]); processingJob = new FakeDelegate([["idempotencyKey"]]); captionRevision = new FakeDelegate([]); auditLog = new FakeDelegate([]); editingTemplate = new FakeDelegate([]);

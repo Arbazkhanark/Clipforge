@@ -78,12 +78,18 @@ test("audit filters, bounded pagination, actor labels and event details expose a
   assert.equal(page.items[0]?.outcome, "not_stored");
   assert.equal("metadata" in page.items[0]!, false);
   const details = await service.getAuditDetails("a2");
-  assert.equal(details?.metadata, "withheld");
+  assert.equal(details?.metadata, "withheld_except_allowlisted_state_changes");
   assert.equal(details?.historicalActorRole, "not_stored");
   assert.equal(details?.outcomeStatus, "not_stored");
   const systemEvent = await service.getAuditDetails("a3");
   assert.equal(systemEvent?.event.actorKind, "system_or_actor_unavailable");
   assert.doesNotMatch(JSON.stringify({ page, details, systemEvent }), /never-return|secret-outcome|providerPayload|token/);
+
+  db.auditLog.rows.push({ id: "a4", actorId: "admin", action: "admin.user_suspended", entityType: "user", entityId: "u2", createdAt: at, metadata: { previousState: "ACTIVE", newState: "SUSPENDED", reason: "Policy review", token: "must-not-return" } });
+  const suspension = await service.getAuditDetails("a4");
+  assert.equal(suspension?.outcomeStatus, "success");
+  assert.deepEqual(suspension?.safeChange, { previousState: "ACTIVE", newState: "SUSPENDED", reason: "Policy review" });
+  assert.doesNotMatch(JSON.stringify(suspension), /must-not-return|token/);
   assert.throws(() => parseAdminAuditQuery(new URL("http://local/?action=x&from=2026-11-08")));
   assert.throws(() => parseAdminAuditQuery(new URL("http://local/?unexpected=x")));
   assert.throws(() => parseAdminAuditQuery(new URL("http://local/?action=x&action=y")));
@@ -168,6 +174,7 @@ test("overview reports only defined counts and marks financial and activity metr
   const { db, service } = makeService(); seed(db);
   const overview = await service.getOverview();
   assert.equal(overview.users.registered, 2);
+  assert.equal(overview.users.suspended, 0);
   assert.equal(overview.cycles.total, 1);
   assert.equal(overview.cycles.byStatus["running"], 1);
   assert.equal(overview.publishing.byStage["published"], 1);
@@ -176,6 +183,15 @@ test("overview reports only defined counts and marks financial and activity metr
   assert.equal(overview.billing.unclassifiedStatusCount, 0);
   assert.ok(overview.unavailableMetrics.some((item) => item.includes("refunds")));
   assert.equal("active" in overview.users, false);
+});
+
+test("overview remains usable before the optional suspension migration and labels the suspended-user metric unavailable", async () => {
+  const db = new FakePrismaClient(); seed(db);
+  db.userSuspension.count = async () => { throw Object.assign(new Error("table missing"), { code: "P2021", meta: { table: "public.UserSuspension" } }); };
+  const overview = await new AdminDataService(new PrismaAdminDataRepository(db), () => at).getOverview();
+  assert.equal(overview.users.suspended, null);
+  assert.ok(overview.unavailableMetrics.some((item) => item.includes("suspended users")));
+  assert.equal(overview.users.registered, 2);
 });
 
 test("user detail composes bounded billing, account, cycle, publishing, usage and audit history with sensitive fields omitted", async () => {

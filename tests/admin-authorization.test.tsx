@@ -133,7 +133,7 @@ test("admin page and shell render only for an admin principal", async () => {
   const shell = await ProtectedAdminLayout({ children: await AdminOverviewPage() });
   const html = renderToStaticMarkup(shell);
   assert.match(html, /ClipForge/);
-  assert.match(html, /Live data is not connected/);
+  assert.match(html, /Live data not connected/);
   assert.match(html, /Overview/);
   assert.doesNotMatch(html, /financial|payments|expenses/i);
 });

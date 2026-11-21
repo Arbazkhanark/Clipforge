@@ -98,7 +98,31 @@ export function setDatabaseConnectorForTests(connector: DatabaseConnector | null
 }
 
 const databaseUnavailable = (): AppError => new AppError(503, "database_unavailable", "The database could not confirm that operation. It may not have been saved; check again before retrying.");
+const complimentaryAccessSetupRequired = (): AppError => new AppError(503, "complimentary_access_setup_required", "Complimentary access is unavailable until its reviewed database migration is applied.");
+const adminSuspensionSetupRequired = (): AppError => new AppError(503, "admin_user_suspension_setup_required", "User suspension is unavailable until its reviewed database migration is applied.");
 const DATABASE_RETRY_DELAY_MS = 5_000;
+
+function isComplimentaryAccessSchemaUnavailable(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: unknown; meta?: { table?: unknown; column?: unknown; modelName?: unknown } };
+  if (candidate.code !== "P2021" && candidate.code !== "P2022") return false;
+  const target = `${String(candidate.meta?.table ?? "")} ${String(candidate.meta?.column ?? "")} ${String(candidate.meta?.modelName ?? "")}`.toLowerCase();
+  return target.includes("complimentaryaccessgrant") || target.includes("complimentaryaccessevent");
+}
+
+function isAdminSuspensionSchemaUnavailable(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: unknown; meta?: { table?: unknown; column?: unknown; modelName?: unknown } };
+  if (candidate.code !== "P2021" && candidate.code !== "P2022") return false;
+  const target = `${String(candidate.meta?.table ?? "")} ${String(candidate.meta?.column ?? "")} ${String(candidate.meta?.modelName ?? "")}`.toLowerCase();
+  return target.includes("usersuspension");
+}
+
+function protectedAdminDataError(error: unknown): AppError | null {
+  if (isComplimentaryAccessSchemaUnavailable(error)) return complimentaryAccessSetupRequired();
+  if (isAdminSuspensionSchemaUnavailable(error)) return adminSuspensionSetupRequired();
+  return null;
+}
 
 function sanitizedDatabaseCategory(error: unknown): string {
   const value = error as { code?: unknown; name?: unknown } | null;
@@ -136,8 +160,8 @@ function guardRepository(inner: Repository): Repository {
       return (...args: unknown[]) => {
         try {
           const result = (value as (...a: unknown[]) => unknown).apply(target, args);
-          return result instanceof Promise ? result.catch((error: unknown) => { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `repository.${String(prop)}`, error); throw databaseUnavailable(); }) : result;
-        } catch (error) { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `repository.${String(prop)}`, error); throw databaseUnavailable(); }
+          return result instanceof Promise ? result.catch((error: unknown) => { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `repository.${String(prop)}`, error); throw protectedAdminDataError(error) ?? databaseUnavailable(); }) : result;
+        } catch (error) { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `repository.${String(prop)}`, error); throw protectedAdminDataError(error) ?? databaseUnavailable(); }
       };
     },
   }) as Repository;
@@ -151,8 +175,8 @@ function guardAdminData(inner: AdminDataService): AdminDataService {
       return (...args: unknown[]) => {
         try {
           const result = (value as (...a: unknown[]) => unknown).apply(target, args);
-          return result instanceof Promise ? result.catch((error: unknown) => { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `admin.${String(prop)}`, error); throw databaseUnavailable(); }) : result;
-        } catch (error) { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `admin.${String(prop)}`, error); throw databaseUnavailable(); }
+          return result instanceof Promise ? result.catch((error: unknown) => { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `admin.${String(prop)}`, error); throw protectedAdminDataError(error) ?? databaseUnavailable(); }) : result;
+        } catch (error) { if (error instanceof AppError) throw error; logDatabaseEvent("database_query_failed", `admin.${String(prop)}`, error); throw protectedAdminDataError(error) ?? databaseUnavailable(); }
       };
     },
   });
@@ -186,6 +210,7 @@ function guardAuthRepository(load: () => Promise<DatabaseServices>): AuthReposit
     createUser: (user) => run("auth.createUser", (auth) => auth.createUser(user)),
     getUserByEmail: (email) => run("auth.getUserByEmail", (auth) => auth.getUserByEmail(email)),
     getUserById: (userId) => run("auth.getUserById", (auth) => auth.getUserById(userId)),
+    isUserSuspended: (userId) => run("auth.isUserSuspended", (auth) => auth.isUserSuspended(userId)),
     markEmailVerified: (userId, at) => run("auth.markEmailVerified", (auth) => auth.markEmailVerified(userId, at)),
     setPasswordHash: (userId, passwordHash) => run("auth.setPasswordHash", (auth) => auth.setPasswordHash(userId, passwordHash)),
     createSession: (session) => run("auth.createSession", (auth) => auth.createSession(session)),

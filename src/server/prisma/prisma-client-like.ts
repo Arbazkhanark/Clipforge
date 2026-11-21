@@ -23,7 +23,7 @@ export interface ModelDelegate {
 }
 
 export interface PrismaClientLike {
-  user: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate; googleIdentity: ModelDelegate;
+  user: ModelDelegate; userSuspension: ModelDelegate; session: ModelDelegate; authToken: ModelDelegate; googleIdentity: ModelDelegate;
   mediaAsset: ModelDelegate; mediaDerivative: ModelDelegate; mediaImportJob: ModelDelegate; editedMediaReplacement: ModelDelegate; videoCollection: ModelDelegate; collectionItem: ModelDelegate; collectionPermission: ModelDelegate; collectionAccessRequest: ModelDelegate; collectionShareLink: ModelDelegate;
   publishingCycle: ModelDelegate; cycleItem: ModelDelegate; publishingJob: ModelDelegate; processingJob: ModelDelegate; captionRevision: ModelDelegate;
   auditLog: ModelDelegate; editingTemplate: ModelDelegate; socialAccount: ModelDelegate; subscription: ModelDelegate; razorpaySubscriptionIntent: ModelDelegate; razorpaySubscriptionContinuation: ModelDelegate; manualPaymentIntent: ModelDelegate; manualPlanAccess: ModelDelegate; promotion: ModelDelegate; promotionRedemption: ModelDelegate; promotionalAccessGrant: ModelDelegate; promotionLifecycleEvent: ModelDelegate; complimentaryAccessGrant: ModelDelegate; complimentaryAccessEvent: ModelDelegate; webhookEvent: ModelDelegate; paymentRecord: ModelDelegate; usageRecord: ModelDelegate;

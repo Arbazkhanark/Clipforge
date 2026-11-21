@@ -20,6 +20,14 @@ export class PrismaAuthRepository implements AuthRepository {
   }
   async getUserByEmail(email: string): Promise<UserRecord | null> { const r = await this.db.user.findUnique({ where: { email } }); return r ? rowToUser(r) : null; }
   async getUserById(userId: string): Promise<UserRecord | null> { const r = await this.db.user.findUnique({ where: { id: userId } }); return r ? rowToUser(r) : null; }
+  async isUserSuspended(userId: string): Promise<boolean> {
+    try { return Boolean(await this.db.userSuspension.findUnique({ where: { userId }, select: { userId: true } })); }
+    catch (error) {
+      const candidate = error as { code?: unknown } | null;
+      if (candidate?.code === "P2021") return false; // Before the optional admin-suspension migration, no suspension rows can exist.
+      throw error;
+    }
+  }
   async markEmailVerified(userId: string, at: Date): Promise<void> { await this.db.user.updateMany({ where: { id: userId, emailVerified: null }, data: { emailVerified: at } }); }
   async setPasswordHash(userId: string, passwordHash: string): Promise<void> { await this.db.user.update({ where: { id: userId }, data: { passwordHash } }); }
 

@@ -12,6 +12,7 @@ export interface AuthRepository {
   createUser(user: UserRecord): Promise<boolean>;
   getUserByEmail(email: string): Promise<UserRecord | null>;
   getUserById(userId: string): Promise<UserRecord | null>;
+  isUserSuspended(userId: string): Promise<boolean>;
   markEmailVerified(userId: string, at: Date): Promise<void>;
   setPasswordHash(userId: string, passwordHash: string): Promise<void>;
 

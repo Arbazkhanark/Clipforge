@@ -92,6 +92,9 @@ export class AdminDataService {
   listAudit(query: AdminListQuery): Promise<AdminPage<AdminAuditRow>> { return this.repo.listAudit(query); }
   getAuditDetails(auditId: string): Promise<AdminAuditDetails | null> { return this.repo.getAuditDetails(auditId); }
   getUserDetails(userId: string): Promise<AdminUserDetails | null> { return this.repo.getUserDetails(userId); }
+  getUserSuspension(userId: string) { return this.repo.getUserSuspension(userId); }
+  setUserSuspension(input: { userId: string; adminId: string; suspended: boolean; reason: string | null; now: Date; newId: () => string }) { return this.repo.setUserSuspension(input); }
+  setCyclePauseState(input: { cycleId: string; adminId: string; action: "pause" | "resume"; reason: string | null; now: Date; newId: () => string }) { return this.repo.setCyclePauseState(input); }
   getCycleDetails(cycleId: string): Promise<AdminCycleDetails | null> { return this.repo.getCycleDetails(cycleId); }
   getInstagramAccountDetails(accountId: string): Promise<AdminInstagramDetails | null> { return this.repo.getInstagramAccountDetails(accountId, this.now()); }
 }

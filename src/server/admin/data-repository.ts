@@ -11,6 +11,7 @@ export const ADMIN_PLAN_IDS: readonly PlanId[] = ["free", "creator", "pro", "age
 export type AdminPage<T> = { items: T[]; total: number; page: number; pageSize: number };
 export type AdminListQuery = { page: number; pageSize: number; search?: string; status?: string; planId?: PlanId; from?: Date; to?: Date; verified?: boolean; actorId?: string; action?: string; targetType?: string; targetId?: string };
 export type AdminUserRow = { id: string; name: string | null; email: string; emailVerified: Date | null; role: string; createdAt: Date };
+export type AdminUserSuspension = { isSuspended: boolean; suspendedAt: Date | null; suspendedByAdminId: string | null; reason: string | null };
 export type AdminCycleRow = { id: string; ownerId: string; ownerName: string | null; ownerEmail: string; name: string; status: string; timezone: string; createdAt: Date; updatedAt: Date; itemCount: number; scheduledItemCount: number };
 export type AdminStoredSchedule = ScheduleSettings & { startDate: string };
 export type AdminCycleDetails = {
@@ -73,8 +74,9 @@ export type AdminPaymentDetails = {
   unavailableInformation: string[];
 };
 export type AdminAuditActorKind = "admin_action_namespace" | "actor_type_unavailable" | "system_or_actor_unavailable";
-export type AdminAuditRow = { id: string; actorId: string | null; actorKind: AdminAuditActorKind; action: string; entityType: string; entityId: string; createdAt: Date; outcome: "not_stored" };
-export type AdminAuditDetails = { event: AdminAuditRow; metadata: "withheld"; historicalActorRole: "not_stored"; outcomeStatus: "not_stored" };
+export type AdminAuditSafeChange = { previousState: string; newState: string; reason: string | null };
+export type AdminAuditRow = { id: string; actorId: string | null; actorKind: AdminAuditActorKind; action: string; entityType: string; entityId: string; createdAt: Date; outcome: "success" | "not_stored"; safeChange: AdminAuditSafeChange | null };
+export type AdminAuditDetails = { event: AdminAuditRow; metadata: "withheld_except_allowlisted_state_changes"; historicalActorRole: "not_stored"; outcomeStatus: "success" | "not_stored"; safeChange: AdminAuditSafeChange | null };
 export type AdminUserDetails = {
   profile: AdminUserRow;
   subscription: { planId: string; interval: string; status: string; currentPeriodEnd: Date | null; cancelAtPeriodEnd: boolean; cancellationRequestedAt: Date | null; createdAt: Date; updatedAt: Date } | null;
@@ -92,7 +94,7 @@ export type AdminUserDetails = {
 };
 export type AdminOverview = {
   generatedAt: Date;
-  users: { registered: number };
+  users: { registered: number; suspended: number | null };
   cycles: { total: number; byStatus: Record<string, number> };
   publishing: { totalAttempts: number; byStage: Record<string, number>; byOutcome: Record<string, number> };
   instagram: { totalStoredAccounts: number; byStoredStatus: Record<string, number> };
@@ -118,6 +120,9 @@ export interface AdminDataRepository {
   listAudit(query: AdminListQuery): Promise<AdminPage<AdminAuditRow>>;
   getAuditDetails(auditId: string): Promise<AdminAuditDetails | null>;
   getUserDetails(userId: string): Promise<AdminUserDetails | null>;
+  getUserSuspension(userId: string): Promise<AdminUserSuspension | null>;
+  setUserSuspension(input: { userId: string; adminId: string; suspended: boolean; reason: string | null; now: Date; newId: () => string }): Promise<"suspended" | "reactivated" | "existing" | "not_found" | "forbidden">;
+  setCyclePauseState(input: { cycleId: string; adminId: string; action: "pause" | "resume"; reason: string | null; now: Date; newId: () => string }): Promise<{ status: "paused" | "running" | "existing" | "not_found" | "forbidden" | "invalid_transition"; inFlightItemCount: number }>;
   getCycleDetails(cycleId: string): Promise<AdminCycleDetails | null>;
   getInstagramAccountDetails(accountId: string, now: Date): Promise<AdminInstagramDetails | null>;
 }
@@ -126,7 +131,7 @@ const USER_SELECT = { id: true, name: true, email: true, emailVerified: true, ro
 const CYCLE_SELECT = { id: true, ownerId: true, name: true, status: true, timezone: true, createdAt: true, updatedAt: true };
 const ACCOUNT_SELECT = { id: true, userId: true, platform: true, username: true, accountType: true, grantedScopes: true, status: true, tokenExpiresAt: true, createdAt: true };
 const PAYMENT_SELECT = { id: true, userId: true, amountPaise: true, currency: true, status: true, providerPaymentId: true, providerSubscriptionId: true, subscriptionIntentId: true, manualPaymentIntentId: true, createdAt: true };
-const AUDIT_SELECT = { id: true, actorId: true, action: true, entityType: true, entityId: true, createdAt: true };
+const AUDIT_SELECT = { id: true, actorId: true, action: true, entityType: true, entityId: true, createdAt: true, metadata: true };
 const HISTORY_LIMIT = 50;
 const DETAIL_LIMIT = 100;
 const ANALYTICS_ROW_LIMIT = 5_000;
@@ -159,7 +164,18 @@ function makePage<T>(items: T[], total: number, query: AdminListQuery): AdminPag
 function mapAuditRow(row: Row): AdminAuditRow {
   const actorId = nullableStr(row, "actorId"); const action = str(row, "action");
   const actorKind: AdminAuditActorKind = !actorId ? "system_or_actor_unavailable" : action.startsWith("admin.") ? "admin_action_namespace" : "actor_type_unavailable";
-  return { id: str(row, "id"), actorId, actorKind, action, entityType: str(row, "entityType"), entityId: str(row, "entityId"), createdAt: toDate(row["createdAt"]), outcome: "not_stored" };
+  const safeChange = safeAdminStateChange(action, row["metadata"]);
+  return { id: str(row, "id"), actorId, actorKind, action, entityType: str(row, "entityType"), entityId: str(row, "entityId"), createdAt: toDate(row["createdAt"]), outcome: safeChange ? "success" : "not_stored", safeChange };
+}
+
+const AUDITED_ADMIN_STATE_ACTIONS = new Set(["admin.user_suspended", "admin.user_reactivated", "admin.cycle_paused", "admin.cycle_resumed"]);
+function safeAdminStateChange(action: string, value: unknown): AdminAuditSafeChange | null {
+  if (!AUDITED_ADMIN_STATE_ACTIONS.has(action) || typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const metadata = value as Record<string, unknown>;
+  const previousState = metadata["previousState"]; const newState = metadata["newState"]; const reason = metadata["reason"];
+  if (typeof previousState !== "string" || typeof newState !== "string") return null;
+  const safeReason = typeof reason === "string" && reason.length <= 500 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(reason) ? reason : null;
+  return { previousState: previousState.slice(0, 32), newState: newState.slice(0, 32), reason: safeReason };
 }
 const CYCLE_STATUSES = ["draft", "running", "paused", "stopped", "completed"] as const;
 const PUBLISHING_STAGES = ["queued", "claimed", "container_creation_pending", "container_processing", "ready_to_publish", "publishing", "published", "failed", "needs_manual_review", "cancelled"] as const;
@@ -218,7 +234,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
 
   async getOverview(generatedAt: Date): Promise<AdminOverview> {
     const PAYMENT_STATUSES = ["captured", "authorized", "failed", "refunded", "partially_refunded", "created"] as const;
-    const [registered, cycleTotal, cycleCounts, publishingTotal, stageCounts, outcomeCounts, accountTotal, accountCounts, paymentTotal, paymentCounts] = await Promise.all([
+    const [registered, cycleTotal, cycleCounts, publishingTotal, stageCounts, outcomeCounts, accountTotal, accountCounts, paymentTotal, paymentCounts, suspended] = await Promise.all([
       this.db.user.count({ where: { role: "user" } }),
       this.db.publishingCycle.count(),
       Promise.all(CYCLE_STATUSES.map(async (status) => [status, await this.db.publishingCycle.count({ where: { status } })] as const)),
@@ -229,15 +245,21 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
       Promise.all(ACCOUNT_STATUSES.map(async (status) => [status, await this.db.socialAccount.count({ where: { status } })] as const)),
       this.db.paymentRecord.count(),
       Promise.all(PAYMENT_STATUSES.map(async (status) => [status, await this.db.paymentRecord.count({ where: { status } })] as const)),
+      this.db.userSuspension.count().catch((error: unknown) => {
+        const candidate = error as { code?: unknown; meta?: { table?: unknown; modelName?: unknown } } | null;
+        const target = `${String(candidate?.meta?.table ?? "")} ${String(candidate?.meta?.modelName ?? "")}`.toLowerCase();
+        if (candidate?.code === "P2021" && target.includes("usersuspension")) return null;
+        throw error;
+      }),
     ]);
     return {
       generatedAt,
-      users: { registered },
+      users: { registered, suspended },
       cycles: { total: cycleTotal, byStatus: Object.fromEntries(cycleCounts) },
       publishing: { totalAttempts: publishingTotal, byStage: Object.fromEntries(stageCounts), byOutcome: Object.fromEntries(outcomeCounts) },
       instagram: { totalStoredAccounts: accountTotal, byStoredStatus: Object.fromEntries(accountCounts) },
       billing: { paymentRecordCount: paymentTotal, recordsByRecognizedStoredStatus: Object.fromEntries(paymentCounts), unclassifiedStatusCount: Math.max(0, paymentTotal - paymentCounts.reduce((sum, [, count]) => sum + count, 0)), monetaryMetrics: "unavailable" },
-      unavailableMetrics: ["active/inactive users (no authoritative activity state)", "plan entitlements across recurring and manual access", "gross collections, refunds, provider fees, taxes, net revenue", "date-wise activity series"],
+      unavailableMetrics: ["active/inactive users (no authoritative activity state)", ...(suspended === null ? ["suspended users (the reviewed suspension migration is not applied)"] : []), "plan entitlements across recurring and manual access", "gross collections, refunds, provider fees, taxes, net revenue", "date-wise activity series"],
     };
   }
 
@@ -605,7 +627,8 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
   async getAuditDetails(auditId: string): Promise<AdminAuditDetails | null> {
     const row = await this.db.auditLog.findUnique({ where: { id: auditId }, select: AUDIT_SELECT });
     if (!row) return null;
-    return { event: mapAuditRow(row), metadata: "withheld", historicalActorRole: "not_stored", outcomeStatus: "not_stored" };
+    const event = mapAuditRow(row);
+    return { event, metadata: "withheld_except_allowlisted_state_changes", historicalActorRole: "not_stored", outcomeStatus: event.outcome, safeChange: event.safeChange };
   }
 
   async getUserDetails(userId: string): Promise<AdminUserDetails | null> {
@@ -649,6 +672,68 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
       usageActivity: usageRows.slice(0, HISTORY_LIMIT).map((row) => ({ id: str(row, "id"), kind: str(row, "kind"), amount: String(row["amount"]), periodStart: toDate(row["periodStart"]), createdAt: toDate(row["createdAt"]) })),
       historyTruncated: { subscriptionIntents: intentRows.length > HISTORY_LIMIT, manualPaymentIntents: manualIntentRows.length > HISTORY_LIMIT, manualAccessPeriods: accessRows.length > HISTORY_LIMIT, payments: paymentRows.length > HISTORY_LIMIT, socialAccounts: accountRows.length > HISTORY_LIMIT, cycles: cycleRows.length > HISTORY_LIMIT, reels: itemRows.length > HISTORY_LIMIT, publishingAttempts: attemptRows.length > HISTORY_LIMIT, auditHistory: auditRows.length > HISTORY_LIMIT, usageActivity: usageRows.length > HISTORY_LIMIT },
     };
+  }
+
+  async getUserSuspension(userId: string): Promise<AdminUserSuspension | null> {
+    const user = await this.db.user.findUnique({ where: { id: userId, role: "user" }, select: { id: true } });
+    if (!user) return null;
+    const row = await this.db.userSuspension.findUnique({ where: { userId }, select: { suspendedAt: true, suspendedByAdminId: true, reason: true } });
+    return {
+      isSuspended: Boolean(row),
+      suspendedAt: row ? nullableDate(row["suspendedAt"]) : null,
+      suspendedByAdminId: row ? nullableStr(row, "suspendedByAdminId") : null,
+      reason: row ? nullableStr(row, "reason") : null,
+    };
+  }
+
+  async setUserSuspension(input: { userId: string; adminId: string; suspended: boolean; reason: string | null; now: Date; newId: () => string }): Promise<"suspended" | "reactivated" | "existing" | "not_found" | "forbidden"> {
+    return this.db.$transaction(async (tx) => {
+      const actor = await tx.user.findUnique({ where: { id: input.adminId }, select: { role: true, emailVerified: true } });
+      if (!actor || actor["role"] !== "admin" || actor["emailVerified"] == null) return "forbidden";
+      const locked = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length !== 1) return "not_found";
+      const target = await tx.user.findUnique({ where: { id: input.userId }, select: { id: true, role: true } });
+      if (!target || target["role"] !== "user") return "not_found";
+      const current = await tx.userSuspension.findUnique({ where: { userId: input.userId }, select: { userId: true } });
+      if (Boolean(current) === input.suspended) return "existing";
+
+      if (input.suspended) {
+        await tx.userSuspension.create({ data: { userId: input.userId, suspendedByAdminId: input.adminId, reason: input.reason, suspendedAt: input.now } });
+        await tx.session.updateMany({ where: { userId: input.userId, revokedAt: null }, data: { revokedAt: input.now } });
+      } else {
+        await tx.userSuspension.deleteMany({ where: { userId: input.userId } });
+      }
+      await tx.auditLog.create({ data: {
+        id: input.newId(), actorId: input.adminId, action: input.suspended ? "admin.user_suspended" : "admin.user_reactivated",
+        entityType: "user", entityId: input.userId, createdAt: input.now,
+        metadata: { previousState: input.suspended ? "ACTIVE" : "SUSPENDED", newState: input.suspended ? "SUSPENDED" : "ACTIVE", reason: input.reason },
+      } });
+      return input.suspended ? "suspended" : "reactivated";
+    });
+  }
+
+  async setCyclePauseState(input: { cycleId: string; adminId: string; action: "pause" | "resume"; reason: string | null; now: Date; newId: () => string }): Promise<{ status: "paused" | "running" | "existing" | "not_found" | "forbidden" | "invalid_transition"; inFlightItemCount: number }> {
+    return this.db.$transaction(async (tx) => {
+      const actor = await tx.user.findUnique({ where: { id: input.adminId }, select: { role: true, emailVerified: true } });
+      if (!actor || actor["role"] !== "admin" || actor["emailVerified"] == null) return { status: "forbidden", inFlightItemCount: 0 };
+      const locked = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${input.cycleId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length !== 1) return { status: "not_found", inFlightItemCount: 0 };
+      const cycle = await tx.publishingCycle.findUnique({ where: { id: input.cycleId }, select: { id: true, status: true } });
+      if (!cycle) return { status: "not_found", inFlightItemCount: 0 };
+      const expected = input.action === "pause" ? "running" : "paused";
+      const next = input.action === "pause" ? "paused" : "running";
+      if (cycle["status"] === next) return { status: "existing", inFlightItemCount: 0 };
+      if (cycle["status"] !== expected) return { status: "invalid_transition", inFlightItemCount: 0 };
+      const inFlightItemCount = input.action === "pause" ? await tx.cycleItem.count({ where: { cycleId: input.cycleId, status: { in: ["processing", "publishing"] } } }) : 0;
+      const updated = await tx.publishingCycle.updateMany({ where: { id: input.cycleId, status: expected }, data: { status: next, updatedAt: input.now } });
+      if (updated.count !== 1) return { status: "invalid_transition", inFlightItemCount: 0 };
+      await tx.auditLog.create({ data: {
+        id: input.newId(), actorId: input.adminId, action: input.action === "pause" ? "admin.cycle_paused" : "admin.cycle_resumed",
+        entityType: "cycle", entityId: input.cycleId, createdAt: input.now,
+        metadata: { previousState: expected, newState: next, reason: input.reason, inFlightItemCount },
+      } });
+      return { status: next, inFlightItemCount };
+    });
   }
 
   async getCycleDetails(cycleId: string): Promise<AdminCycleDetails | null> {

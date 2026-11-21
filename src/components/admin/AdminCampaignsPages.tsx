@@ -3,6 +3,7 @@ import { getRuntime } from "../../server/runtime.ts";
 import { requireAdminPage } from "../../server/admin/page-authorization.ts";
 import { ADMIN_FILTERS, parseAdminListQuery } from "../../server/admin/data-service.ts";
 import type { AdminCycleDetails } from "../../server/admin/data-repository.ts";
+import { AdminCycleStatusControl } from "./AdminCycleStatusControl.tsx";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 const text = (value: string | string[] | undefined): string | undefined => Array.isArray(value) ? value[0] : value;
@@ -50,7 +51,7 @@ export async function renderAdminCampaignDetailsPage(cycleId: string) {
     <a className="admin-user-back" href="/admin/campaigns">← Back to campaigns</a>
     {!runtime.adminData ? <div className="admin-user-unavailable">Campaign detail data is unavailable in this runtime. No sample data is shown.</div>
       : !detail ? <div className="admin-user-unavailable">This campaign record is unavailable or does not exist.</div>
-      : <CampaignDetail detail={detail} />}
+      : <><AdminCycleStatusControl cycleId={detail.cycle.id} initialStatus={detail.cycle.status} /><CampaignDetail detail={detail} /></>}
   </AdminShell>;
 }
 

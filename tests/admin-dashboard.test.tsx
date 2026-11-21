@@ -23,6 +23,7 @@ import PlansPage from "../app/admin/(protected)/plans/page.tsx";
 import AnalyticsPage from "../app/admin/(protected)/analytics/page.tsx";
 import ReportsPage from "../app/admin/(protected)/reports/page.tsx";
 import SettingsPage from "../app/admin/(protected)/settings/page.tsx";
+import ComplimentaryAccessPage from "../app/admin/(protected)/complimentary-access/page.tsx";
 
 const now = new Date("2026-11-08T12:00:00.000Z");
 const adminRuntime: Runtime = {
@@ -39,6 +40,7 @@ const pages: Array<{ name: string; href: string; label: string; render: () => Pr
   { name: "Users", href: "/admin/users", label: "Users", render: UsersPage },
   { name: "Campaigns", href: "/admin/campaigns", label: "Campaigns", render: CampaignsPage },
   { name: "Plans", href: "/admin/plans", label: "Plans", render: PlansPage },
+  { name: "Complimentary access", href: "/admin/complimentary-access", label: "Complimentary access", render: ComplimentaryAccessPage },
   { name: "Analytics", href: "/admin/analytics", label: "Analytics", render: AnalyticsPage },
   { name: "Instagram", href: "/admin/instagram", label: "Instagram", render: InstagramPage },
   { name: "Billing", href: "/admin/billing", label: "Billing", render: BillingPage },
@@ -53,15 +55,24 @@ test("every Admin dashboard section is protected, has an active navigation item,
   setRuntimeForTests(adminRuntime);
   for (const page of pages) {
     const html = renderToStaticMarkup(await page.render());
-    const heading = page.name === "Overview" ? "Platform overview" : page.name === "Instagram" ? "Instagram accounts" : page.name === "Billing" ? "Billing &amp; payments" : page.name === "Plans" ? "Plans &amp; entitlements" : page.name === "Settings" ? "Platform settings" : page.name;
+    const heading = page.name === "Instagram" ? "Instagram accounts" : page.name === "Billing" ? "Billing &amp; payments" : page.name === "Plans" ? "Plans &amp; entitlements" : page.name === "Settings" ? "Platform settings" : page.name;
     assert.match(html, new RegExp(`<h1>${heading}</h1>`));
     assert.match(html, new RegExp(`href="${page.href.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^>]*aria-current="page"`));
     assert.match(html, /Live data not connected/);
-    for (const label of ["Overview", "Users", "Campaigns", "Plans", "Instagram", "Billing", "Analytics", "Reports", "Settings", "Audit Logs"]) {
+    for (const label of ["Overview", "Users", "Campaigns", "Plans", "Complimentary access", "Instagram", "Billing", "Analytics", "Reports", "Settings", "Audit Logs"]) {
       assert.match(html, new RegExp(`>${label}<`), `${page.name} navigation is missing ${label}`);
     }
-    if (page.name !== "Overview" && page.name !== "Users" && page.name !== "Campaigns" && page.name !== "Plans" && page.name !== "Instagram" && page.name !== "Billing" && page.name !== "Analytics" && page.name !== "Settings" && page.name !== "Audit Logs") assert.match(html, /No sample records shown/);
+    if (page.name !== "Overview" && page.name !== "Users" && page.name !== "Campaigns" && page.name !== "Plans" && page.name !== "Complimentary access" && page.name !== "Instagram" && page.name !== "Billing" && page.name !== "Analytics" && page.name !== "Settings" && page.name !== "Audit Logs") assert.match(html, /No sample records shown/);
   }
+});
+
+test("Complimentary Access page exposes the protected grant and state-management workflow", async () => {
+  setRuntimeForTests(adminRuntime);
+  const html = renderToStaticMarkup(await ComplimentaryAccessPage());
+  assert.match(html, /Admin Granted — Permanent Free Access/);
+  assert.match(html, /Search by name, email or user ID/);
+  assert.match(html, /Search users/);
+  assert.match(html, /aria-current="page"[^>]*>[\s\S]*Complimentary access/);
 });
 
 test("Admin Users page renders validated search/filter controls and safe paginated user rows", async () => {
@@ -291,7 +302,7 @@ test("Admin Audit Logs page filters stored allowlisted fields and event detail w
   const detail = renderToStaticMarkup(await renderAdminAuditDetailsPage("audit-1"));
   assert.match(detail, /RECORDED EVENT/);
   assert.match(detail, /Metadata withheld/);
-  assert.match(detail, /Historical actor role and event outcome are unavailable/);
+  assert.match(detail, /Historical actor roles and outcomes for older records are unavailable/);
   assert.doesNotMatch(detail, /private-audit-value|sensitive-outcome/);
 });
 
@@ -302,6 +313,6 @@ test("overview presents unavailable summaries without invented figures or demo f
   assert.match(html, /Campaigns/);
   assert.match(html, /Instagram/);
   assert.match(html, /Billing/);
-  assert.match(html, /No live data/);
+  assert.match(html, /Live data is unavailable/);
   assert.doesNotMatch(html, /₹|\$\s?\d|\b\d{2,}\s*(users|campaigns|payments)/i);
 });

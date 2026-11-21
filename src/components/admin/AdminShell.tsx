@@ -5,6 +5,7 @@ export const ADMIN_SECTIONS = [
   { id: "users", label: "Users", href: "/admin/users", icon: "♙", group: "Workspace" },
   { id: "campaigns", label: "Campaigns", href: "/admin/campaigns", icon: "▣", group: "Workspace" },
   { id: "plans", label: "Plans", href: "/admin/plans", icon: "◇", group: "Workspace" },
+  { id: "complimentary-access", label: "Complimentary access", href: "/admin/complimentary-access", icon: "✦", group: "Workspace" },
   { id: "offers", label: "Offers", href: "/admin/offers", icon: "%", group: "Workspace" },
   { id: "instagram", label: "Instagram", href: "/admin/instagram", icon: "◎", group: "Monitoring" },
   { id: "billing", label: "Billing", href: "/admin/billing", icon: "◈", group: "Monitoring" },
@@ -49,7 +50,7 @@ export function AdminShell({ children, activeSection, dataStatus = "unavailable"
 
         <div className="admin-sidebar-footer">
           <span className="admin-status-dot" aria-hidden="true" />
-          <span><strong>Read-only workspace</strong><small>{dataStatus === "available" ? "Stored records available" : "Live data not connected"}</small></span>
+          <span><strong>Admin control center</strong><small>{dataStatus === "available" ? "Stored records available" : "Live data not connected"}</small></span>
         </div>
       </aside>
 
@@ -59,7 +60,7 @@ export function AdminShell({ children, activeSection, dataStatus = "unavailable"
           <span className="admin-live-status"><span className="admin-status-dot" aria-hidden="true" />{dataStatus === "available" ? "Stored records available" : "Live data not connected"}</span>
         </header>
         <main className="admin-main-content">{children}</main>
-        <footer className="admin-footer"><span>ClipForge Admin</span><span>Private workspace · {dataStatus === "available" ? "Stored data view" : "Read-only preview"}</span></footer>
+        <footer className="admin-footer"><span>ClipForge Admin</span><span>Private workspace · actions appear only where a protected operation is supported</span></footer>
       </div>
     </div>
   );

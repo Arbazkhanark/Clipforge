@@ -5,7 +5,6 @@ import { getRuntime } from "../../server/runtime.ts";
 import { requireAdminPage } from "../../server/admin/page-authorization.ts";
 import { ADMIN_FILTERS, parseAdminListQuery } from "../../server/admin/data-service.ts";
 import type { AdminPlanEntitlementRow, AdminSubscriptionRow } from "../../server/admin/data-repository.ts";
-import { ComplimentaryAccessAdmin } from "./ComplimentaryAccessAdmin.tsx";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 const text = (value: string | string[] | undefined): string | undefined => Array.isArray(value) ? value[0] : value;
@@ -38,9 +37,18 @@ export async function renderAdminPlansPage(searchParams: Promise<SearchParams>) 
   try { userQuery = parseAdminListQuery(new URL(`http://admin.local/?${userInput.toString()}`)); }
   catch { userQuery = parseAdminListQuery(new URL("http://admin.local/")); }
   const runtime = getRuntime(); const service = runtime.adminData ? await runtime.adminData() : null;
-  const [counts, subscriptions, entitlements] = service ? await Promise.all([
-    service.getSubscriptionCountsByPlan(), service.listSubscriptions(subscriptionQuery), service.listPlanEntitlements(userQuery),
-  ]) : [null, null, null];
+  const [counts, subscriptions] = service ? await Promise.all([
+    service.getSubscriptionCountsByPlan(), service.listSubscriptions(subscriptionQuery),
+  ]) : [null, null];
+  let entitlements: Awaited<ReturnType<NonNullable<typeof service>["listPlanEntitlements"]>> | null = null;
+  let complimentarySetupRequired = false;
+  if (service) {
+    try { entitlements = await service.listPlanEntitlements(userQuery); }
+    catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "complimentary_access_setup_required") complimentarySetupRequired = true;
+      else throw error;
+    }
+  }
   const planFilter = subscriptionQuery.planId ?? ""; const statusFilter = subscriptionQuery.status ?? ""; const search = subscriptionQuery.search ?? "";
   const subscriptionHref = (page: number) => {
     const next = new URLSearchParams(); if (search) next.set("search", search); if (planFilter) next.set("planId", planFilter); if (statusFilter) next.set("status", statusFilter); next.set("page", String(page)); return `/admin/plans?${next.toString()}`;
@@ -50,8 +58,7 @@ export async function renderAdminPlansPage(searchParams: Promise<SearchParams>) 
   };
   return <AdminShell activeSection="plans" dataStatus={service ? "available" : "unavailable"}>
     <div className="admin-page-heading"><div><p className="admin-eyebrow">CLIPFORGE ADMIN</p><h1>Plans &amp; entitlements</h1><p>Configured plan catalog alongside stored subscription and access records.</p></div><span className="admin-readonly-pill">◉ Catalog is read-only</span></div>
-    <div className="admin-billing-notice"><strong>Configuration and access are different facts</strong><span>Plan features and prices below come from the application catalog. They are not proof that a user currently has those features. User access is resolved separately from stored records; verified admins can manage permanent complimentary grants below.</span></div>
-    <ComplimentaryAccessAdmin />
+    <div className="admin-billing-notice"><strong>Configuration and access are different facts</strong><span>Plan features and prices below come from the application catalog. They are not proof that a user currently has those features. User access is resolved separately from stored records; verified admins can manage permanent complimentary grants in the dedicated Complimentary access section.</span></div>
     <section className="admin-plan-catalog" aria-label="Configured plan catalog">
       <div className="admin-user-section"><h2>Application-configured plan definitions</h2><p>Source: server plan catalog. This configuration is not stored in the database and may differ from historical user agreements.</p></div>
       <div className="admin-plan-grid">{PLAN_IDS.map((id) => {
@@ -83,6 +90,7 @@ export async function renderAdminPlansPage(searchParams: Promise<SearchParams>) 
     </section>
     <section id="entitlements" className="admin-user-section admin-plan-entitlements"><h2>User entitlement summary</h2><p>Effective access is calculated at request time using paid subscriptions, manual access, active complimentary grants, and existing promotion rules. Configured features are not copied here as per-user grants.</p>
       <form className="admin-user-filters" method="get" action="/admin/plans#entitlements"><label>Search user<input type="search" name="usersSearch" maxLength={100} defaultValue={userQuery.search ?? ""} placeholder="Name, email or user ID" /></label><button type="submit">Search users</button></form>
+      {complimentarySetupRequired && <div className="admin-user-unavailable" role="alert"><strong>Complimentary access setup is incomplete.</strong><p>The required migration is not available, so user entitlement summaries cannot include complimentary grants. The migration has not been applied from this dashboard.</p></div>}
       {!entitlements ? <div className="admin-user-unavailable">User entitlement records are unavailable in this runtime.</div>
         : entitlements.items.length === 0 ? <div className="admin-user-unavailable">No users match this search.</div>
         : <><div className="admin-user-table-wrap"><table className="admin-user-table"><thead><tr><th>User</th><th>Effective plan</th><th>Entitlement source</th><th>Stored subscription state</th><th>Access end</th><th>Plan definition</th></tr></thead><tbody>{entitlements.items.map((row: AdminPlanEntitlementRow) => <tr key={row.userId}><td><strong>{row.name || "Name unavailable"}</strong><small>{row.email} · {row.userId}</small></td><td>{row.planDefinitionAvailable ? PLAN_CATALOG[row.planId as (typeof PLAN_IDS)[number]].name : "Unknown / unavailable"}</td><td><span className="admin-state-label">{human(row.source)}</span>{row.source === "manual_access" && <small>One-time access · does not auto-renew</small>}{row.source === "complimentary_access" && <small>Admin Granted — Permanent Free Access</small>}</td><td>{row.subscriptionStatus ? human(row.subscriptionStatus) : "No subscription row"}</td><td>{row.source === "manual_access" ? date(row.manualAccessExpiresAt) : row.source === "recurring_subscription" || row.source === "subscription_trial" ? date(row.subscriptionPeriodEnd) : "No currently entitled period"}</td><td>{row.planDefinitionAvailable ? row.inconsistentStoredPlan ? "Current plan known; another stored plan ID is inconsistent" : "Available" : "Unavailable; stored plan ID needs review"}</td></tr>)}</tbody></table></div><nav className="admin-user-pagination" aria-label="Entitlement user pages"><span>{entitlements.total} users · Page {entitlements.page}</span><div><a aria-disabled={entitlements.page <= 1} href={entitlements.page <= 1 ? undefined : entitlementHref(entitlements.page - 1)}>Previous</a><a aria-disabled={entitlements.page * entitlements.pageSize >= entitlements.total} href={entitlements.page * entitlements.pageSize >= entitlements.total ? undefined : entitlementHref(entitlements.page + 1)}>Next</a></div></nav></>}

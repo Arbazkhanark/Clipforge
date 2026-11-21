@@ -16,6 +16,10 @@ const SECTION_COPY: Record<Exclude<AdminSectionId, "overview">, { title: string;
     title: "Plans", description: "Review configured plan definitions and stored entitlement records.",
     emptyTitle: "Plan data is not connected", emptyDescription: "Plan access summaries remain unavailable until stored subscription and manual access records can be read.", icon: "◇",
   },
+  "complimentary-access": {
+    title: "Complimentary access", description: "Grant and manage permanent complimentary access for a user.",
+    emptyTitle: "Complimentary access controls have a dedicated page", emptyDescription: "Use the dedicated complimentary access page to grant, hold, resume, revoke and inspect audit history.", icon: "✦",
+  },
   offers: {
     title: "Offers", description: "Manage coupon definitions and lifecycle status.",
     emptyTitle: "Offers are not available here", emptyDescription: "Use the protected Offers page to manage draft coupon definitions.", icon: "%",
@@ -58,6 +62,7 @@ function PageHeading({ title, description }: { title: string; description: strin
 function OverviewContent({ overview }: { overview: AdminOverview | null }) {
   const cards = overview ? [
     { label: "Registered users", value: overview.users.registered.toLocaleString(), description: "User accounts in the database", icon: "♙", href: "/admin/users" },
+    ...(overview.users.suspended === null ? [] : [{ label: "Suspended users", value: overview.users.suspended.toLocaleString(), description: "Suspension records; data is preserved", icon: "⏸", href: "/admin/users" }]),
     { label: "Publishing cycles", value: overview.cycles.total.toLocaleString(), description: "Stored cycles across all statuses", icon: "▣", href: "/admin/campaigns" },
     { label: "Instagram accounts", value: overview.instagram.totalStoredAccounts.toLocaleString(), description: "Stored connections; Meta not queried", icon: "◎", href: "/admin/instagram" },
     { label: "Publishing jobs", value: overview.publishing.totalAttempts.toLocaleString(), description: "Stored job records, not live status", icon: "↗", href: "/admin/analytics" },
@@ -92,12 +97,18 @@ function OverviewContent({ overview }: { overview: AdminOverview | null }) {
 
 export async function renderAdminDashboardPage(section: AdminSectionId) {
   await requireAdminPage();
-  return <AdminDashboardPage section={section} />;
+  let overview: AdminOverview | null = null;
+  if (section === "overview") {
+    const runtime = getRuntime();
+    try { overview = runtime.adminData ? await (await runtime.adminData()).getOverview() : null; }
+    catch { overview = null; }
+  }
+  return <AdminDashboardPage section={section} overview={overview} />;
 }
 
-export function AdminDashboardPage({ section }: { section: AdminSectionId }) {
+export function AdminDashboardPage({ section, overview = null }: { section: AdminSectionId; overview?: AdminOverview | null }) {
   if (section === "overview") {
-    return <OverviewDashboard />;
+    return <AdminShell activeSection="overview" dataStatus={overview ? "available" : "unavailable"}><div className="admin-dashboard-intro"><PageHeading title="Overview" description="A live snapshot of stored ClipForge operations." /><a className="admin-dashboard-refresh" href="/admin">Refresh dashboard</a></div><OverviewContent overview={overview} /></AdminShell>;
   }
 
   const copy = SECTION_COPY[section];
@@ -113,12 +124,4 @@ export function AdminDashboardPage({ section }: { section: AdminSectionId }) {
       </section>
     </AdminShell>
   );
-}
-
-async function OverviewDashboard() {
-  const runtime = getRuntime();
-  let overview: AdminOverview | null = null;
-  try { overview = runtime.adminData ? await (await runtime.adminData()).getOverview() : null; }
-  catch { overview = null; }
-  return <AdminShell activeSection="overview" dataStatus={overview ? "available" : "unavailable"}><div className="admin-dashboard-intro"><PageHeading title="Overview" description="A live snapshot of stored ClipForge operations." /><a className="admin-dashboard-refresh" href="/admin">Refresh dashboard</a></div><OverviewContent overview={overview} /></AdminShell>;
 }

@@ -368,6 +368,19 @@ model User {
   usageRecords   UsageRecord[]
   publishingJobs PublishingJob[]
   editedMediaReplacements EditedMediaReplacement[]
+  suspension UserSuspension?
+}
+
+/// One row means an account is suspended. Deleting it reactivates the account;
+/// immutable transitions are retained in AuditLog.
+model UserSuspension {
+  userId             String   @id
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  suspendedByAdminId String
+  reason             String?
+  suspendedAt        DateTime @default(now())
+
+  @@index([suspendedByAdminId, suspendedAt])
 }
 
 /// Login sessions. Only a SHA-256 hash of the cookie token is stored, so a database leak cannot be replayed as cookies.

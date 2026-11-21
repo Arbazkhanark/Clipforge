@@ -26,7 +26,13 @@ export const GET = adminApiRoute(async (request, adminId) => {
   await ensureVerifiedAdmin(adminId);
   const userId = new URL(request.url).searchParams.get("userId") ?? "";
   if (!ID.test(userId)) throw new AppError(400, "invalid_user", "Choose a valid user ID.");
-  return json(await getRuntime().repo.listComplimentaryAccessForUser(userId));
+  const runtime = getRuntime();
+  const [access, entitlementPage] = await Promise.all([
+    runtime.repo.listComplimentaryAccessForUser(userId),
+    runtime.adminData ? runtime.adminData().then((service) => service.listPlanEntitlements({ page: 1, pageSize: 10, search: userId })) : Promise.resolve(null),
+  ]);
+  const currentPlan = entitlementPage?.items.find((item) => item.userId === userId)?.planId ?? null;
+  return json({ ...access, currentPlan });
 });
 
 export const POST = adminApiRoute(async (request, adminId) => {
