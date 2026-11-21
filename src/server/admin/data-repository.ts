@@ -49,7 +49,7 @@ export type AdminPaymentRow = { id: string; userId: string; ownerName: string | 
 export type AdminSubscriptionRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; planId: string; interval: string; status: string; currentPeriodEnd: Date | null; cancelAtPeriodEnd: boolean; cancellationRequestedAt: Date | null; createdAt: Date; updatedAt: Date };
 export type AdminManualAccessRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; planId: string; startsAt: Date; expiresAt: Date; createdAt: Date; paymentReferenceAvailable: boolean };
 export type AdminBillingIntentRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; planId: string; interval: string; amountPaise: number | null; currency: string; status: string; createdAt: Date; updatedAt: Date; billingMode: "recurring" | "manual" };
-export type AdminPlanEntitlementRow = { userId: string; name: string | null; email: string; planId: string; source: "free_fallback" | "recurring_subscription" | "subscription_trial" | "manual_access" | "inconsistent"; subscriptionStatus: string | null; subscriptionPeriodEnd: Date | null; manualAccessExpiresAt: Date | null; planDefinitionAvailable: boolean; inconsistentStoredPlan: boolean };
+export type AdminPlanEntitlementRow = { userId: string; name: string | null; email: string; planId: string; source: "free_fallback" | "recurring_subscription" | "subscription_trial" | "manual_access" | "complimentary_access" | "inconsistent"; subscriptionStatus: string | null; subscriptionPeriodEnd: Date | null; manualAccessExpiresAt: Date | null; planDefinitionAvailable: boolean; inconsistentStoredPlan: boolean };
 export type AdminPlanCounts = { byPlan: Record<PlanId, number>; unknownPlanCount: number };
 export type AdminPlanEntitlementSummary = { complete: boolean; totalUsers: number; byPlan: Record<PlanId, number>; bySource: Record<"recurring_subscription" | "subscription_trial" | "manual_access", number>; inconsistentEntitlements: number; unavailableReason: string | null };
 export type AdminAnalyticsReport = {
@@ -467,9 +467,10 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     ]);
     const userIds = users.map((row) => str(row, "id"));
     if (!userIds.length) return makePage([], total, query);
-    const [subscriptions, manualAccessRows] = await Promise.all([
+    const [subscriptions, manualAccessRows, complimentaryRows] = await Promise.all([
       this.db.subscription.findMany({ where: { userId: { in: userIds } }, select: { userId: true, planId: true, interval: true, status: true, razorpaySubscriptionId: true, currentPeriodEnd: true, cancelAtPeriodEnd: true, cancellationRequestedAt: true, trialEndsAt: true }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }] }),
       this.db.manualPlanAccess.findMany({ where: { userId: { in: userIds }, startsAt: { lte: now }, expiresAt: { gt: now } }, select: { userId: true, planId: true, startsAt: true, expiresAt: true }, orderBy: [{ expiresAt: "desc" }, { id: "asc" }] }),
+      this.db.complimentaryAccessGrant.findMany({ where: { userId: { in: userIds }, status: "ACTIVE" }, select: { userId: true, planId: true } }),
     ]);
     const providerIds = [...new Set(subscriptions.map((row) => nullableStr(row, "razorpaySubscriptionId")).filter((id): id is string => id !== null))];
     const paidRows = providerIds.length ? await this.db.paymentRecord.findMany({ where: { userId: { in: userIds }, providerSubscriptionId: { in: providerIds }, status: "captured" }, select: { userId: true, providerSubscriptionId: true } }) : [];
@@ -477,6 +478,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     const subscriptionByUser = new Map(subscriptions.map((row) => [str(row, "userId"), row]));
     const manualByUser = new Map<string, Row>();
     for (const row of manualAccessRows) if (!manualByUser.has(str(row, "userId"))) manualByUser.set(str(row, "userId"), row);
+    const complimentaryByUser = new Map(complimentaryRows.map((row) => [str(row, "userId"), row]));
     const items = users.map((user): AdminPlanEntitlementRow => {
       const userId = str(user, "id"); const subscription = subscriptionByUser.get(userId); const manual = manualByUser.get(userId);
       const periodEnd = subscription ? nullableDate(subscription["currentPeriodEnd"]) : null;
@@ -501,6 +503,10 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
         if (isPlanId(storedPlan)) { planId = storedPlan; source = "manual_access"; }
         else { planId = "unknown"; source = "inconsistent"; }
       }
+      const complimentary = complimentaryByUser.get(userId);
+      const complimentaryPlan = complimentary ? str(complimentary, "planId") : null;
+      const tier = (id: string): number => ({ free: 0, creator: 1, pro: 2, agency: 3 }[id] ?? -1);
+      if (complimentaryPlan && isPlanId(complimentaryPlan) && tier(complimentaryPlan) > tier(planId)) { planId = complimentaryPlan; source = "complimentary_access"; }
       const inconsistentStoredPlan = Boolean((subscription && !isPlanId(str(subscription, "planId"))) || (manual && !isPlanId(str(manual, "planId"))));
       return { userId, name: nullableStr(user, "name"), email: str(user, "email"), planId, source, subscriptionStatus: subscription ? str(subscription, "status") : null, subscriptionPeriodEnd: periodEnd, manualAccessExpiresAt: source === "manual_access" ? nullableDate(manual?.["expiresAt"]) : null, planDefinitionAvailable: isPlanId(planId), inconsistentStoredPlan };
     });

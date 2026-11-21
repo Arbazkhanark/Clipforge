@@ -26,11 +26,14 @@ export interface PromotionalPlanGrant extends PlanAccessPeriod {
   revokedAt: Date | null;
 }
 
+export interface ComplimentaryPlanGrant { planId: string; status: string }
+
 export interface EffectiveEntitlementInput {
   now: Date;
   subscription?: PaidSubscriptionEntitlement | null;
   manualAccess?: readonly PlanAccessPeriod[];
   promotionalGrants?: readonly PromotionalPlanGrant[];
+  complimentaryGrant?: ComplimentaryPlanGrant | null;
   deferredAccessState?: DeferredAccessState;
   /** Memory/demo repository compatibility for its pre-existing seeded plan fixtures. */
   legacyPlanId?: string | null;
@@ -38,7 +41,7 @@ export interface EffectiveEntitlementInput {
 
 export interface EffectiveEntitlement {
   planId: PlanId;
-  source: "free" | "subscription_trial" | "recurring_subscription" | "manual_access" | "promotion" | "legacy_access";
+  source: "free" | "subscription_trial" | "recurring_subscription" | "manual_access" | "promotion" | "legacy_access" | "complimentary_access";
 }
 
 const PLAN_PRIORITY: Record<PlanId, number> = { free: 0, creator: 1, pro: 2, agency: 3 };
@@ -98,6 +101,7 @@ export function resolveEffectiveEntitlement(input: EffectiveEntitlementInput): E
     }
   }
   if (input.legacyPlanId && validPlan(input.legacyPlanId) && input.legacyPlanId !== "free") candidates.push({ planId: input.legacyPlanId, source: "legacy_access" });
+  if (input.complimentaryGrant?.status === "ACTIVE" && validPlan(input.complimentaryGrant.planId) && input.complimentaryGrant.planId !== "free") candidates.push({ planId: input.complimentaryGrant.planId, source: "complimentary_access" });
   for (const access of input.manualAccess ?? []) {
     if (validPlan(access.planId) && access.planId !== "free" && activeInWindow(access.startsAt, access.expiresAt, input.now)) candidates.push({ planId: access.planId, source: "manual_access" });
   }

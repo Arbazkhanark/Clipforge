@@ -31,6 +31,7 @@ import { mediaKeyFor, stagingKeyFor } from "../storage/media-storage.ts";
 import { canAddVideoToCycle, canCreateAccessRequest, canImportVideo, decideAccessRequest, getCollectionCapabilities, validateShareLinkSettings } from "../../lib/domain/sharing-permissions.ts";
 import { calculateDiscountAmounts, normalizePromotionCode, promotionRedemptionTransitionAllowed, samePromotionDefinition, validDiscountSnapshot, validPromotionEventMetadata, validPromotionRecord } from "../../lib/domain/promotions.ts";
 import type { CreatePromotionRedemptionInput, CreatePromotionalAccessGrantInput, PromotionLifecycleEventInput, PromotionLifecycleEventRecord, PromotionRecord, PromotionRedemptionRecord, PromotionalAccessGrantRecord, RedeemFreeAccessCouponInput, RedeemFreeAccessCouponResult, ReserveDiscountedManualPaymentIntentInput, ReserveDiscountedManualPaymentIntentResult, UpdateDraftPromotionResult, TransitionCouponStatusResult } from "../repository.ts";
+import type { ComplimentaryAccessAction, ComplimentaryAccessEventRecord, ComplimentaryAccessGrantRecord, ComplimentaryAccessState, ComplimentaryAccessTransitionResult } from "../repository.ts";
 import type { CollectionGrantMutationResult, CollectionShareLinkRecord, CollectionShareLinkSummary, CreateCollectionGrantInput, CreateCollectionShareLinkInput, MediaImportClaim, MediaImportFinalizationInput, MediaImportJobRecord, MediaImportRequestInput, MediaImportVerificationInput, RevokeCollectionGrantInput, UpdateCollectionShareLinkInput } from "../repository.ts";
 import type { EditedMediaReplacementRecord, EditedReplacementClaim, EditedReplacementCommitInput, EditedReplacementCommitResult, EditedReplacementFinalizeResult, EditedReplacementRequest, EditedReplacementMembership, MediaVerificationClaim, MediaVerificationJobRecord } from "../repository.ts";
 import { mediaVerificationStateFromJob } from "../media-verification-state.ts";
@@ -672,6 +673,63 @@ export class PrismaRepository implements Repository {
   }
   async listPromotionLifecycleEvents(promotionId: string): Promise<PromotionLifecycleEventRecord[]> { const rows = await this.db.promotionLifecycleEvent.findMany({ where: { promotionId }, orderBy: { occurredAt: "asc" } }); return rows.map((row) => this.promotionEventFromRow(row)); }
 
+  private complimentaryGrantFromRow(row: Record<string, unknown>): ComplimentaryAccessGrantRecord {
+    return { id: String(row["id"]), userId: String(row["userId"]), planId: String(row["planId"]) as Exclude<PlanId, "free">, status: String(row["status"]) as ComplimentaryAccessState, grantedByAdminId: String(row["grantedByAdminId"]), reason: row["reason"] as string | null, version: Number(row["version"]), createdAt: row["createdAt"] as Date, updatedAt: row["updatedAt"] as Date };
+  }
+  private complimentaryEventFromRow(row: Record<string, unknown>): ComplimentaryAccessEventRecord {
+    return { id: String(row["id"]), eventKey: String(row["eventKey"]), grantId: String(row["grantId"]), subjectUserId: String(row["subjectUserId"]), actorAdminId: String(row["actorAdminId"]), action: String(row["action"]) as ComplimentaryAccessAction, previousState: row["previousState"] as ComplimentaryAccessState | null, newState: String(row["newState"]) as ComplimentaryAccessState, note: row["note"] as string | null, occurredAt: row["occurredAt"] as Date };
+  }
+  private async verifiedAdmin(tx: PrismaClientLike, adminId: string): Promise<boolean> {
+    const actor = await tx.user.findUnique({ where: { id: adminId }, select: { role: true, emailVerified: true } });
+    return actor?.["role"] === "admin" && actor["emailVerified"] instanceof Date;
+  }
+  async grantComplimentaryAccess(input: { id: string; userId: string; planId: Exclude<PlanId, "free">; adminId: string; note: string | null; now: Date }): Promise<{ status: "created" | "existing" | "already_granted" | "missing_user" | "forbidden" | "conflict"; grant?: ComplimentaryAccessGrantRecord }> {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.id) || !["creator", "pro", "agency"].includes(input.planId) || (input.note !== null && input.note.length > 500) || !Number.isFinite(input.now.getTime())) return { status: "conflict" };
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      if (!(await this.verifiedAdmin(tx, input.adminId))) return { status: "forbidden" as const };
+      const target = await tx.user.findUnique({ where: { id: input.userId }, select: { role: true } });
+      if (!target || target["role"] !== "user") return { status: "missing_user" as const };
+      const existing = await tx.complimentaryAccessGrant.findUnique({ where: { id: input.id } });
+      if (existing) {
+        const event = await tx.complimentaryAccessEvent.findUnique({ where: { eventKey: `${input.id}:1` } });
+        const same = existing["userId"] === input.userId && existing["planId"] === input.planId && existing["grantedByAdminId"] === input.adminId && existing["reason"] === input.note;
+        return same && event?.["action"] === "GRANT" ? { status: "existing" as const, grant: this.complimentaryGrantFromRow(existing) } : { status: "conflict" as const };
+      }
+      const active = await tx.complimentaryAccessGrant.findFirst({ where: { userId: input.userId, status: { in: ["ACTIVE", "ON_HOLD"] } } });
+      if (active) return { status: "already_granted" as const };
+      const row = await tx.complimentaryAccessGrant.create({ data: { id: input.id, userId: input.userId, planId: input.planId, status: "ACTIVE", grantedByAdminId: input.adminId, reason: input.note, version: 1, createdAt: input.now, updatedAt: input.now } });
+      await tx.complimentaryAccessEvent.create({ data: { id: `event-${input.id}-1`, eventKey: `${input.id}:1`, grantId: input.id, subjectUserId: input.userId, actorAdminId: input.adminId, action: "GRANT", previousState: null, newState: "ACTIVE", note: input.note, occurredAt: input.now } });
+      return { status: "created" as const, grant: this.complimentaryGrantFromRow(row) };
+    });
+  }
+  async transitionComplimentaryAccess(input: { grantId: string; userId: string; adminId: string; action: "HOLD" | "RESUME" | "REVOKE"; note: string | null; now: Date }): Promise<ComplimentaryAccessTransitionResult> {
+    if (input.note !== null && input.note.length > 500 || !Number.isFinite(input.now.getTime())) return "invalid_transition";
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${input.userId} FOR UPDATE`;
+      if (!(await this.verifiedAdmin(tx, input.adminId))) return "forbidden";
+      const grant = await tx.complimentaryAccessGrant.findUnique({ where: { id: input.grantId } });
+      if (!grant || grant["userId"] !== input.userId) return "missing";
+      const previous = String(grant["status"]) as ComplimentaryAccessState;
+      const next: ComplimentaryAccessState = input.action === "HOLD" ? "ON_HOLD" : input.action === "RESUME" ? "ACTIVE" : "REVOKED";
+      if (previous === next) return "existing";
+      if ((input.action === "HOLD" && previous !== "ACTIVE") || (input.action === "RESUME" && previous !== "ON_HOLD") || (input.action === "REVOKE" && previous === "REVOKED")) return "invalid_transition";
+      const version = Number(grant["version"]) + 1;
+      const changed = await tx.complimentaryAccessGrant.updateMany({ where: { id: input.grantId, userId: input.userId, status: previous, version: Number(grant["version"]) }, data: { status: next, version, updatedAt: input.now } });
+      if (changed.count !== 1) return "invalid_transition";
+      await tx.complimentaryAccessEvent.create({ data: { id: `event-${input.grantId}-${version}`, eventKey: `${input.grantId}:${version}`, grantId: input.grantId, subjectUserId: input.userId, actorAdminId: input.adminId, action: input.action, previousState: previous, newState: next, note: input.note, occurredAt: input.now } });
+      return "updated";
+    });
+  }
+  async listComplimentaryAccessForUser(userId: string): Promise<{ grants: ComplimentaryAccessGrantRecord[]; events: ComplimentaryAccessEventRecord[] }> {
+    const [grants, events] = await Promise.all([
+      this.db.complimentaryAccessGrant.findMany({ where: { userId }, orderBy: { createdAt: "asc" } }),
+      this.db.complimentaryAccessEvent.findMany({ where: { subjectUserId: userId }, orderBy: { occurredAt: "asc" } }),
+    ]);
+    return { grants: grants.map((row) => this.complimentaryGrantFromRow(row)), events: events.map((row) => this.complimentaryEventFromRow(row)) };
+  }
+  async getActiveComplimentaryAccessState(userId: string): Promise<ComplimentaryAccessState | null> { const row = await this.db.complimentaryAccessGrant.findFirst({ where: { userId, status: { in: ["ACTIVE", "ON_HOLD"] } }, select: { status: true } }); return row ? String(row["status"]) as ComplimentaryAccessState : null; }
+
   async getPlanIdForUser(userId: string, at = this.now()): Promise<PlanId> {
     let promotionsAvailable = true;
     try { await this.activateNextPromotionalAccessGrant(userId, at); }
@@ -689,11 +747,13 @@ export class PrismaRepository implements Repository {
       try { promotionalRows = await this.db.promotionalAccessGrant.findMany({ where: { userId, status: "active", startsAt: { lte: at }, expiresAt: { gt: at } }, select: { planId: true, startsAt: true, expiresAt: true, status: true, activationPolicy: true, activatedAt: true, revokedAt: true } }); }
       catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; }
     }
+    const complimentaryRow = await this.db.complimentaryAccessGrant.findFirst({ where: { userId, status: "ACTIVE" }, select: { planId: true, status: true } });
     return resolveEffectiveEntitlement({
       now: at,
       subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,
       manualAccess: manualRows.map((access) => ({ planId: String(access["planId"]), startsAt: access["startsAt"] as Date, expiresAt: access["expiresAt"] as Date })),
       promotionalGrants: promotionalRows.map((grant) => ({ planId: String(grant["planId"]), startsAt: grant["startsAt"] as Date, expiresAt: grant["expiresAt"] as Date, status: String(grant["status"]), activationPolicy: String(grant["activationPolicy"]), activatedAt: grant["activatedAt"] instanceof Date ? grant["activatedAt"] : null, revokedAt: grant["revokedAt"] === null ? null : grant["revokedAt"] instanceof Date ? grant["revokedAt"] : new Date(Number.NaN) })),
+      complimentaryGrant: complimentaryRow ? { planId: String(complimentaryRow["planId"]), status: String(complimentaryRow["status"]) } : null,
       deferredAccessState: resolveDeferredAccessState({
         now: at,
         subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,
@@ -713,11 +773,13 @@ export class PrismaRepository implements Repository {
     const manualRows = await tx.manualPlanAccess.findMany({ where: { userId }, select: { planId: true, startsAt: true, expiresAt: true } });
     let promotionalRows: Record<string, unknown>[] = [];
     if (includePromotions) promotionalRows = await tx.promotionalAccessGrant.findMany({ where: { userId, status: "active", startsAt: { lte: now }, expiresAt: { gt: now } }, select: { planId: true, startsAt: true, expiresAt: true, status: true, activationPolicy: true, activatedAt: true, revokedAt: true } });
+    const complimentaryRow = await tx.complimentaryAccessGrant.findFirst({ where: { userId, status: "ACTIVE" }, select: { planId: true, status: true } });
     return resolveEffectiveEntitlement({
       now,
       subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,
       manualAccess: manualRows.map((access) => ({ planId: String(access["planId"]), startsAt: access["startsAt"] as Date, expiresAt: access["expiresAt"] as Date })),
       promotionalGrants: promotionalRows.map((grant) => ({ planId: String(grant["planId"]), startsAt: grant["startsAt"] as Date, expiresAt: grant["expiresAt"] as Date, status: String(grant["status"]), activationPolicy: String(grant["activationPolicy"]), activatedAt: grant["activatedAt"] instanceof Date ? grant["activatedAt"] : null, revokedAt: grant["revokedAt"] === null ? null : grant["revokedAt"] instanceof Date ? grant["revokedAt"] : new Date(Number.NaN) })),
+      complimentaryGrant: complimentaryRow ? { planId: String(complimentaryRow["planId"]), status: String(complimentaryRow["status"]) } : null,
       deferredAccessState: resolveDeferredAccessState({
         now,
         subscription: row ? { planId: String(row["planId"]), status: row["status"] as SubscriptionStatus, trialEndsAt: row["trialEndsAt"] == null ? null : Number(row["trialEndsAt"]), currentPeriodEnd: row["currentPeriodEnd"] instanceof Date ? row["currentPeriodEnd"] : null, cancelAtPeriodEnd: row["cancelAtPeriodEnd"] === true, hasCapturedPayment, hasFailedPayment } : null,

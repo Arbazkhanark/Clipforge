@@ -8,6 +8,8 @@ Local auth and outbox flow work in the Next.js app without a database or email p
 
 ## Priority order
 
+0. **Permanent complimentary access controls.** Keep grants separate from paid subscriptions; allow verified admins to grant, hold, resume, and revoke with append-only audit history. The current implementation is pending migration and verification; do not enable before migration review and local testing.
+
 1. **Verify migration history, then review persistence on the isolated PostgreSQL test database.** The render-queue/outbox, publishing-attempt, and render-output-selection migrations are present in the working tree. Earlier project docs described them as unapplied, but actual database history is unknown. A read-only history check is blocked until an administrator provides a verified read-only role and protected credential source. After history is verified, review schema/SQL and retained test-data implications; obtain separate explicit approval before any migration or database test. Never point local testing at Neon.
 2. **Finish storage and durable worker deployment design.** Current render queue and publishing worker are not automatically triggered; local render jobs are process-memory-backed. A real hosted worker and persistent media storage need separate design and approval.
 3. **Only then enable real Instagram publishing.** Requires approved Meta app credentials, permission/app-review readiness, externally fetchable object-scoped media URLs, real PostgreSQL verification, and an operator-reviewed retry/recovery policy. Ambiguous outcomes must stay in manual review.

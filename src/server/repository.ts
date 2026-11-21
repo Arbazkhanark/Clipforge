@@ -182,6 +182,18 @@ export type PromotionalAccessStatus = "queued" | "active" | "expired" | "revoked
 export type PromotionalAccessKind = "bonus_days" | "tier_access" | "free_access_coupon";
 export type PromotionActivationPolicy = "immediate" | "after_current_access";
 export type PromotionLifecycleEventType = "promotion_created" | "promotion_updated" | "promotion_paused" | "promotion_revoked" | "grant_created" | "grant_queued" | "grant_activated" | "grant_expired" | "grant_revoked" | "coupon_reserved" | "coupon_redeemed" | "coupon_released" | "manual_review_required";
+export type ComplimentaryAccessState = "ACTIVE" | "ON_HOLD" | "REVOKED";
+export type ComplimentaryAccessAction = "GRANT" | "HOLD" | "RESUME" | "REVOKE";
+export interface ComplimentaryAccessGrantRecord {
+  id: string; userId: string; planId: Exclude<PlanId, "free">; status: ComplimentaryAccessState;
+  grantedByAdminId: string; reason: string | null; version: number; createdAt: Date; updatedAt: Date;
+}
+export interface ComplimentaryAccessEventRecord {
+  id: string; eventKey: string; grantId: string; subjectUserId: string; actorAdminId: string;
+  action: ComplimentaryAccessAction; previousState: ComplimentaryAccessState | null;
+  newState: ComplimentaryAccessState; note: string | null; occurredAt: Date;
+}
+export type ComplimentaryAccessTransitionResult = "updated" | "existing" | "missing" | "invalid_transition" | "forbidden";
 
 export interface PromotionRecord {
   id: string; type: PromotionType; status: PromotionStatus; code: string | null;
@@ -292,6 +304,10 @@ export interface Repository {
   listPromotionalAccessGrantsForUser(userId: string): Promise<PromotionalAccessGrantRecord[]>;
   createPromotionLifecycleEvent(input: PromotionLifecycleEventInput): Promise<"created" | "duplicate" | "conflict">;
   listPromotionLifecycleEvents(promotionId: string): Promise<PromotionLifecycleEventRecord[]>;
+  grantComplimentaryAccess(input: { id: string; userId: string; planId: Exclude<PlanId, "free">; adminId: string; note: string | null; now: Date }): Promise<{ status: "created" | "existing" | "already_granted" | "missing_user" | "forbidden" | "conflict"; grant?: ComplimentaryAccessGrantRecord }>;
+  transitionComplimentaryAccess(input: { grantId: string; userId: string; adminId: string; action: "HOLD" | "RESUME" | "REVOKE"; note: string | null; now: Date }): Promise<ComplimentaryAccessTransitionResult>;
+  listComplimentaryAccessForUser(userId: string): Promise<{ grants: ComplimentaryAccessGrantRecord[]; events: ComplimentaryAccessEventRecord[] }>;
+  getActiveComplimentaryAccessState(userId: string): Promise<ComplimentaryAccessState | null>;
 
   /** The plan whose limits apply to this user right now (free when there is no entitled subscription). */
   getPlanIdForUser(userId: string, now?: Date): Promise<PlanId>;

@@ -352,6 +352,10 @@ model User {
   promotionalGrantsCreated PromotionalAccessGrant[] @relation("PromotionGrantor")
   promotionEventsAsSubject PromotionLifecycleEvent[] @relation("PromotionEventSubject")
   promotionEventsAsActor PromotionLifecycleEvent[] @relation("PromotionEventActor")
+  complimentaryAccessGrants ComplimentaryAccessGrant[] @relation("ComplimentaryAccessSubject")
+  complimentaryAccessGrantsCreated ComplimentaryAccessGrant[] @relation("ComplimentaryAccessGrantor")
+  complimentaryAccessEventsAsSubject ComplimentaryAccessEvent[] @relation("ComplimentaryAccessEventSubject")
+  complimentaryAccessEventsAsActor ComplimentaryAccessEvent[] @relation("ComplimentaryAccessEventActor")
   socialAccounts SocialAccount[]
   mediaAssets    MediaAsset[]
   collections    VideoCollection[]
@@ -680,6 +684,45 @@ model PromotionLifecycleEvent {
   @@index([promotionId, occurredAt])
   @@index([subjectUserId, occurredAt])
   @@index([actorUserId, occurredAt])
+}
+
+/// Admin-granted, permanent plan access kept separate from payments and time-limited promotions.
+model ComplimentaryAccessGrant {
+  id                String   @id
+  userId            String
+  user              User     @relation("ComplimentaryAccessSubject", fields: [userId], references: [id], onDelete: Restrict)
+  planId            String
+  status            String   @default("ACTIVE")
+  grantedByAdminId  String
+  grantedByAdmin    User     @relation("ComplimentaryAccessGrantor", fields: [grantedByAdminId], references: [id], onDelete: Restrict)
+  reason            String?
+  version           Int      @default(1)
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(3)
+  events            ComplimentaryAccessEvent[]
+
+  @@index([userId, status, createdAt])
+}
+
+/// Append-only evidence for grant, hold, resume, and revoke transitions.
+model ComplimentaryAccessEvent {
+  id              String                @id
+  eventKey        String                @unique
+  grantId         String
+  grant           ComplimentaryAccessGrant @relation(fields: [grantId], references: [id], onDelete: Restrict)
+  subjectUserId   String
+  subjectUser     User                  @relation("ComplimentaryAccessEventSubject", fields: [subjectUserId], references: [id], onDelete: Restrict)
+  actorAdminId    String
+  actorAdmin      User                  @relation("ComplimentaryAccessEventActor", fields: [actorAdminId], references: [id], onDelete: Restrict)
+  action          String
+  previousState   String?
+  newState        String
+  note            String?
+  occurredAt      DateTime              @db.Timestamptz(3)
+
+  @@index([grantId, occurredAt])
+  @@index([subjectUserId, occurredAt])
+  @@index([actorAdminId, occurredAt])
 }
 
 model WebhookEvent {

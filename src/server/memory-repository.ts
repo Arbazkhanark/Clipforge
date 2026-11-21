@@ -20,7 +20,7 @@ import { planGrantCreation, planGrantRevocation } from "../lib/domain/sharing-ma
 import { canAddVideoToCycle, canCreateAccessRequest, canImportVideo, decideAccessRequest, getCollectionCapabilities, validateShareLinkSettings } from "../lib/domain/sharing-permissions.ts";
 import { mediaKeyFor, stagingKeyFor } from "./storage/media-storage.ts";
 import { calculateDiscountAmounts, normalizePromotionCode, promotionRedemptionTransitionAllowed, samePromotionDefinition, validDiscountSnapshot, validPromotionEventMetadata, validPromotionRecord } from "../lib/domain/promotions.ts";
-import type { CreatePromotionRedemptionInput, CreatePromotionalAccessGrantInput, PromotionLifecycleEventInput, PromotionLifecycleEventRecord, PromotionRecord, PromotionRedemptionRecord, PromotionalAccessGrantRecord, RedeemFreeAccessCouponInput, RedeemFreeAccessCouponResult, ReserveDiscountedManualPaymentIntentInput, ReserveDiscountedManualPaymentIntentResult } from "./repository.ts";
+import type { ComplimentaryAccessAction, ComplimentaryAccessEventRecord, ComplimentaryAccessGrantRecord, ComplimentaryAccessState, ComplimentaryAccessTransitionResult, CreatePromotionRedemptionInput, CreatePromotionalAccessGrantInput, PromotionLifecycleEventInput, PromotionLifecycleEventRecord, PromotionRecord, PromotionRedemptionRecord, PromotionalAccessGrantRecord, RedeemFreeAccessCouponInput, RedeemFreeAccessCouponResult, ReserveDiscountedManualPaymentIntentInput, ReserveDiscountedManualPaymentIntentResult } from "./repository.ts";
 import type { CollectionAccessRequestRecord, CollectionGrantMutationResult, CollectionShareLinkRecord, CollectionShareLinkSummary, CreateCollectionAccessRequestInput, CreateCollectionGrantInput, CreateCollectionShareLinkInput, DecideCollectionAccessRequestInput, MediaImportClaim, MediaImportFinalizationInput, MediaImportJobRecord, MediaImportRequestInput, MediaImportVerificationInput, RevokeCollectionGrantInput, UpdateCollectionShareLinkInput } from "./repository.ts";
 import type { MediaVerificationClaim, MediaVerificationJobRecord } from "./repository.ts";
 import { mediaVerificationStateFromJob } from "./media-verification-state.ts";
@@ -46,7 +46,10 @@ export class MemoryRepository implements Repository {
   promotionRedemptions = new Map<string, PromotionRedemptionRecord>();
   promotionalAccessGrants = new Map<string, PromotionalAccessGrantRecord>();
   promotionLifecycleEvents = new Map<string, PromotionLifecycleEventRecord>();
+  complimentaryAccessGrants = new Map<string, ComplimentaryAccessGrantRecord>();
+  complimentaryAccessEvents = new Map<string, ComplimentaryAccessEventRecord>();
   userRoles = new Map<string, "user" | "admin">();
+  verifiedUsers = new Set<string>();
   private promotionSequence = 0n;
   private promotionLocks = new Map<string, Promise<void>>();
   cycles = new Map<string, CycleRecord>();
@@ -98,6 +101,7 @@ export class MemoryRepository implements Repository {
 
   /** Test/demo seed helper; production authorization still reads the persisted user role. */
   setUserRole(userId: string, role: "user" | "admin"): void { this.userRoles.set(userId, role); }
+  setUserEmailVerified(userId: string, verified = true): void { if (verified) this.verifiedUsers.add(userId); else this.verifiedUsers.delete(userId); }
   private async withPromotionLock<T>(key: string, work: () => Promise<T>): Promise<T> {
     const previous = this.promotionLocks.get(key) ?? Promise.resolve();
     let release!: () => void;
@@ -540,6 +544,56 @@ export class MemoryRepository implements Repository {
   }
   async listPromotionLifecycleEvents(promotionId: string): Promise<PromotionLifecycleEventRecord[]> { await tick(); return [...this.promotionLifecycleEvents.values()].filter((event) => event.promotionId === promotionId).sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime()).map(clone); }
 
+  async grantComplimentaryAccess(input: { id: string; userId: string; planId: Exclude<PlanId, "free">; adminId: string; note: string | null; now: Date }): Promise<{ status: "created" | "existing" | "already_granted" | "missing_user" | "forbidden" | "conflict"; grant?: ComplimentaryAccessGrantRecord }> {
+    return this.withPromotionLock(`user:${input.userId}`, async () => {
+      await tick();
+      if (this.userRoles.get(input.adminId) !== "admin" || !this.verifiedUsers.has(input.adminId)) return { status: "forbidden" };
+      if (this.userRoles.get(input.userId) !== "user") return { status: "missing_user" };
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.id) || (input.note !== null && input.note.length > 500) || !Number.isFinite(input.now.getTime())) return { status: "conflict" };
+      const prior = this.complimentaryAccessGrants.get(input.id);
+      if (prior) {
+        const same = prior.userId === input.userId && prior.planId === input.planId && prior.grantedByAdminId === input.adminId && prior.reason === input.note;
+        const event = this.complimentaryAccessEvents.get(`${input.id}:1`);
+        return same && event?.action === "GRANT" ? { status: "existing", grant: clone(prior) } : { status: "conflict" };
+      }
+      if ([...this.complimentaryAccessGrants.values()].some((grant) => grant.userId === input.userId && grant.status !== "REVOKED")) return { status: "already_granted" };
+      const grant: ComplimentaryAccessGrantRecord = { id: input.id, userId: input.userId, planId: input.planId, status: "ACTIVE", grantedByAdminId: input.adminId, reason: input.note, version: 1, createdAt: clone(input.now), updatedAt: clone(input.now) };
+      const event: ComplimentaryAccessEventRecord = { id: `event-${input.id}-1`, eventKey: `${input.id}:1`, grantId: input.id, subjectUserId: input.userId, actorAdminId: input.adminId, action: "GRANT", previousState: null, newState: "ACTIVE", note: input.note, occurredAt: clone(input.now) };
+      this.complimentaryAccessGrants.set(grant.id, grant);
+      this.complimentaryAccessEvents.set(event.eventKey, event);
+      return { status: "created", grant: clone(grant) };
+    });
+  }
+
+  async transitionComplimentaryAccess(input: { grantId: string; userId: string; adminId: string; action: "HOLD" | "RESUME" | "REVOKE"; note: string | null; now: Date }): Promise<ComplimentaryAccessTransitionResult> {
+    return this.withPromotionLock(`user:${input.userId}`, async () => {
+      await tick();
+      if (this.userRoles.get(input.adminId) !== "admin" || !this.verifiedUsers.has(input.adminId)) return "forbidden";
+      const grant = this.complimentaryAccessGrants.get(input.grantId);
+      if (!grant || grant.userId !== input.userId) return "missing";
+      if (input.note !== null && input.note.length > 500) return "invalid_transition";
+      const nextState: ComplimentaryAccessState = input.action === "HOLD" ? "ON_HOLD" : input.action === "RESUME" ? "ACTIVE" : "REVOKED";
+      if (grant.status === nextState) return "existing";
+      if ((input.action === "HOLD" && grant.status !== "ACTIVE") || (input.action === "RESUME" && grant.status !== "ON_HOLD") || (input.action === "REVOKE" && grant.status === "REVOKED")) return "invalid_transition";
+      const version = grant.version + 1;
+      const updated: ComplimentaryAccessGrantRecord = { ...grant, status: nextState, version, updatedAt: clone(input.now) };
+      const event: ComplimentaryAccessEventRecord = { id: `event-${input.grantId}-${version}`, eventKey: `${input.grantId}:${version}`, grantId: input.grantId, subjectUserId: input.userId, actorAdminId: input.adminId, action: input.action as ComplimentaryAccessAction, previousState: grant.status, newState: nextState, note: input.note, occurredAt: clone(input.now) };
+      if (this.complimentaryAccessEvents.has(event.eventKey)) return "invalid_transition";
+      this.complimentaryAccessGrants.set(grant.id, updated);
+      this.complimentaryAccessEvents.set(event.eventKey, event);
+      return "updated";
+    });
+  }
+
+  async listComplimentaryAccessForUser(userId: string): Promise<{ grants: ComplimentaryAccessGrantRecord[]; events: ComplimentaryAccessEventRecord[] }> {
+    await tick();
+    const grants = [...this.complimentaryAccessGrants.values()].filter((grant) => grant.userId === userId).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()).map(clone);
+    const grantIds = new Set(grants.map((grant) => grant.id));
+    const events = [...this.complimentaryAccessEvents.values()].filter((event) => grantIds.has(event.grantId)).sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime()).map(clone);
+    return { grants, events };
+  }
+  async getActiveComplimentaryAccessState(userId: string): Promise<ComplimentaryAccessState | null> { await tick(); return [...this.complimentaryAccessGrants.values()].find((grant) => grant.userId === userId && grant.status !== "REVOKED")?.status ?? null; }
+
   private resolvePlanIdForUser(userId: string, at: Date): PlanId {
     const subscriptionEntry = [...this.razorpaySubscriptions.entries()].find(([, value]) => value.userId === userId);
     const subId = subscriptionEntry?.[0];
@@ -552,8 +606,9 @@ export class MemoryRepository implements Repository {
     } : null;
     const manualAccess = [...this.manualPlanAccesses.values()].filter((access) => access.userId === userId).map((access) => ({ planId: access.planId, startsAt: access.startsAt, expiresAt: access.expiresAt }));
     const promotionalGrants = [...this.promotionalAccessGrants.values()].filter((grant) => grant.userId === userId).map((grant) => ({ planId: grant.planId, startsAt: grant.startsAt ?? new Date(NaN), expiresAt: grant.expiresAt ?? new Date(NaN), status: grant.status, activationPolicy: grant.activationPolicy, activatedAt: grant.activatedAt, revokedAt: grant.revokedAt }));
+    const complimentaryGrant = [...this.complimentaryAccessGrants.values()].find((grant) => grant.userId === userId && grant.status === "ACTIVE");
     const legacyPlanId = sub ? null : this.plans.get(userId);
-    return resolveEffectiveEntitlement({ now: at, subscription, manualAccess, promotionalGrants, legacyPlanId, deferredAccessState: resolveDeferredAccessState({ now: at, subscription, manualAccess, legacyPlanId }) }).planId;
+    return resolveEffectiveEntitlement({ now: at, subscription, manualAccess, promotionalGrants, complimentaryGrant: complimentaryGrant ? { planId: complimentaryGrant.planId, status: complimentaryGrant.status } : null, legacyPlanId, deferredAccessState: resolveDeferredAccessState({ now: at, subscription, manualAccess, legacyPlanId }) }).planId;
   }
   async getPlanIdForUser(userId: string, at = new Date()): Promise<PlanId> {
     await tick();

@@ -29,6 +29,7 @@ In local mode the confirmation/reset "emails" are only visible on `/dev/outbox` 
 ## Stages
 | Stage | What | Status |
 |---|---|---|
+| Complimentary access | Permanent admin grants with ACTIVE / ON_HOLD / REVOKED state, verified-admin controls, append-only audit events, and paid-plan fallback while held | 🟡 implementation added; requires the new migration and focused tests before use |
 | Persistence | PrismaRepository, PrismaAuthRepository, mappers, contract suites | 🟡 written + logic-tested over a fake client; **never run on real Prisma/PostgreSQL**; no DB runtime mode, no `src/server/db.ts` wiring beyond an unverified `create-client.ts` |
 | Authentication | password hashing, sessions, verification, reset, routes, pages | 🟡 logic and routes verified in local (memory) mode; pages read the cookie via `next/headers` (**unverified under Next.js**); Google sign-in and real email NOT built; rate limiting is per email, in memory |
 | Media preview/download | `/api/media/file` (thumbnail, preview, download), ranges, headers | ✅ tested; originals only for the owner or someone given `download`; thumbnails for anyone who can see the item |
