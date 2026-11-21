@@ -92,7 +92,7 @@ export function ComplimentaryAccessAdmin() {
   return <section className="admin-user-section" aria-labelledby="complimentary-access-heading">
     <h2 id="complimentary-access-heading">Admin Granted — Permanent Free Access</h2>
     <p>Choose a user to inspect their current plan, active grant and full audit history. Complimentary grants remain separate from paid subscriptions and payments.</p>
-    {setupRequired ? <div className="admin-user-unavailable" role="alert"><strong>Complimentary access setup is incomplete.</strong><p>The required database migration is not available in this runtime. Have an administrator review and apply the pending migration, then refresh this page. No grant action was completed.</p></div> : <>
+    {setupRequired ? <div className="admin-user-unavailable" role="alert"><strong>Complimentary access setup is incomplete.</strong><p>This app's database does not expose the required schema. First confirm that DATABASE_URL points to the same local database whose migration status you checked. If it does, review schema permissions and migration history before applying any changes. No grant action was completed.</p></div> : <>
       <form className="admin-user-filters" onSubmit={submitSearch}>
         <label>Search by name, email or user ID<input value={userSearch} onChange={(event: ChangeEvent<HTMLInputElement>) => setUserSearch(event.currentTarget.value)} maxLength={100} /></label>
         <button type="submit" disabled={busy || !userSearch.trim()}>Search users</button>

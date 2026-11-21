@@ -98,7 +98,7 @@ export function setDatabaseConnectorForTests(connector: DatabaseConnector | null
 }
 
 const databaseUnavailable = (): AppError => new AppError(503, "database_unavailable", "The database could not confirm that operation. It may not have been saved; check again before retrying.");
-const complimentaryAccessSetupRequired = (): AppError => new AppError(503, "complimentary_access_setup_required", "Complimentary access is unavailable until its reviewed database migration is applied.");
+const complimentaryAccessSetupRequired = (): AppError => new AppError(503, "complimentary_access_setup_required", "The application's database does not expose the complimentary access schema. Confirm DATABASE_URL targets the database whose migration status you checked; if it does, review that database's schema and permissions.");
 const adminSuspensionSetupRequired = (): AppError => new AppError(503, "admin_user_suspension_setup_required", "User suspension is unavailable until its reviewed database migration is applied.");
 const DATABASE_RETRY_DELAY_MS = 5_000;
 

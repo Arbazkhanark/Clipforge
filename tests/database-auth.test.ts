@@ -156,6 +156,36 @@ test("database auth query failures are logged with a safe category, not their me
   }
 }));
 
+test("complimentary schema mismatch maps to setup-required and logs only safe diagnostics", async () => serial(async () => {
+  const client = new FakePrismaClient();
+  const lines: string[] = [];
+  const oldError = console.error;
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  client.complimentaryAccessGrant.findMany = async () => {
+    throw Object.assign(new Error("private database detail and user marker"), {
+      code: "P2021",
+      meta: { table: "public.ComplimentaryAccessGrant", user: "private-user-marker" },
+    });
+  };
+  const runtime = createDatabaseRuntime("postgresql://private-marker@db.example/clipforge", async () => client);
+  try {
+    await assert.rejects(() => runtime.repo.listComplimentaryAccessForUser("private-user-marker"), (error: unknown) => {
+      assert.ok(error instanceof AppError);
+      assert.equal(error.code, "complimentary_access_setup_required");
+      assert.match(error.message, /DATABASE_URL/);
+      return true;
+    });
+    const logs = lines.join("\n");
+    assert.match(logs, /"event":"database_query_failed"/);
+    assert.match(logs, /"operation":"repository.listComplimentaryAccessForUser"/);
+    assert.match(logs, /"errorCategory":"schema"/);
+    assert.match(logs, /"errorCode":"P2021"/);
+    assert.doesNotMatch(logs, /private database detail|private-user-marker|private-marker|db\.example|clipforge|postgresql:\/\//);
+  } finally {
+    console.error = oldError;
+  }
+}));
+
 test("signup and login persist users and sessions through the PostgreSQL auth repository", async () => {
   const client = new FakePrismaClient();
   const runtime = createDatabaseRuntime("postgresql://private-marker@db.example/clipforge", async () => client, { scrypt: FAST });
