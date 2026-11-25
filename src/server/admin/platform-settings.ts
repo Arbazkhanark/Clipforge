@@ -62,10 +62,12 @@ export function buildAdminPlatformSettings(env: Environment = process.env): Admi
   const storageConfiguration = readMediaStorageConfiguration(env);
   const storageState: PlatformSettingState = storageConfiguration.ok
     ? storageConfiguration.provider === "s3" ? "configured" : "incomplete"
-    : present(env, ["CLIPFORGE_STORAGE_PROVIDER", "CLIPFORGE_S3_DEVELOPMENT_BUCKET", "CLIPFORGE_S3_PRODUCTION_BUCKET", "CLIPFORGE_S3_REGION", "CLIPFORGE_S3_ACCESS_KEY_ID", "CLIPFORGE_S3_SECRET_ACCESS_KEY"]) === 0 ? "missing" : "incomplete";
+    : present(env, ["CLIPFORGE_STORAGE_PROVIDER", "CLIPFORGE_S3_DEVELOPMENT_BUCKET", "CLIPFORGE_S3_STAGING_BUCKET", "CLIPFORGE_S3_PRODUCTION_BUCKET", "CLIPFORGE_S3_REGION", "CLIPFORGE_S3_ACCESS_KEY_ID", "CLIPFORGE_S3_SECRET_ACCESS_KEY"]) === 0 ? "missing" : "incomplete";
 
   return {
-    environment: ["development", "test", "production"].includes(env["NODE_ENV"] ?? "") ? env["NODE_ENV"] as string : "Unknown",
+    environment: ["development", "preview", "test", "staging", "production"].includes((env["CLIPFORGE_DEPLOYMENT_ENV"] ?? env["NODE_ENV"]) ?? "")
+      ? (env["CLIPFORGE_DEPLOYMENT_ENV"] ?? env["NODE_ENV"]) as string
+      : "Unknown",
     runtimeMode: runtimeMode(env),
     groups: [
       { title: "Application", items: [

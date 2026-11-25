@@ -5,12 +5,14 @@ import { accessInstagramToken } from "../src/server/instagram/instagram-token-ac
 import { readInstagramTokenKey } from "../src/server/instagram/token-cipher.ts";
 import { getRuntime } from "../src/server/runtime.ts";
 import { HmacTemporaryMediaAccessAdapter } from "../src/server/storage/temporary-media-access.ts";
+import { assertWorkerDatabaseIdentity } from "../src/server/workers/database-identity-guard.ts";
+import { runContinuousWorker } from "../src/server/workers/continuous-worker.ts";
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 if (process.env["CLIPFORGE_PUBLISHING_ENABLED"] !== "true" || process.env["CLIPFORGE_PUBLISHING_LIVE_APPROVED"] !== "true") {
   process.stdout.write("Publishing worker disabled; both explicit opt-in flags are required.\n");
   process.exit(0);
 }
+assertWorkerDatabaseIdentity();
 if (!process.env["DATABASE_URL"]) throw new Error("Publishing worker requires database mode.");
 if (!process.env["INSTAGRAM_GRAPH_API_VERSION"]) throw new Error("Pin INSTAGRAM_GRAPH_API_VERSION before enabling publishing.");
 const tokenKey = readInstagramTokenKey();
@@ -40,13 +42,15 @@ const worker = createPublishingWorker({
   context: { repo: runtime.repo, newId: runtime.newId, config: { coverSupport: "supported" }, media, publishingMediaAccess: runtime.publishingMediaAccess },
 });
 
-let stopping = false;
-process.on("SIGINT", () => { stopping = true; });
-process.on("SIGTERM", () => { stopping = true; });
 process.stdout.write("Publishing worker enabled with official Instagram API adapter.\n");
-while (!stopping) {
-  const result = await worker.runOnce();
-  if (result.status !== "idle") process.stdout.write(`Publishing worker result: ${result.status}\n`);
-  await sleep(result.status === "idle" ? 15_000 : 2_000);
-}
+await runContinuousWorker({
+  runOnce: async () => {
+    const result = await worker.runOnce();
+    if (result.status !== "idle") process.stdout.write(`Publishing worker result: ${result.status}\n`);
+    return result;
+  },
+  idleDelayMs: (result) => result.status === "idle" ? 15_000 : 2_000,
+  dispose: () => runtime.dispose?.() ?? Promise.resolve(),
+  onShutdownTimeout: () => process.stderr.write("Publishing worker shutdown timed out; its lease will expire for safe recovery.\n"),
+});
 process.stdout.write("Publishing worker stopped.\n");

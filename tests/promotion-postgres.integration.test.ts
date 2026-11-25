@@ -4,6 +4,7 @@
 // It must never be pointed at Neon, production, or a migration-owner connection.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readdirSync } from "node:fs";
 import { Client } from "pg";
 import { test, type TestContext } from "node:test";
 import { createPrismaClient } from "../src/server/prisma/create-client.ts";
@@ -11,11 +12,44 @@ import type { PrismaClientLike } from "../src/server/prisma/prisma-client-like.t
 import { PrismaRepository } from "../src/server/prisma/prisma-repository.ts";
 import { isolatedDatabaseUrl } from "./helpers/isolated-database.ts";
 
-const databaseUrl = isolatedDatabaseUrl();
+const TEST_DATABASE_HOST = "127.0.0.1";
+const TEST_DATABASE_PORT = "54836";
+const TEST_DATABASE_NAME = "clipforge_local_test";
+const TEST_DATABASE_ROLE = "clipforge_test_admin";
+const EXPECTED_MIGRATIONS = readdirSync(new URL("../prisma/migrations/", import.meta.url), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+  .sort();
+const databaseUrl = resolveDatabaseUrl();
 const databaseIsConfigured = Boolean(databaseUrl);
-const expectedPort = process.env["CLIPFORGE_TEST_DATABASE_PORT"];
 const expectedSkip = "DATABASE_URL is not configured for the isolated local test database";
 const testRunId = randomUUID();
+
+function resolveDatabaseUrl(): string | undefined {
+  const database = process.env["DATABASE_URL"];
+  const direct = process.env["DIRECT_URL"];
+  if (!database && !direct) return undefined;
+  if (!database || !direct) throw new Error("Both DATABASE_URL and DIRECT_URL are required for promotion PostgreSQL integration tests.");
+  if (database !== direct) throw new Error("DATABASE_URL and DIRECT_URL must match exactly for promotion PostgreSQL integration tests.");
+  if (process.env["NODE_ENV"] !== "test" || process.env["CLIPFORGE_DEPLOYMENT_ENV"] !== "test") {
+    throw new Error("NODE_ENV=test and CLIPFORGE_DEPLOYMENT_ENV=test are required for promotion PostgreSQL integration tests.");
+  }
+  if (process.env["CLIPFORGE_TEST_DATABASE_PORT"] !== TEST_DATABASE_PORT) {
+    throw new Error("CLIPFORGE_TEST_DATABASE_PORT must explicitly equal 54836 for promotion PostgreSQL integration tests.");
+  }
+
+  let parsed: URL;
+  try { parsed = new URL(database); }
+  catch { throw new Error("DATABASE_URL is not a valid isolated PostgreSQL test target."); }
+  const schemas = parsed.searchParams.getAll("schema");
+  const safeTarget = parsed.protocol === "postgresql:" && parsed.hostname === TEST_DATABASE_HOST &&
+    parsed.port === TEST_DATABASE_PORT && parsed.pathname === `/${TEST_DATABASE_NAME}` && parsed.username === TEST_DATABASE_ROLE &&
+    parsed.hash === "" && [...parsed.searchParams.keys()].every((key) => key === "schema") &&
+    (schemas.length === 0 || (schemas.length === 1 && schemas[0] === "public"));
+  if (!safeTarget) throw new Error("Database URLs must target only clipforge_test_admin at 127.0.0.1:54836/clipforge_local_test with no redirecting query parameters.");
+  if (isolatedDatabaseUrl() !== database) throw new Error("Database URLs failed the shared isolated-database guard.");
+  return database;
+}
 
 type RolePreflight = {
   superuser: boolean;
@@ -27,6 +61,145 @@ type RolePreflight = {
   migrationHistory: "verified" | "not-readable";
   privileges: Record<string, boolean>;
 };
+
+type PromotionUpdatePrivileges = {
+  promotionUpdateReason: boolean;
+  promotionUpdateUpdatedAt: boolean;
+  promotionUpdateDiscountValue: boolean;
+};
+
+type AuditForgeryPrivileges = {
+  [key: string]: boolean;
+};
+
+const AUDIT_FORGERY_PRIVILEGE_CHECKS = [
+  { key: "auditPromotionUpdateReason", table: "Promotion", column: "reason", privilege: "UPDATE" },
+  { key: "auditPromotionUpdateUpdatedAt", table: "Promotion", column: "updatedAt", privilege: "UPDATE" },
+  { key: "auditPromotionSelectId", table: "Promotion", column: "id", privilege: "SELECT" },
+  { key: "auditPromotionSelectUpdatedAt", table: "Promotion", column: "updatedAt", privilege: "SELECT" },
+  { key: "auditEventInsertId", table: "PromotionLifecycleEvent", column: "id", privilege: "INSERT" },
+  { key: "auditEventInsertEventKey", table: "PromotionLifecycleEvent", column: "eventKey", privilege: "INSERT" },
+  { key: "auditEventInsertEventType", table: "PromotionLifecycleEvent", column: "eventType", privilege: "INSERT" },
+  { key: "auditEventInsertPromotionId", table: "PromotionLifecycleEvent", column: "promotionId", privilege: "INSERT" },
+  { key: "auditEventInsertActorUserId", table: "PromotionLifecycleEvent", column: "actorUserId", privilege: "INSERT" },
+  { key: "auditEventInsertOccurredAt", table: "PromotionLifecycleEvent", column: "occurredAt", privilege: "INSERT" },
+  { key: "auditEventInsertMetadata", table: "PromotionLifecycleEvent", column: "metadata", privilege: "INSERT" },
+  { key: "auditEventSelectPromotionId", table: "PromotionLifecycleEvent", column: "promotionId", privilege: "SELECT" },
+  { key: "auditEventSelectActorUserId", table: "PromotionLifecycleEvent", column: "actorUserId", privilege: "SELECT" },
+  { key: "auditEventSelectEventType", table: "PromotionLifecycleEvent", column: "eventType", privilege: "SELECT" },
+  { key: "auditEventSelectOccurredAt", table: "PromotionLifecycleEvent", column: "occurredAt", privilege: "SELECT" },
+  { key: "auditEventSelectMetadata", table: "PromotionLifecycleEvent", column: "metadata", privilege: "SELECT" },
+  { key: "auditEventSelectEventKey", table: "PromotionLifecycleEvent", column: "eventKey", privilege: "SELECT" },
+  { key: "auditUserSelectId", table: "User", column: "id", privilege: "SELECT" },
+  { key: "auditUserSelectRole", table: "User", column: "role", privilege: "SELECT" },
+  { key: "auditLogInsertId", table: "AuditLog", column: "id", privilege: "INSERT" },
+  { key: "auditLogInsertActorId", table: "AuditLog", column: "actorId", privilege: "INSERT" },
+  { key: "auditLogInsertAction", table: "AuditLog", column: "action", privilege: "INSERT" },
+  { key: "auditLogInsertEntityType", table: "AuditLog", column: "entityType", privilege: "INSERT" },
+  { key: "auditLogInsertEntityId", table: "AuditLog", column: "entityId", privilege: "INSERT" },
+  { key: "auditLogInsertMetadata", table: "AuditLog", column: "metadata", privilege: "INSERT" },
+  { key: "auditLogSelectActorId", table: "AuditLog", column: "actorId", privilege: "SELECT" },
+  { key: "auditLogSelectAction", table: "AuditLog", column: "action", privilege: "SELECT" },
+  { key: "auditLogSelectEntityType", table: "AuditLog", column: "entityType", privilege: "SELECT" },
+  { key: "auditLogSelectEntityId", table: "AuditLog", column: "entityId", privilege: "SELECT" },
+  { key: "auditLogSelectMetadata", table: "AuditLog", column: "metadata", privilege: "SELECT" },
+] as const;
+
+function auditForgeryPrivilegeJsonPairs(roleExpression: "current_user" | "target.rolname"): string {
+  return AUDIT_FORGERY_PRIVILEGE_CHECKS.map(({ key, table, column, privilege }) =>
+    `'${key}', has_column_privilege(${roleExpression}, 'public."${table}"', '${column}', '${privilege}')`,
+  ).join(", ");
+}
+
+function hasRequiredPromotionUpdatePrivileges(privileges: PromotionUpdatePrivileges): boolean {
+  return privileges.promotionUpdateReason && privileges.promotionUpdateUpdatedAt && privileges.promotionUpdateDiscountValue;
+}
+
+function canForgePromotionAudit(privileges: AuditForgeryPrivileges): boolean {
+  return AUDIT_FORGERY_PRIVILEGE_CHECKS.every(({ key }) => privileges[key] === true);
+}
+
+function hasElevatedSettableMembership(memberships: Array<{
+  canSetRole: boolean;
+  isSuperuser: boolean;
+  canCreateRole: boolean;
+  schemaCreate: boolean;
+  canForgeAudit: boolean;
+}>): boolean {
+  return memberships.some((membership) => membership.canSetRole && (
+    membership.isSuperuser || membership.canCreateRole || membership.schemaCreate || membership.canForgeAudit
+  ));
+}
+
+function hasForbiddenRuntimeCreateRole(roleFlags: { createRole: boolean }): boolean {
+  return roleFlags.createRole;
+}
+
+const PROMOTION_AUDIT_INTEGRITY_ERROR = "promotion reason change requires an Admin lifecycle event and matching audit record";
+type AuditProbeResult = "integrity-rejected" | "insufficient-privileges" | "forgery-succeeded" | "unrelated-database-error";
+
+function classifyAuditProbeResult(error: unknown | null): AuditProbeResult {
+  if (error === null) return "forgery-succeeded";
+  if (typeof error !== "object" || error === null) return "unrelated-database-error";
+  const diagnostic = error as { code?: unknown; message?: unknown };
+  if (diagnostic.code === "42501") return "insufficient-privileges";
+  if (diagnostic.code === "P0001" && diagnostic.message === PROMOTION_AUDIT_INTEGRITY_ERROR) return "integrity-rejected";
+  return "unrelated-database-error";
+}
+
+test("promotion preflight privilege logic: table-level UPDATE satisfies each required column check", () => {
+  // PostgreSQL has_column_privilege is true for a column when table-level UPDATE is held.
+  const tableUpdate = { promotionUpdateReason: true, promotionUpdateUpdatedAt: true, promotionUpdateDiscountValue: true };
+  assert.equal(hasRequiredPromotionUpdatePrivileges(tableUpdate), true);
+});
+
+test("promotion preflight privilege logic: each required column grant is checked independently", () => {
+  assert.equal(hasRequiredPromotionUpdatePrivileges({ promotionUpdateReason: true, promotionUpdateUpdatedAt: true, promotionUpdateDiscountValue: true }), true);
+  assert.equal(hasRequiredPromotionUpdatePrivileges({ promotionUpdateReason: false, promotionUpdateUpdatedAt: true, promotionUpdateDiscountValue: true }), false);
+  assert.equal(hasRequiredPromotionUpdatePrivileges({ promotionUpdateReason: true, promotionUpdateUpdatedAt: false, promotionUpdateDiscountValue: true }), false);
+  assert.equal(hasRequiredPromotionUpdatePrivileges({ promotionUpdateReason: true, promotionUpdateUpdatedAt: true, promotionUpdateDiscountValue: false }), false);
+  assert.equal(hasRequiredPromotionUpdatePrivileges({ promotionUpdateReason: false, promotionUpdateUpdatedAt: false, promotionUpdateDiscountValue: false }), false);
+});
+
+test("promotion preflight privilege logic: audit-forgery detection requires reason UPDATE and every matching-row insert/read", () => {
+  const complete = Object.fromEntries(AUDIT_FORGERY_PRIVILEGE_CHECKS.map(({ key }) => [key, true]));
+  assert.equal(canForgePromotionAudit(complete), true);
+  for (const { key } of AUDIT_FORGERY_PRIVILEGE_CHECKS) {
+    assert.equal(canForgePromotionAudit({ ...complete, [key]: false }), false, `missing ${key} must block the probe`);
+  }
+  // Table-level privileges satisfy each listed column check; column-only grants
+  // are represented by the same effective per-column booleans returned by PostgreSQL.
+  const tableGrantEquivalent = Object.fromEntries(AUDIT_FORGERY_PRIVILEGE_CHECKS.map(({ key }) => [key, true]));
+  const columnGrantEquivalent = Object.fromEntries(AUDIT_FORGERY_PRIVILEGE_CHECKS.map(({ key }) => [key, true]));
+  assert.equal(canForgePromotionAudit(tableGrantEquivalent), true);
+  assert.equal(canForgePromotionAudit(columnGrantEquivalent), true);
+});
+
+test("promotion preflight privilege logic: settable CREATEROLE memberships are elevated, non-settable roles are not", () => {
+  const ordinary = { canSetRole: true, isSuperuser: false, canCreateRole: false, schemaCreate: false, canForgeAudit: false };
+  assert.equal(hasElevatedSettableMembership([ordinary]), false);
+  const directCreateRoleMember = { ...ordinary, canCreateRole: true };
+  const indirectCreateRoleMember = { ...ordinary, canCreateRole: true };
+  assert.equal(hasElevatedSettableMembership([directCreateRoleMember]), true, "directly settable CREATEROLE membership is elevated");
+  assert.equal(hasElevatedSettableMembership([indirectCreateRoleMember]), true, "indirectly settable CREATEROLE membership is elevated");
+  assert.equal(hasElevatedSettableMembership([{ ...ordinary, canSetRole: false, canCreateRole: true }]), false);
+  assert.equal(hasElevatedSettableMembership([{ ...ordinary, isSuperuser: true }]), true);
+  assert.equal(hasElevatedSettableMembership([{ ...ordinary, schemaCreate: true }]), true);
+  assert.equal(hasElevatedSettableMembership([{ ...ordinary, canForgeAudit: true }]), true);
+});
+
+test("promotion preflight privilege logic: connected CREATEROLE role is forbidden", () => {
+  assert.equal(hasForbiddenRuntimeCreateRole({ createRole: false }), false);
+  assert.equal(hasForbiddenRuntimeCreateRole({ createRole: true }), true);
+});
+
+test("promotion preflight privilege logic: audit probe distinguishes trigger rejection from privilege failures", () => {
+  assert.equal(classifyAuditProbeResult({ code: "P0001", message: PROMOTION_AUDIT_INTEGRITY_ERROR }), "integrity-rejected");
+  assert.equal(classifyAuditProbeResult({ code: "42501", message: "synthetic privilege failure" }), "insufficient-privileges");
+  assert.equal(classifyAuditProbeResult(null), "forgery-succeeded");
+  assert.equal(classifyAuditProbeResult({ code: "P0001", message: "different integrity error" }), "unrelated-database-error");
+  assert.equal(classifyAuditProbeResult({ code: "XX000", message: "synthetic unrelated error" }), "unrelated-database-error");
+});
 
 type Fixture = {
   prefix: string;
@@ -45,7 +218,10 @@ function connectionString(label: string): string {
 }
 
 function applicationName(label: string): string {
-  return `clipforge-pgverify-${testRunId}-${label}`;
+  // PostgreSQL stores application_name in a 64-byte field (63 bytes plus NUL).
+  // Keep both the run discriminator and the full label below that limit so
+  // pg_stat_activity polling matches the value actually stored by the server.
+  return `clipforge-pgverify-${testRunId.slice(0, 12)}-${label}`;
 }
 
 async function connectSql(label: string): Promise<Client> {
@@ -69,21 +245,20 @@ async function preflight(): Promise<{ sql: Client; role: RolePreflight }> {
       port: number;
       serverAddress: string | null;
       serverVersion: string;
-      dataDirectory: string;
       currentRole: string;
     }>(`SELECT current_database() AS "databaseName",
               current_schema() AS "schemaName",
-              current_setting('port')::integer AS "port",
+              inet_server_port() AS "port",
               host(inet_server_addr()) AS "serverAddress",
               version() AS "serverVersion",
-              current_setting('data_directory') AS "dataDirectory",
               current_user AS "currentRole"`);
     const row = identity.rows[0];
     assert.ok(row, "database identity query returned no row");
     assert.equal(row.databaseName, "clipforge_local_test");
     assert.equal(row.schemaName, "public");
-    assert.equal(row.serverAddress, "127.0.0.1");
-    assert.equal(String(row.port), expectedPort);
+    assert.equal(row.serverAddress, TEST_DATABASE_HOST);
+    assert.equal(String(row.port), TEST_DATABASE_PORT);
+    assert.equal(row.currentRole, TEST_DATABASE_ROLE);
     assert.match(row.serverVersion, /PostgreSQL 15\.8/);
 
     const historyAccess = await sql.query<{ exists: boolean; canRead: boolean }>(
@@ -92,20 +267,14 @@ async function preflight(): Promise<{ sql: Client; role: RolePreflight }> {
     assert.equal(historyAccess.rows[0]?.exists, true, "Prisma migration history table is missing");
     let migrationHistory: RolePreflight["migrationHistory"] = "not-readable";
     if (historyAccess.rows[0]?.canRead) {
-      const history = await sql.query<{ total: number; applied: number; rolledBack: number; unfinished: number; failed: number }>(
-        `SELECT count(*)::integer AS total,
-                count(*) FILTER (WHERE "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL)::integer AS applied,
-                count(*) FILTER (WHERE "rolled_back_at" IS NOT NULL)::integer AS "rolledBack",
-                count(*) FILTER (WHERE "finished_at" IS NULL AND "rolled_back_at" IS NULL)::integer AS unfinished,
-                count(*) FILTER (WHERE "finished_at" IS NULL AND "rolled_back_at" IS NULL AND "logs" IS NOT NULL)::integer AS failed
-         FROM public."_prisma_migrations"`);
-      const migrationRow = history.rows[0];
-      assert.ok(migrationRow, "migration history query returned no row");
-      assert.equal(migrationRow.total, 15, "expected the reported 15 migration records");
-      assert.equal(migrationRow.applied, 15, "all 15 migrations must be successfully applied");
-      assert.equal(migrationRow.rolledBack, 0);
-      assert.equal(migrationRow.unfinished, 0);
-      assert.equal(migrationRow.failed, 0);
+      const history = await sql.query<{ migrationName: string; finishedAt: Date | null; rolledBackAt: Date | null; logs: string | null }>(
+        `SELECT "migration_name" AS "migrationName", "finished_at" AS "finishedAt",
+                "rolled_back_at" AS "rolledBackAt", "logs"
+         FROM public."_prisma_migrations" ORDER BY "migration_name"`);
+      assert.deepEqual(history.rows.map((row) => row.migrationName), EXPECTED_MIGRATIONS,
+        "database migration names must exactly match the ordered migration directories in prisma/migrations");
+      assert.ok(history.rows.every((row) => row.finishedAt instanceof Date && row.rolledBackAt === null && row.logs === null),
+        "every expected migration must be successfully applied with no rolled-back, unfinished, or failed records");
       migrationHistory = "verified";
     }
 
@@ -119,6 +288,7 @@ async function preflight(): Promise<{ sql: Client; role: RolePreflight }> {
       bypassRls: boolean;
       ownsPromotionObjects: boolean;
       privileges: Record<string, boolean>;
+      auditForgeryPrivileges: Record<string, boolean>;
     }>(`SELECT r.rolname AS "currentRole", r.rolsuper AS superuser,
                r.rolinherit AS "inheritPrivilege", r.rolcreaterole AS "createRole",
                r.rolcreatedb AS "createDatabase", r.rolreplication AS replication,
@@ -133,7 +303,10 @@ async function preflight(): Promise<{ sql: Client; role: RolePreflight }> {
                  'userDelete', has_table_privilege(current_user, 'public."User"', 'DELETE'),
                  'promotionSelect', has_table_privilege(current_user, 'public."Promotion"', 'SELECT'),
                  'promotionInsert', has_table_privilege(current_user, 'public."Promotion"', 'INSERT'),
-                 'promotionUpdate', has_table_privilege(current_user, 'public."Promotion"', 'UPDATE'),
+                 'promotionTableUpdate', has_table_privilege(current_user, 'public."Promotion"', 'UPDATE'),
+                 'promotionUpdateReason', has_column_privilege(current_user, 'public."Promotion"', 'reason', 'UPDATE'),
+                 'promotionUpdateUpdatedAt', has_column_privilege(current_user, 'public."Promotion"', 'updatedAt', 'UPDATE'),
+                 'promotionUpdateDiscountValue', has_column_privilege(current_user, 'public."Promotion"', 'discountValue', 'UPDATE'),
                  'promotionDelete', has_table_privilege(current_user, 'public."Promotion"', 'DELETE'),
                  'redemptionInsert', has_table_privilege(current_user, 'public."PromotionRedemption"', 'INSERT'),
                  'redemptionSelect', has_table_privilege(current_user, 'public."PromotionRedemption"', 'SELECT'),
@@ -149,12 +322,13 @@ async function preflight(): Promise<{ sql: Client; role: RolePreflight }> {
                  'auditDelete', has_table_privilege(current_user, 'public."AuditLog"', 'DELETE'),
                  'userRoleInsert', has_column_privilege(current_user, 'public."User"', 'role', 'INSERT'),
                  'queueSequenceUsage', has_sequence_privilege(current_user, 'public."PromotionalAccessGrant_queueSequence_seq"', 'USAGE')
-               ) AS privileges
+               ) AS privileges,
+               jsonb_build_object(${auditForgeryPrivilegeJsonPairs("current_user")}) AS "auditForgeryPrivileges"
         FROM pg_roles r WHERE r.rolname = current_user`);
     const roleRow = roleResult.rows[0];
     assert.ok(roleRow, "could not identify the database role used by DATABASE_URL");
 
-    const memberships = await sql.query<{ roleName: string; canSetRole: boolean; isSuperuser: boolean; canCreateRole: boolean; schemaCreate: boolean; canForgeAudit: boolean }>(
+    const membershipPrivileges = await sql.query<{ roleName: string; canSetRole: boolean; isSuperuser: boolean; canCreateRole: boolean; schemaCreate: boolean; auditForgeryPrivileges: Record<string, boolean> }>(
       `WITH RECURSIVE settable_roles(role_oid) AS (
          SELECT membership.roleid
          FROM pg_catalog.pg_auth_members membership
@@ -168,18 +342,29 @@ async function preflight(): Promise<{ sql: Client; role: RolePreflight }> {
               target.oid IN (SELECT role_oid FROM settable_roles) AS "canSetRole",
               target.rolsuper AS "isSuperuser", target.rolcreaterole AS "canCreateRole",
               has_schema_privilege(target.rolname, 'public', 'CREATE') AS "schemaCreate",
-              (has_table_privilege(target.rolname, 'public."Promotion"', 'UPDATE') AND
-               has_table_privilege(target.rolname, 'public."PromotionLifecycleEvent"', 'INSERT') AND
-               has_table_privilege(target.rolname, 'public."AuditLog"', 'INSERT') AND
-               has_table_privilege(target.rolname, 'public."User"', 'SELECT')) AS "canForgeAudit"
+              jsonb_build_object(${auditForgeryPrivilegeJsonPairs("target.rolname")}) AS "auditForgeryPrivileges"
        FROM pg_catalog.pg_roles target
        WHERE target.oid <> (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)
          AND target.oid IN (SELECT role_oid FROM settable_roles)
        ORDER BY target.rolname`);
 
-    const privileges = roleRow.privileges;
+    const memberships = membershipPrivileges.rows.map((membership) => ({
+      roleName: membership.roleName,
+      canSetRole: membership.canSetRole,
+      isSuperuser: membership.isSuperuser,
+      canCreateRole: membership.canCreateRole,
+      schemaCreate: membership.schemaCreate,
+      canForgeAudit: canForgePromotionAudit(membership.auditForgeryPrivileges),
+    }));
+
+    const privileges = { ...roleRow.privileges, ...roleRow.auditForgeryPrivileges };
+    const promotionUpdatePrivileges = {
+      promotionUpdateReason: privileges["promotionUpdateReason"] === true,
+      promotionUpdateUpdatedAt: privileges["promotionUpdateUpdatedAt"] === true,
+      promotionUpdateDiscountValue: privileges["promotionUpdateDiscountValue"] === true,
+    };
     const fixtureRequired = [
-      "userSelect", "userInsert", "userDelete", "promotionSelect", "promotionInsert", "promotionUpdate", "promotionDelete",
+      "userSelect", "userInsert", "userDelete", "promotionSelect", "promotionInsert", "promotionDelete",
       "redemptionInsert", "redemptionSelect", "redemptionDelete", "grantInsert", "grantSelect", "grantDelete", "eventSelect", "eventInsert", "eventDelete",
       "auditSelect", "auditInsert", "auditDelete", "queueSequenceUsage",
     ];
@@ -188,8 +373,8 @@ async function preflight(): Promise<{ sql: Client; role: RolePreflight }> {
       currentRole: roleRow.currentRole,
       roleFlags: { inherit: roleRow.inheritPrivilege, createRole: roleRow.createRole, createDatabase: roleRow.createDatabase, replication: roleRow.replication, bypassRls: roleRow.bypassRls },
       ownsPromotionObjects: roleRow.ownsPromotionObjects,
-      membershipRows: memberships.rows,
-      fixtureWritable: fixtureRequired.every((key) => privileges[key] === true),
+      membershipRows: memberships,
+      fixtureWritable: hasRequiredPromotionUpdatePrivileges(promotionUpdatePrivileges) && fixtureRequired.every((key) => privileges[key] === true),
       migrationHistory,
       privileges,
     };
@@ -209,13 +394,17 @@ async function gate(t: TestContext, requireWritable = true): Promise<{ sql: Clie
   t.diagnostic(`Preflight: exact local target verified; migration history is ${result.role.migrationHistory}; database role is ${result.role.superuser ? "privileged" : "non-superuser"}.`);
   if (result.role.migrationHistory !== "verified") {
     await result.sql.end();
-    t.skip("NOT TESTED: this role cannot independently verify all 15 successful migrations; no disposable fixture writes were attempted");
+    t.skip("NOT TESTED: this role cannot independently verify the complete expected migration history; no disposable fixture writes were attempted");
     return null;
   }
   if (result.role.superuser) {
     await result.sql.end();
     t.skip("NOT TESTED: the supplied connection is a superuser/migration-level role, not an acceptable application runtime role");
     return null;
+  }
+  if (hasForbiddenRuntimeCreateRole(result.role.roleFlags)) {
+    await result.sql.end();
+    assert.fail("connected runtime role must not have CREATEROLE");
   }
   if (requireWritable && !result.role.fixtureWritable) {
     await result.sql.end();
@@ -283,8 +472,9 @@ async function seedRedemption(
   await sql.query(
     `INSERT INTO public."PromotionRedemption"
        ("id", "promotionId", "userId", "status", "idempotencyKey", "reservedAt", "releasedAt", "updatedAt")
-     VALUES ($1, $2, $3, $4::public."PromotionRedemptionStatus", $5, $6,
-             CASE WHEN $4 = 'released' THEN $6 ELSE NULL END, $6)`,
+     VALUES ($1, $2, $3, $4::public."PromotionRedemptionStatus", $5, $6::timestamptz,
+             CASE WHEN $4::public."PromotionRedemptionStatus" = 'released'::public."PromotionRedemptionStatus"
+                  THEN $6::timestamptz ELSE NULL::timestamptz END, $6::timestamptz)`,
     [input.id, input.promotionId, input.userId, input.status, input.idempotencyKey ?? `${input.id}:key`, now],
   );
 }
@@ -328,7 +518,7 @@ async function insertAuditPair(
   await sql.query(
     `INSERT INTO public."AuditLog" ("id", "actorId", "action", "entityType", "entityId", "metadata")
      VALUES ($1, $2, 'promotion.promotion_updated', 'Promotion', $3,
-             jsonb_build_object('eventKey', $4, 'reasonOld', $5::text, 'reasonNew', $6::text))`,
+             jsonb_build_object('eventKey', $4::text, 'reasonOld', $5::text, 'reasonNew', $6::text))`,
     [input.auditId, input.adminId, input.promotionId, input.eventKey, input.oldReason, input.auditReasonOverride ?? input.newReason],
   );
 }
@@ -406,7 +596,7 @@ test("PostgreSQL dry-run: exact target, migration history, trigger definitions, 
     t.diagnostic(`Role membership SET capabilities: ${role.membershipRows.map((entry) => `${entry.roleName}(set=${entry.canSetRole},superuser=${entry.isSuperuser},createRole=${entry.canCreateRole})`).join(", ") || "none"}.`);
     t.diagnostic(`Effective relevant grants: ${Object.entries(role.privileges).map(([name, allowed]) => `${name}=${allowed}`).join(", ")}.`);
     t.diagnostic("The inspected role is the identity used by this local DATABASE_URL. If it is a migration/owner role, this inspection does not establish application runtime grants or Production Neon grants.");
-    if (role.migrationHistory === "not-readable") t.diagnostic("Migration history table exists, but this role cannot SELECT it; the reported migration count was not independently verified by this role.");
+    if (role.migrationHistory === "not-readable") t.diagnostic("Migration history table exists, but this role cannot SELECT it; the complete expected migration list was not independently verified by this role.");
   } finally {
     await sql.end();
   }
@@ -437,7 +627,7 @@ test("PostgreSQL: released redemptions remain unique for that user while another
     assert.ok(promotion);
     const retry = await new PrismaRepository(db).redeemFreeAccessCoupon({
       redemptionId: `${fixture.prefix}-released-retry`, grantId: `${fixture.prefix}-released-retry-grant`, userId: userA,
-      code: String(promotion["code"]), idempotencyKey: `${fixture.prefix}:released-retry`, now: new Date(),
+      code: String(promotion["code"]), idempotencyKey: `${fixture.prefix}-released-retry`, now: new Date(),
     });
     assert.equal(retry.status, "unavailable", "repository must not allow a second use after release");
     await seedRedemption(sql, { id: `${fixture.prefix}-other-user`, promotionId: promoId, userId: fixture.userIds[1]!, status: "reserved" });
@@ -602,20 +792,39 @@ test("PostgreSQL + PrismaRepository: concurrent same-user redemption and usage-l
     assert.notEqual((pidAResult as Array<{ pid: number }>)[0]?.pid, (pidBResult as Array<{ pid: number }>)[0]?.pid, "repository race must use separate PostgreSQL connections");
     const sameUser = fixture.userIds[0]!;
     const duplicateResults = await Promise.all([
-      repoA.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-same-a`, grantId: `${fixture.prefix}-grant-a`, userId: sameUser, code, idempotencyKey: `${fixture.prefix}:same:a`, now }),
-      repoB.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-same-b`, grantId: `${fixture.prefix}-grant-b`, userId: sameUser, code, idempotencyKey: `${fixture.prefix}:same:b`, now }),
+      repoA.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-same-a`, grantId: `${fixture.prefix}-grant-a`, userId: sameUser, code, idempotencyKey: `${fixture.prefix}-same-a`, now }),
+      repoB.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-same-b`, grantId: `${fixture.prefix}-grant-b`, userId: sameUser, code, idempotencyKey: `${fixture.prefix}-same-b`, now }),
     ]);
+    const sameUserRedemptionCount = await dbA.promotionRedemption.count({ where: { promotionId: fixture.promotionIds[0]!, userId: sameUser } });
+    const sameUserGrantCount = await dbA.promotionalAccessGrant.count({ where: { promotionId: fixture.promotionIds[0]!, userId: sameUser } });
+    t.diagnostic(`Same-user redemption race outcomes: clientA=${duplicateResults[0]?.status ?? "missing"}, clientB=${duplicateResults[1]?.status ?? "missing"}; persistedFixtureRedemptions=${sameUserRedemptionCount}, persistedFixtureGrants=${sameUserGrantCount}.`);
     assert.equal(duplicateResults.filter((result) => result.status === "created").length, 1);
     assert.equal(duplicateResults.filter((result) => result.status === "unavailable" || result.status === "conflict").length, 1);
-    assert.equal(await dbA.promotionRedemption.count({ where: { promotionId: fixture.promotionIds[0]!, userId: sameUser } }), 1);
-    assert.equal(await dbA.promotionalAccessGrant.count({ where: { promotionId: fixture.promotionIds[0]!, userId: sameUser } }), 1);
+    assert.equal(sameUserRedemptionCount, 1);
+    assert.equal(sameUserGrantCount, 1);
+    const createdResult = duplicateResults.find((result) => result.status === "created");
+    assert.ok(createdResult && createdResult.status === "created", "one concurrent request must commit its redemption and grant");
+    assert.equal(createdResult.grant.redemptionId, createdResult.redemption.id, "the grant record must retain its redemption relationship");
+    const sameUserEvents = await dbA.promotionLifecycleEvent.findMany({
+      where: { promotionId: fixture.promotionIds[0]!, subjectUserId: sameUser, eventType: { in: ["coupon_redeemed", "grant_created"] } },
+      select: { eventType: true, redemptionId: true, accessGrantId: true },
+    });
+    assert.equal(sameUserEvents.length, 2, "both lifecycle events must commit with their related redemption and grant");
+    const redemptionEvent = sameUserEvents.find((event) => event["eventType"] === "coupon_redeemed");
+    const grantEvent = sameUserEvents.find((event) => event["eventType"] === "grant_created");
+    assert.ok(redemptionEvent, "coupon_redeemed lifecycle event must be persisted");
+    assert.equal(redemptionEvent["redemptionId"], createdResult.redemption.id);
+    assert.equal(redemptionEvent["accessGrantId"], null, "coupon_redeemed must target only the redemption");
+    assert.ok(grantEvent, "grant_created lifecycle event must be persisted");
+    assert.equal(grantEvent["redemptionId"], null, "grant_created must not also target the redemption");
+    assert.equal(grantEvent["accessGrantId"], createdResult.grant.id, "grant_created must target the grant");
 
     const otherResults = await Promise.all([
-      repoA.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-other-a`, grantId: `${fixture.prefix}-grant-other-a`, userId: fixture.userIds[1]!, code, idempotencyKey: `${fixture.prefix}:other:a`, now }),
-      repoB.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-other-b`, grantId: `${fixture.prefix}-grant-other-b`, userId: fixture.userIds[2]!, code, idempotencyKey: `${fixture.prefix}:other:b`, now }),
+      repoA.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-other-a`, grantId: `${fixture.prefix}-grant-other-a`, userId: fixture.userIds[1]!, code, idempotencyKey: `${fixture.prefix}-other-a`, now }),
+      repoB.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-other-b`, grantId: `${fixture.prefix}-grant-other-b`, userId: fixture.userIds[2]!, code, idempotencyKey: `${fixture.prefix}-other-b`, now }),
     ]);
     assert.deepEqual(otherResults.map((result) => result.status).sort(), ["created", "created"]);
-    const exhausted = await repoA.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-exhausted`, grantId: `${fixture.prefix}-grant-exhausted`, userId: fixture.adminId, code, idempotencyKey: `${fixture.prefix}:exhausted`, now });
+    const exhausted = await repoA.redeemFreeAccessCoupon({ redemptionId: `${fixture.prefix}-exhausted`, grantId: `${fixture.prefix}-grant-exhausted`, userId: fixture.adminId, code, idempotencyKey: `${fixture.prefix}-exhausted`, now });
     assert.equal(exhausted.status, "unavailable");
     assert.equal(await dbA.promotionRedemption.count({ where: { promotionId: fixture.promotionIds[0]!, status: { in: ["reserved", "redeemed", "manual_review"] } } }), 3);
     t.diagnostic("Two separate Prisma clients exercised real PostgreSQL transactions; no fake-repository concurrency simulation was used.");
@@ -708,9 +917,8 @@ test("PostgreSQL runtime-role test: determine whether the app role can fabricate
   const db = await connectPrisma("runtime-role-security");
   let fixture: Fixture | null = null;
   try {
-    const critical = ["promotionUpdate", "eventInsert", "auditInsert", "userSelect"];
-    const canWriteMatchingRows = critical.every((key) => role.privileges[key] === true);
-    const settableElevatedRole = role.membershipRows.some((membership) => membership.canSetRole && (membership.isSuperuser || membership.schemaCreate || membership.canForgeAudit));
+    const canWriteMatchingRows = canForgePromotionAudit(role.privileges);
+    const settableElevatedRole = hasElevatedSettableMembership(role.membershipRows);
     if (settableElevatedRole) {
       t.diagnostic("SECURITY RESULT: FAIL — current runtime role can SET ROLE to an elevated member role.");
       assert.fail("runtime role has a settable elevated membership");
@@ -773,13 +981,19 @@ test("PostgreSQL runtime-role test: determine whether the app role can fabricate
     } finally {
       await client.end();
     }
-    if (!forgeryError) {
-      t.diagnostic("SECURITY RESULT: FAIL — this non-superuser DATABASE_URL role successfully supplied an Admin actor ID and fabricated the matching lifecycle/audit rows.");
-      assert.fail("PostgreSQL verifies row consistency, not that the actor ID came from an authenticated Admin session");
+    const probeResult = classifyAuditProbeResult(forgeryError);
+    if (probeResult === "integrity-rejected") {
+      t.diagnostic("SECURITY RESULT: PASS — the deferred promotion audit-integrity trigger rejected the fabricated pair.");
+    } else if (probeResult === "insufficient-privileges") {
+      t.diagnostic("SECURITY RESULT: NOT PROVEN — the probe was blocked by insufficient privileges before trigger protection was established.");
+      assert.fail("audit-forgery probe was blocked by insufficient privileges, not the audit-integrity trigger");
+    } else if (probeResult === "forgery-succeeded") {
+      t.diagnostic("SECURITY RESULT: FAIL — the runtime role fabricated a matching Admin lifecycle/audit pair.");
+      assert.fail("the runtime role successfully fabricated the matching audit pair");
+    } else {
+      t.diagnostic("SECURITY RESULT: NOT PROVEN — the probe failed for an unrelated database reason.");
+      assert.fail("audit-forgery probe failed with an unrelated database error");
     }
-    const code = (forgeryError as { code?: string }).code;
-    assert.ok(code === "42501" || code === "P0001", `unexpected runtime-role rejection SQLSTATE ${String(code)}`);
-    t.diagnostic(`SECURITY RESULT: PASS for this local role: fabricated audit pair was rejected with SQLSTATE ${code}.`);
   } finally {
     await finalize(db, fixture, [() => db.$disconnect(), () => sql.end()]);
   }

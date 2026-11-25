@@ -21,15 +21,16 @@ test("isolated PostgreSQL render job repository is owner-scoped and rejects a wr
   const idempotencyKey = `render-repo-test:${stamp}`;
   const db = await createPrismaClient(databaseUrlAtStart as string);
   const closer = db as PrismaClientLike & { $disconnect(): Promise<void> };
-  const preserved = async () => ({
-    users: await db.user.count(),
-    sessions: await db.session.count(),
-    collections: await db.videoCollection.count(),
-    media: await db.mediaAsset.count(),
-  });
-  const before = await preserved();
-  const jobsBefore = await db.processingJob.count();
+  let ownsFixture = false;
   try {
+    const preserved = async () => ({
+      users: await db.user.count(),
+      sessions: await db.session.count(),
+      collections: await db.videoCollection.count(),
+      media: await db.mediaAsset.count(),
+    });
+    const before = await preserved();
+    const jobsBefore = await db.processingJob.count();
     const repo = new PrismaRepository(db);
     const job: RenderJobRecord = {
       id: jobId, ownerId, kind: "render", status: "queued", cycleItemId: null, mediaAssetId: null,
@@ -38,6 +39,7 @@ test("isolated PostgreSQL render job repository is owner-scoped and rejects a wr
       pendingOutputId: null, outputDerivativeId: null, lockToken: null, ffmpegPid: null, ffmpegStartedAt: null,
     };
     const created = await repo.createRenderJob(job);
+    ownsFixture = created.status === "created" && created.job.id === jobId;
     assert.equal(created.status, "created");
     if (created.status === "created") assert.equal(created.job.id, jobId);
 
@@ -70,8 +72,15 @@ test("isolated PostgreSQL render job repository is owner-scoped and rejects a wr
 
     assert.equal(await db.processingJob.count(), jobsBefore + 1);
     assert.deepEqual(await preserved(), before);
-    console.log(`render job row left in place: ${jobId}`);
   } finally {
-    await closer.$disconnect();
+    try {
+      if (ownsFixture) {
+        await db.processingJob.deleteMany({
+          where: { id: jobId, idempotencyKey, ownerId, kind: "render" },
+        });
+      }
+    } finally {
+      await closer.$disconnect();
+    }
   }
 });

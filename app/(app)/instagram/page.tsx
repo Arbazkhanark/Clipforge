@@ -7,7 +7,7 @@ import { readInstagramOAuthConfig } from "../../../src/server/instagram/instagra
 import { loadPageData } from "../../../src/server/page-data.ts";
 import { getInstagramAccounts } from "../../../src/server/queries.ts";
 import { requireCustomerPage } from "../../../src/server/auth/customer-page.ts";
-import { headers } from "next/headers";
+import { headers } from "next/headers.js";
 import { readInstagramDiagnosticCookieFromRequest } from "../../../src/server/instagram/instagram-diagnostic.ts";
 
 export const metadata = { title: "Instagram" };

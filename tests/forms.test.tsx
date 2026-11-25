@@ -66,13 +66,13 @@ test("redirect locations: only plain internal paths; unknown codes can never be 
 
 // ---------- form routes ----------
 test("create cycle form: success redirects to the new cycle; plan limit and bad input redirect back with a safe error", async () => {
-  const ok = await createCycleForm(formPost("/api/forms/cycle-create", [["name", "From form"], ["socialAccountId", "demo-account"]]));
+  const ok = await createCycleForm(formPost("/api/forms/cycle-create", [["name", "From form"], ["socialAccountId", "demo-account"], ["collectionIds", "demo-col-1"]]));
   assert.equal(ok.status, 303); assert.match(location(ok), /^\/cycles\/f\d+\?notice=cycle_created$/);
   assert.equal([...repo.cycles.values()].some((c) => c.name === "From form"), true);
   const bad = await createCycleForm(formPost("/api/forms/cycle-create", [["name", ""], ["socialAccountId", "../x"]]));
   assert.equal(location(bad), "/cycles?error=validation_failed");
   repo.plans.set(DEMO_USER_ID, "free"); // Free allows 1 active cycle and the demo user already has one
-  assert.equal(location(await createCycleForm(formPost("/api/forms/cycle-create", [["name", "Second"], ["socialAccountId", "demo-account"]]))), "/cycles?error=plan_limit");
+  assert.equal(location(await createCycleForm(formPost("/api/forms/cycle-create", [["name", "Second"], ["socialAccountId", "demo-account"], ["collectionIds", "demo-col-1"]]))), "/cycles?error=plan_limit");
 });
 
 test("caption form: ticked videos only; custom captions protected until confirmed; published untouched; counts reported", async () => {

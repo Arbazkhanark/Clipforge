@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AdminPreviewPage } from "../../components/admin/AdminPreviewPage.tsx";
-import { ADMIN_PREVIEW_PAGES } from "../../../tests/fixtures/admin-preview.ts";
+import { ADMIN_PREVIEW_PAGES } from "./admin-preview-data.ts";
 
 export const ADMIN_PREVIEW_HOST = "127.0.0.1";
 export const ADMIN_PREVIEW_PORT = 4177;

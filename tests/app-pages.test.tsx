@@ -40,16 +40,17 @@ afterEach(() => { setRuntimeForTests(null); delete process.env["CLIPFORGE_DEMO_M
 
 test("dashboard: plan, counts, four usage meters, and the monthly reset date", async () => {
   const out = html(await DashboardPage({}));
-  assert.ok(out.includes("Your plan: <strong>Creator</strong>"));
-  assert.ok(out.includes("<strong>30</strong> media files")); assert.ok(out.includes("<strong>2</strong> collections"));
+  assert.ok(out.includes("CURRENT PLAN") && out.includes("<strong>Creator</strong>"));
+  assert.ok(out.includes('dashboard-stat-value">30</strong>') && out.includes("files in your library"));
+  assert.ok(out.includes('dashboard-stat-value">2</strong>') && out.includes("collections"));
   for (const label of ["Storage", "Processing minutes", "Exports", "Scheduled items"]) assert.ok(out.includes(label), label);
   assert.ok(out.includes("12 of 100 used"));          // scheduled items vs Creator's 100
-  assert.ok(out.includes("Campaigns"));
+  assert.ok(out.includes("Your campaigns"));
   assert.ok(out.includes("Sample cycle (nothing is published)"));
-  assert.ok(out.includes("4 videos; 2 with planned times"));
-  assert.ok(out.includes("Next planned Reel:"));
+  assert.ok(out.includes(">4</strong> videos") && out.includes(">2</strong> scheduled"));
+  assert.ok(out.includes("Next planned Reel"));
   assert.ok(out.includes("does not publish a Reel to Instagram"));
-  assert.ok(out.includes("Open and edit"));
+  assert.ok(out.includes("Edit campaign"));
   assert.ok(!out.includes('action="/api/forms/cycle-status"')); // demo screens are explicitly read-only
 });
 
@@ -59,18 +60,18 @@ test("dashboard status filter and no-campaign empty state are useful", async () 
   assert.ok(paused.includes("Sample cycle (nothing is published)"));
   assert.ok(!paused.includes("Resume cycle")); // Demo mode keeps the preview read-only.
   const emptyFilter = html(await DashboardPage({ searchParams: Promise.resolve({ status: "completed" }) }));
-  assert.ok(emptyFilter.includes("No campaigns match this status filter."));
+  assert.ok(emptyFilter.includes("There are no campaigns matching this status."));
   repo.cycles.clear();
   const noCycles = html(await DashboardPage({}));
-  assert.ok(noCycles.includes("You have no campaigns yet."));
+  assert.ok(noCycles.includes("No campaigns yet"));
 });
 
 test("campaign controls are shown only when the runtime supports persistent actions", async () => {
   repo.cycles.set(DEMO_CYCLE_ID, { ...repo.cycles.get(DEMO_CYCLE_ID)!, status: "running" });
   setRuntimeForTests(runtimeFor(DEMO_USER_ID, "local"));
   const out = html(await DashboardPage({}));
-  assert.ok(out.includes("Pause cycle"));
-  assert.ok(out.includes("Stop cycle"));
+  assert.ok(out.includes(">Pause</button>"));
+  assert.ok(out.includes("name=\"confirmStop\"") && out.includes(">Stop</button>"));
 });
 
 test("dashboard reset date is the first of NEXT calendar month", async () => {
@@ -81,7 +82,7 @@ test("dashboard reset date is the first of NEXT calendar month", async () => {
 test("media library: first page has 24 rows, paging links work, bad page numbers are rejected politely", async () => {
   const page1 = html(await MediaPage({}));
   assert.equal((page1.match(/<tr>/g) ?? []).length - 1, 24); // minus the header row
-  assert.ok(page1.includes("Showing 1-24 of 30")); assert.ok(page1.includes('href="/media?page=2"')); assert.ok(!page1.includes('rel="prev"'));
+  assert.ok(page1.includes("Showing 1–24 of 30 files")); assert.ok(page1.includes('href="/media?page=2"')); assert.ok(!page1.includes('rel="prev"'));
   const page2 = html(await MediaPage({ searchParams: Promise.resolve({ page: "2" }) }));
   assert.equal((page2.match(/<tr>/g) ?? []).length - 1, 6); assert.ok(page2.includes('rel="prev"')); assert.ok(!page2.includes('rel="next"'));
   for (const bad of ["0", "-1", "abc", "1.5", "99999999"]) assert.ok(html(await MediaPage({ searchParams: Promise.resolve({ page: bad }) })).includes("page must be a whole number"), bad);
@@ -158,7 +159,7 @@ test("cycles: overview counts and detail with preflight and the items table", as
   const overview = html(await CyclesPage({}));
   assert.ok(overview.includes("Sample cycle (nothing is published)")); assert.ok(overview.includes("4 upcoming")); assert.ok(overview.includes('aria-valuenow="0"'));
   const detail = html(await CyclePage({ params: Promise.resolve({ cycleId: DEMO_CYCLE_ID }) }));
-  assert.ok(detail.includes("Draft (not started)")); assert.ok(detail.includes("Before you start"));
+  assert.ok(detail.includes("Draft (not started)")); assert.ok(detail.includes("Readiness check"));
   assert.ok(detail.includes("Sample clip 01")); assert.ok(detail.includes("Shared with you"));
   assert.ok(detail.includes("Saved in ClipForge (not confirmed on Instagram)"));
   assert.ok(detail.includes("does not send a Reel")); assert.ok(detail.includes("not connected") || detail.includes("No Instagram access token"));
@@ -255,8 +256,8 @@ test("CLIPFORGE_DEMO_MODE=true switches to sample data and shows the demo banner
     assert.ok(html(await MediaPage({})).includes("Sample clip"));
     const layout = html(await AppLayout({ children: <p>child</p> }));
     assert.ok(layout.includes("data-demo-banner")); assert.ok(layout.includes("SAMPLE data")); assert.ok(layout.includes("read-only previews"));
-    for (const label of ["Dashboard", "Media library", "Collections", "Publishing cycles", "Plans"]) assert.ok(layout.includes(label));
-    assert.ok(layout.includes('aria-label="Workspace"'));
+    for (const label of ["Overview", "Media library", "Collections", "Publishing cycles", "Plans &amp; billing"]) assert.ok(layout.includes(label));
+    assert.ok(layout.includes('aria-label="Workspace navigation"'));
   });
 });
 

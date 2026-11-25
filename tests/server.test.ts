@@ -522,10 +522,10 @@ test("cycle import rejects a collection-settings race before inserting stale sna
   const current = repo.collections.get("mine")!;
   repo.collections.set("mine", { ...current, settingsVersion: 4 });
   const addCycleItems = repo.addCycleItems.bind(repo);
-  repo.addCycleItems = async (items, expectedVersions) => {
+  repo.addCycleItems = async (...args) => {
     const latest = repo.collections.get("mine")!;
     repo.collections.set("mine", { ...latest, settingsVersion: 5 });
-    return addCycleItems(items, expectedVersions);
+    return addCycleItems(...args);
   };
   const error = await errorOf(mixIntoCycle(ctxFor("bob"), { cycleId: "cycle1", videos: [{ mediaAssetId: "own1", collectionId: "mine" }] }));
   assert.equal(error.status, 409);

@@ -21,7 +21,7 @@ export interface MediaServices {
 }
 
 export type MediaStorageDestination =
-  | { provider: "s3"; providerLabel: "AWS S3"; environment: "development" | "production"; bucket: string; region: string; privacy: "Private" }
+  | { provider: "s3"; providerLabel: "AWS S3"; environment: "development" | "preview" | "staging" | "production"; bucket: string; region: string; privacy: "Private" }
   | { provider: "local-disk"; providerLabel: "Local disk"; environment: "development"; locationLabel: "Private application storage"; privacy: "Private" }
   | { provider: "memory"; providerLabel: "In-memory demo storage"; environment: "development"; locationLabel: "This server process"; privacy: "Private" };
 

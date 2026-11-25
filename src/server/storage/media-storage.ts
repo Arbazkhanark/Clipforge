@@ -12,6 +12,8 @@ export interface StageMetadata { contentType?: string; }
 
 export interface MediaStorage {
   readonly kind: StorageKind;
+  /** Release provider resources when a long-running process exits. */
+  close?(): void | Promise<void>;
   /** Write bytes to a temporary "staging" key. Fails if the key already exists. */
   stage(stagingKey: string, data: Uint8Array, metadata?: StageMetadata): Promise<void>;
   /**

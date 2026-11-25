@@ -115,7 +115,7 @@ application, with `ffprobe` installed. The forward-only `20261115120000_media_ve
 deploying code that writes or queries the new enum value. This implementation does not apply migrations or provision a worker host.
 
 In database mode, runtime storage is selected by the explicit server-side `CLIPFORGE_STORAGE_PROVIDER` configuration. Normal
-development/preview and production select private S3 with distinct environment-specific bucket variables and IAM credentials. The runtime derives the environment from the hosting/runtime mode and fails closed if its matching bucket variable is absent. A local-disk
+development/preview and production select private S3 with distinct environment-specific bucket variables. The validated `CLIPFORGE_DEPLOYMENT_ENV` takes precedence; the existing Vercel/Node environment behavior remains the unset-setting fallback. S3 uses the explicit `CLIPFORGE_S3_*` key pair when supplied or the AWS SDK standard credential chain (including an ECS task role) when it is absent. A local-disk
 adapter is available only when explicitly selected for non-production development/testing; missing S3 configuration fails closed.
 The S3 adapter preserves these same key namespaces and `MediaStorage` methods. It does not issue object URLs. FFmpeg continues to
 use private temporary local files while reading/writing through the storage abstraction.

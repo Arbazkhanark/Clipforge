@@ -28,21 +28,22 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1169.0",
+    "@aws-sdk/credential-provider-node": "^3.972.97",
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
     "next": "16.4.5",
-    "nodemailer": "7.0.13",
     "pg": "8.23.1",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "tsx": "4.23.15"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
     "@types/pg": "8.23.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "nodemailer": "10.6.1",
     "prisma": "7.10.1",
-    "tsx": "4.23.15",
     "typescript": "7.0.2"
   },
   "engines": {

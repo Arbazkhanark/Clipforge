@@ -42,6 +42,7 @@ import { AuthTokenInstagramOAuthStateStore, type InstagramOAuthStateStore } from
 import { createConfiguredTemporaryMediaAccessAdapter } from "./storage/temporary-media-access.ts";
 import { AdminDataService } from "./admin/data-service.ts";
 import { PrismaAdminDataRepository } from "./admin/data-repository.ts";
+import { assertWebDatabaseIdentity } from "./workers/database-identity-guard.ts";
 
 export type RuntimeMode = "demo" | "unconfigured" | "local" | "database";
 export type EmailDelivery = "ses" | "nodemailer" | "outbox" | "unavailable";
@@ -59,6 +60,10 @@ export interface Runtime {
   now: () => Date;
   /** Upload services, or missing when uploads are unavailable (unconfigured mode). */
   media?: () => Promise<MediaServices | null>;
+  /** Runtime dependency check for readiness probes; does not disclose failure details. */
+  checkReadiness?: () => Promise<void>;
+  /** Release database and storage resources in continuous processes. */
+  dispose?: () => Promise<void>;
   /** Present when registration and login are available (local memory, or the database). */
   auth?: AuthService;
   /** Local mode only: the "emails" that would have been sent (no provider is invoked). */
@@ -240,6 +245,7 @@ function guardAuthRepository(load: () => Promise<DatabaseServices>): AuthReposit
 export function createDatabaseRuntime(connectionString: string, connect: DatabaseConnector = createPrismaClient, opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; mediaDir?: string | null; storageEnvironment?: Environment; email?: ReturnType<typeof createEmailSetup> } = {}): Runtime {
   const now = opts.now ?? (() => new Date());
   let ready: Promise<DatabaseServices> | null = null;
+  let dbClient: PrismaClientLike | null = null;
   let retryAfter = 0;
   const load = (): Promise<DatabaseServices> => {
     if (!ready) {
@@ -251,6 +257,7 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
         try {
           db = await connect(connectionString);
           await db.$queryRaw`SELECT 1`;
+          dbClient = db;
           logDatabaseEvent("database_connection_success", "runtime.initialize");
           return { auth: new PrismaAuthRepository(db), content: new PrismaRepository(db, now), adminData: new AdminDataService(new PrismaAdminDataRepository(db), now) };
         } catch (error) {
@@ -276,16 +283,33 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
   const instagramOAuthStates = new AuthTokenInstagramOAuthStateStore(authRepo, () => randomUUID());
   const content = guardRepository(delegateRepository(async () => (await load()).content));
   const publishingMediaAccess = createConfiguredTemporaryMediaAccessAdapter();
+  const createMedia = opts.mediaDir !== undefined
+    ? (opts.storageEnvironment ?? process.env)["NODE_ENV"] === "production"
+      ? configuredDatabaseMediaServices({ ...(opts.storageEnvironment ?? process.env), CLIPFORGE_STORAGE_PROVIDER: "invalid" })
+      : databaseMediaServices(opts.mediaDir)
+    : configuredDatabaseMediaServices(opts.storageEnvironment ?? process.env);
+  let openedMedia: Promise<MediaServices> | null = null;
+  const loadMedia = () => (openedMedia ??= createMedia());
   return {
     mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, emailSender: email.sender, ...(email.configurationError ? { emailConfigurationError: email.configurationError } : {}), renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => guardAdminData((await load()).adminData),
     now, newId: () => randomUUID(),
     // A supplied mediaDir is an explicit legacy test/development fallback. Normal app runtime
     // always uses the validated provider selected in the environment; it never falls back silently.
-    media: opts.mediaDir !== undefined
-      ? (opts.storageEnvironment ?? process.env)["NODE_ENV"] === "production"
-        ? configuredDatabaseMediaServices({ ...(opts.storageEnvironment ?? process.env), CLIPFORGE_STORAGE_PROVIDER: "invalid" })
-        : databaseMediaServices(opts.mediaDir)
-      : configuredDatabaseMediaServices(opts.storageEnvironment ?? process.env),
+    media: loadMedia,
+    checkReadiness: async () => {
+      await load();
+      if (!dbClient) throw new Error("Runtime dependencies are unavailable.");
+      await dbClient.$queryRaw`SELECT 1`;
+      const services = await loadMedia();
+      if (services.unavailable || services.storage.kind === "memory") throw new Error("Runtime dependencies are unavailable.");
+    },
+    dispose: async () => {
+      const services = openedMedia ? await openedMedia.catch(() => null) : null;
+      const client = dbClient;
+      dbClient = null;
+      try { await services?.storage.close?.(); }
+      finally { await client?.$disconnect?.(); }
+    },
     currentUserId: async (request) => auth.getSessionUserId(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
     currentPrincipal: async (request) => auth.getSessionPrincipal(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
   };
@@ -318,7 +342,7 @@ async function openConfiguredDatabaseMedia(env: Environment): Promise<MediaServi
     try { return { storage: await LocalDiskMediaStorage.create(path.resolve(/*turbopackIgnore: true*/ config.directory)), destination: localDiskDestination(), probe, thumbnail, maxUploadBytes }; }
     catch { return { storage: new UnavailableDiskStorage(), destination: localDiskDestination(), probe, thumbnail, maxUploadBytes, unavailable: "The explicitly selected private test media folder is unavailable." }; }
   }
-  const client = new S3Client({ region: config.region, credentials: config.credentials });
+  const client = new S3Client({ region: config.region, ...(config.credentials ? { credentials: config.credentials } : {}) });
   return { storage: new S3MediaStorage(client, config.bucket), destination: { provider: "s3", providerLabel: "AWS S3", environment: config.environment, bucket: config.bucket, region: config.region, privacy: "Private" }, probe, thumbnail, maxUploadBytes };
 }
 
@@ -373,7 +397,12 @@ export function createLocalRuntime(opts: { baseUrl?: string; scrypt?: ScryptPara
 }
 
 export function getRuntime(env: Environment = process.env): Runtime {
+  assertWebDatabaseIdentity(env);
   if (testOverride) return testOverride;
+  const deployment = (env["CLIPFORGE_DEPLOYMENT_ENV"] ?? env["NODE_ENV"] ?? "").trim().toLowerCase();
+  const strictEmailSetup = env["NODE_ENV"] === "production" || deployment === "staging" || deployment === "production" || deployment === "preview"
+    ? createEmailSetup(env)
+    : undefined;
   if (env["CLIPFORGE_LOCAL_AUTH"] === "true" && env["NODE_ENV"] !== "production") {
     const holder = globalThis as GlobalWithDemo;
     holder.__clipforgeLocalRuntime ??= createLocalRuntime({ baseUrl: env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000" });
@@ -382,7 +411,7 @@ export function getRuntime(env: Environment = process.env): Runtime {
   const databaseUrl = env["DATABASE_URL"]?.trim();
   if (databaseUrl) {
     const holder = globalThis as GlobalWithDemo;
-    holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient, { storageEnvironment: env });
+    holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient, { storageEnvironment: env, email: strictEmailSetup ?? createEmailSetup(env) });
     return holder.__clipforgeDatabaseRuntime;
   }
   if (env["NODE_ENV"] === "production") {

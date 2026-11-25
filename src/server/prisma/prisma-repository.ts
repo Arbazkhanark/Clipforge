@@ -530,7 +530,7 @@ export class PrismaRepository implements Repository {
         } catch { throw eventWriteFailure; }
         try {
           await this.insertPromotionEvent(tx, { id: `event-${input.redemptionId}-redeemed`, eventKey: `redemption:${input.redemptionId}:redeemed`, eventType: "coupon_redeemed", promotionId: promotion.id, subjectUserId: input.userId, redemptionId: input.redemptionId, occurredAt: input.now, metadata: { status: "redeemed", planId: promotion.accessPlanId, durationDays: promotion.durationDays, source: "free_access_coupon" } });
-          await this.insertPromotionEvent(tx, { id: `event-${input.grantId}-created`, eventKey: `grant:${input.grantId}:created`, eventType: "grant_created", promotionId: promotion.id, subjectUserId: input.userId, redemptionId: input.redemptionId, accessGrantId: input.grantId, occurredAt: input.now, metadata: { status: "queued", planId: promotion.accessPlanId, durationDays: promotion.durationDays, source: "free_access_coupon" } });
+          await this.insertPromotionEvent(tx, { id: `event-${input.grantId}-created`, eventKey: `grant:${input.grantId}:created`, eventType: "grant_created", promotionId: promotion.id, subjectUserId: input.userId, accessGrantId: input.grantId, occurredAt: input.now, metadata: { status: "queued", planId: promotion.accessPlanId, durationDays: promotion.durationDays, source: "free_access_coupon" } });
         } catch { throw eventWriteFailure; }
         return { status: "created" as const, redemption: this.promotionRedemptionFromRow(redemption), grant: this.promotionalGrantFromRow(grant) };
       });
@@ -1282,12 +1282,17 @@ export class PrismaRepository implements Repository {
   async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { return (await this.db.publishingCycle.findMany({ where: { ownerId: userId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })).map(rowToCycle); }
 
   async getCycleItems(cycleId: string): Promise<CycleItem[]> { return (await this.db.cycleItem.findMany({ where: { cycleId }, orderBy: [{ position: "asc" }, { id: "asc" }] })).map(rowToItem); }
-  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = [], now = new Date()): Promise<boolean> {
+  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = [], now = new Date(), confirmedDuplicateMediaIds: string[] = []): Promise<boolean> {
     if (items.length === 0) return true;
     const cycleId = items[0]!.cycleId;
     const ownerId = items[0]!.cycleOwnerId;
     if (items.some((item) => item.cycleId !== cycleId || item.cycleOwnerId !== ownerId || !item.sourceCollectionId || !Object.hasOwn(expectedCollectionSettingsVersions, item.sourceCollectionId) || (item.status !== "upcoming" && item.status !== "scheduled")) || new Set(items.map((item) => item.id)).size !== items.length) return false;
     const collectionIds = [...new Set(items.map((item) => item.sourceCollectionId as string))].sort();
+    const confirmedDuplicates = new Set(confirmedDuplicateMediaIds);
+    const mediaIds = [...new Set(items.map((item) => item.mediaAssetId))];
+    const incomingCounts = new Map<string, number>();
+    for (const item of items) incomingCounts.set(item.mediaAssetId, (incomingCounts.get(item.mediaAssetId) ?? 0) + 1);
+    if ([...incomingCounts].some(([mediaId, count]) => count > 1 && !confirmedDuplicates.has(mediaId))) return false;
     const orderConflict = Symbol("cycle item order changed during import");
     const insertConflict = Symbol("cycle item already exists during import");
     try { return await this.db.$transaction(async (tx) => {
@@ -1296,6 +1301,10 @@ export class PrismaRepository implements Repository {
       if (!Array.isArray(lockedCycle) || lockedCycle.length === 0) return false;
       const cycle = await tx.publishingCycle.findUnique({ where: { id: cycleId } });
       if (!cycle || cycle["ownerId"] !== ownerId || cycle["status"] === "completed" || cycle["status"] === "stopped") return false;
+      // The handler's earlier duplicate scan can be stale. The parent lock
+      // serializes adders, so recheck active media here before ordering/inserting.
+      const existingItems = await tx.cycleItem.findMany({ where: { cycleId, mediaAssetId: { in: mediaIds }, status: { not: "cancelled" } }, select: { mediaAssetId: true } });
+      if (existingItems.some((item) => !confirmedDuplicates.has(String(item["mediaAssetId"])))) return false;
       for (const collectionId of [...new Set([...Object.keys(expectedCollectionSettingsVersions), ...collectionIds])].sort()) {
         const lockedCollection = await tx.$queryRaw`SELECT "settingsVersion" FROM "VideoCollection" WHERE "id" = ${collectionId} FOR SHARE`;
         if (!Array.isArray(lockedCollection) || lockedCollection.length !== 1 || Number(lockedCollection[0]?.["settingsVersion"]) !== expectedCollectionSettingsVersions[collectionId]) return false;
@@ -1713,10 +1722,8 @@ export class PrismaRepository implements Repository {
         let importerPlan: PlanId;
         try { importerPlan = await this.effectivePlanIdInTransaction(tx, input.importerId, input.now, true); }
         catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; importerPlan = await this.effectivePlanIdInTransaction(tx, input.importerId, input.now, false); }
-        const [mediaSum, renderSum] = await Promise.all([
-          tx.mediaAsset.aggregate({ where: { ownerId: input.importerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } }),
-          tx.mediaDerivative.aggregate({ where: { ownerId: input.importerId, kind: "render" }, _sum: { sizeBytes: true } }),
-        ]);
+        const mediaSum = await tx.mediaAsset.aggregate({ where: { ownerId: input.importerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } });
+        const renderSum = await tx.mediaDerivative.aggregate({ where: { ownerId: input.importerId, kind: "render" }, _sum: { sizeBytes: true } });
         if (Number(mediaSum._sum["sizeBytes"] ?? 0) + Number(renderSum._sum["sizeBytes"] ?? 0) + source.sizeBytes > getPlan(importerPlan).limits.storageBytes) return { status: "quota" as const };
         const finalKey = mediaKeyFor(input.importerId, input.resultMediaAssetId);
         const row = await tx.mediaImportJob.create({ data: { id: input.id, importerId: input.importerId, sourceMediaId: input.sourceMediaId, sourceCollectionId: input.sourceCollectionId, status: "pending", idempotencyKey, newObjectKey: finalKey, stagingObjectKey: null, lockedBy: null, lockToken: null, leaseExpiresAt: null, attempts: 0, attemptStorageKeys: [], resultMediaAssetId: input.resultMediaAssetId, failureReason: null, createdAt: input.now, updatedAt: input.now } });
@@ -1743,12 +1750,10 @@ export class PrismaRepository implements Repository {
       if (!Array.isArray(mediaLock) || mediaLock.length !== 1) return false;
       const jobLock = await tx.$queryRaw`SELECT "id" FROM "MediaImportJob" WHERE "id" = ${jobId} FOR UPDATE`;
       if (!Array.isArray(jobLock) || jobLock.length !== 1) return false;
-      const [job, sourceRow, collectionRow, member] = await Promise.all([
-        tx.mediaImportJob.findUnique({ where: { id: jobId } }),
-        tx.mediaAsset.findUnique({ where: { id: initial["sourceMediaId"] } }),
-        tx.videoCollection.findUnique({ where: { id: initial["sourceCollectionId"] } }),
-        tx.collectionItem.findUnique({ where: { collectionId_mediaAssetId: { collectionId: initial["sourceCollectionId"], mediaAssetId: initial["sourceMediaId"] } } }),
-      ]);
+      const job = await tx.mediaImportJob.findUnique({ where: { id: jobId } });
+      const sourceRow = await tx.mediaAsset.findUnique({ where: { id: initial["sourceMediaId"] } });
+      const collectionRow = await tx.videoCollection.findUnique({ where: { id: initial["sourceCollectionId"] } });
+      const member = await tx.collectionItem.findUnique({ where: { collectionId_mediaAssetId: { collectionId: initial["sourceCollectionId"], mediaAssetId: initial["sourceMediaId"] } } });
       if (!job || job["importerId"] !== importerId || job["status"] !== "failed" || !sourceRow || !collectionRow || !member) return false;
       const source = rowToMedia(sourceRow); const grants = (await tx.collectionPermission.findMany({ where: { collectionId: initial["sourceCollectionId"] } })).map(rowToGrant);
       if (String(collectionRow["ownerId"]) !== source.ownerId || source.kind === "image" || !canImportVideo(importerId, source, rowToCollection(collectionRow, [source.id]), grants, now).allowed) return false;
@@ -1811,10 +1816,8 @@ export class PrismaRepository implements Repository {
       let importerPlan: PlanId;
       try { importerPlan = await this.effectivePlanIdInTransaction(tx, input.importerId, input.now, true); }
       catch (error) { if (!isPromotionSchemaUnavailable(error)) throw error; importerPlan = await this.effectivePlanIdInTransaction(tx, input.importerId, input.now, false); }
-      const [mediaSum, renderSum] = await Promise.all([
-        tx.mediaAsset.aggregate({ where: { ownerId: input.importerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } }),
-        tx.mediaDerivative.aggregate({ where: { ownerId: input.importerId, kind: "render" }, _sum: { sizeBytes: true } }),
-      ]);
+      const mediaSum = await tx.mediaAsset.aggregate({ where: { ownerId: input.importerId, status: { not: "deleted" } }, _sum: { sizeBytes: true } });
+      const renderSum = await tx.mediaDerivative.aggregate({ where: { ownerId: input.importerId, kind: "render" }, _sum: { sizeBytes: true } });
       if (Number(mediaSum._sum["sizeBytes"] ?? 0) + Number(renderSum._sum["sizeBytes"] ?? 0) + source.sizeBytes > getPlan(importerPlan).limits.storageBytes) return "quota" as const;
       await input.commitStagedObject();
       await tx.mediaAsset.create({ data: mediaToRow(input.media, { storageKey: input.storageKey, thumbnailKey: null }) });

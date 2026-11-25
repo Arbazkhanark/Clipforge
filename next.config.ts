@@ -1,5 +1,11 @@
 // Minimal on purpose. Not yet run: Next.js could not be installed in the development sandbox (no network).
 const nextConfig = {
+  ...(process.env["CLIPFORGE_CONTAINER_BUILD"] === "true" ? { output: "standalone" as const } : {}),
+  ...(process.env["CLIPFORGE_CONTAINER_BUILD"] === "true" ? {
+    outputFileTracingExcludes: {
+      "/*": ["./node_modules/nodemailer/**"],
+    },
+  } : {}),
   reactStrictMode: true,
   poweredByHeader: false,
   // These URLs contain one-use credentials in their query strings. Next.js dev request logging

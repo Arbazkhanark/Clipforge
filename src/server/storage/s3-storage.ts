@@ -41,6 +41,8 @@ export class S3MediaStorage implements MediaStorage {
     if (!bucket || /[^a-z0-9.-]/.test(bucket)) throw new Error("S3 storage configuration is invalid.");
   }
 
+  close(): void { this.client.destroy(); }
+
   private validate(key: string): void { parseStorageKey(key); }
 
   async stage(stagingKey: string, data: Uint8Array, metadata: { contentType?: string } = {}): Promise<void> {

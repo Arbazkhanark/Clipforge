@@ -1039,16 +1039,22 @@ export class MemoryRepository implements Repository {
     await tick(); // queue order, like ORDER BY position, id
     return [...this.items.values()].filter((i) => i.cycleId === cycleId).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id)).map(clone);
   }
-  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = [], now = new Date()): Promise<boolean> {
+  async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = [], now = new Date(), confirmedDuplicateMediaIds: string[] = []): Promise<boolean> {
     if (items.length === 0) return true;
     const cycleId = items[0]!.cycleId;
     const ownerId = items[0]!.cycleOwnerId;
     if (items.some((item) => item.cycleId !== cycleId || item.cycleOwnerId !== ownerId || !item.sourceCollectionId || !Object.hasOwn(expectedCollectionSettingsVersions, item.sourceCollectionId) || (item.status !== "upcoming" && item.status !== "scheduled")) || new Set(items.map((item) => item.id)).size !== items.length) return false;
     const collectionIds = [...new Set(items.map((item) => item.sourceCollectionId as string))].sort();
+    const confirmedDuplicates = new Set(confirmedDuplicateMediaIds);
+    const incomingCounts = new Map<string, number>();
+    for (const item of items) incomingCounts.set(item.mediaAssetId, (incomingCounts.get(item.mediaAssetId) ?? 0) + 1);
+    if ([...incomingCounts].some(([mediaId, count]) => count > 1 && !confirmedDuplicates.has(mediaId))) return false;
     return this.withPromotionLock(`cycle:${cycleId}`, async () => {
       await tick();
       const cycle = this.cycles.get(cycleId);
       if (!cycle || cycle.ownerId !== ownerId || cycle.status === "completed" || cycle.status === "stopped" || items.some((item) => this.items.has(item.id))) return false;
+      const mediaIds = new Set(items.map((item) => item.mediaAssetId));
+      if ([...this.items.values()].some((item) => item.cycleId === cycleId && mediaIds.has(item.mediaAssetId) && item.status !== "cancelled" && !confirmedDuplicates.has(item.mediaAssetId))) return false;
       if (Object.entries(expectedCollectionSettingsVersions).some(([collectionId, version]) => (this.collections.get(collectionId)?.settingsVersion ?? 1) !== version)) return false;
       const validateAndWrite = async (): Promise<boolean> => {
       for (const item of items) {

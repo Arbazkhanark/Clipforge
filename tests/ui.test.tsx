@@ -1,5 +1,6 @@
 // Server-renders the UI components and pages to HTML and checks the result.
 // This proves the markup and wording; it does NOT prove the app runs inside Next.js (not installed here).
+import "./helpers/next-request-scope.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -32,6 +33,7 @@ import { withoutDatabaseEnv } from "./helpers/isolated-database.ts";
 import HomePage from "../app/page.tsx";
 import PricingPage from "../app/pricing/page.tsx";
 import RootLayout from "../app/layout.tsx";
+import { runWithNextRequestScope } from "./helpers/next-request-scope.ts";
 
 const html = (node: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(node);
 
@@ -216,9 +218,9 @@ test("preflight panel shows level text, counts, and the unverified-limits note",
   const items = [makeItem({ id: "a", captionText: "" })];
   const report = runPreflight({ cycle: makeCycle({ status: "draft" }), items, socialAccountStatus: "token_expired", scheduledItemsPerMonthLimit: 100, scheduledItemsUsedThisMonth: 0, coverSupport: "unknown", sourceAccessByItemId: { a: { allowed: true, reason: "ok" } } });
   const out = html(<PreflightPanel report={report} />);
-  assert.ok(out.includes("Blocked")); assert.ok(out.includes("Fix the items below")); assert.ok(out.includes("content_publishing_limit"));
+  assert.ok(out.includes("Blocked")); assert.ok(out.includes("Resolve the blockers below before starting this cycle.")); assert.ok(out.includes("content_publishing_limit"));
   const ready = html(<PreflightPanel report={{ overall: "ready", canStart: true, checks: [] }} />);
-  assert.ok(ready.includes("You can start this cycle."));
+  assert.ok(ready.includes("Checks are complete. Review the final video list before starting."));
 });
 
 test("schedule preview lists times in the chosen zone and warns about unplaced videos", () => {
@@ -236,7 +238,7 @@ test("import warning shows every required warning and a required checkbox", () =
 
 test("Instagram page shows connect and disconnect without a password or token", () => {
   const out = html(<InstagramAccountsView configured={false} accounts={[{ id: "acct-1", username: "ada.clips", status: "connected", accountType: "BUSINESS", grantedScopes: ["instagram_business_content_publish"], tokenExpiresAt: "2026-08-01", hasToken: true, eligibilityStatus: "missing_permissions" }]} />);
-  for (const text of ["Connect Instagram", "not configured", "@ada.clips", "Disconnect", "required", "missing required permissions"]) assert.ok(out.includes(text), text);
+  for (const text of ["Connect Instagram", "not configured", "@ada.clips", "Disconnect", "Missing required permissions"]) assert.ok(out.includes(text), text);
   assert.equal(out.includes("type=\"password\""), false);
 });
 
@@ -248,7 +250,7 @@ test("pages render: home is honest, pricing uses the catalog, layout is accessib
   assert.ok(html(await PricingPage({})).includes("₹3,999"));
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(null);
-    const layout = html(await RootLayout({ children: <p>child</p> }));
+    const layout = html(await runWithNextRequestScope(() => RootLayout({ children: <p>child</p> })));
     assert.ok(layout.includes('<html lang="en">')); assert.ok(layout.includes("Skip to main content")); assert.ok(layout.includes('aria-label="Main"')); assert.ok(layout.includes("<p>child</p>"));
     assert.ok(layout.includes('href="/login"')); assert.ok(layout.includes("Sign in")); assert.ok(!layout.includes("Signed in"));
   });
@@ -256,21 +258,20 @@ test("pages render: home is honest, pricing uses the catalog, layout is accessib
 
 test("registration and sign-in copy matches database, local memory, and unconfigured modes", async () => {
   const outbox = html(<AuthForm mode="register" demoMode={false} available persistence="database" emailDelivery="outbox" />);
-  assert.ok(outbox.includes('data-auth-mode="database-outbox"'));
+  assert.ok(outbox.includes('class="auth-storage-note"'));
   assert.ok(outbox.includes("No email provider is connected"));
-  assert.ok(outbox.includes("confirmation and password-reset messages are unavailable"));
+  assert.ok(outbox.includes("confirmation and password-reset messages are not sent"));
   assert.ok(outbox.includes("new accounts remain unverified"));
   assert.ok(!outbox.includes("stays unverified"));
   assert.ok(!/we sent/i.test(outbox));
   const unavailable = html(<AuthForm mode="login" demoMode={false} available persistence="database" emailDelivery="unavailable" />);
-  assert.ok(unavailable.includes('data-auth-mode="database"'));
-  assert.ok(unavailable.includes("no message is sent"));
-  assert.ok(unavailable.includes("stays unverified"));
+  assert.ok(unavailable.includes('class="auth-storage-note"'));
+  assert.ok(unavailable.includes("No email provider is connected"));
+  assert.ok(unavailable.includes("new accounts remain unverified"));
   const local = html(<AuthForm mode="login" demoMode={false} available persistence="memory" />);
-  assert.ok(local.includes('data-auth-mode="local"'));
-  assert.ok(local.includes("Local development accounts live in server memory"));
-  assert.ok(local.includes("No email provider is connected"));
-  assert.ok(local.includes("verification and password-reset messages are unavailable"));
+  assert.ok(local.includes('class="auth-storage-note"'));
+  assert.ok(local.includes("Accounts stay in server memory and disappear when the server restarts."));
+  assert.ok(local.includes("Email verification and password-reset messages are unavailable."));
   const off = html(<AuthForm mode="register" demoMode={false} available={false} />);
   assert.ok(off.includes("not available yet"));
   assert.ok(/<button type="submit" disabled/.test(off));
@@ -281,11 +282,11 @@ test("registration and sign-in copy matches database, local memory, and unconfig
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(runtime);
     try {
-      assert.ok(html(await LoginPage({})).includes('data-auth-mode="database-outbox"'));
-      assert.ok(html(await RegisterPage({})).includes('data-auth-mode="database-outbox"'));
+      assert.ok(html(await LoginPage({})).includes("No email provider is connected"));
+      assert.ok(html(await RegisterPage({})).includes("new accounts remain unverified"));
       setRuntimeForTests({ ...runtime, emailDelivery: "unavailable" });
-      assert.ok(html(await LoginPage({})).includes('data-auth-mode="database"'));
-      assert.ok(html(await LoginPage({})).includes("stays unverified"));
+      assert.ok(html(await LoginPage({})).includes("No email provider is connected"));
+      assert.ok(html(await LoginPage({})).includes("new accounts remain unverified"));
     } finally { setRuntimeForTests(null); }
   });
 });
@@ -293,9 +294,12 @@ test("registration and sign-in copy matches database, local memory, and unconfig
 test("counts use the singular when there is one", () => {
   assert.equal(countNoun(1, "collection"), "collection");
   assert.equal(countNoun(0, "collection"), "collections");
+  assert.equal(countNoun(1, "publishing cycle"), "publishing cycle");
+  assert.equal(countNoun(2, "publishing cycle"), "publishing cycles");
   assert.equal(countNoun(2, "media file", "media files"), "media files");
   const one = html(<DashboardView data={{ planId: "free", planName: "Free", timeZone: "UTC", resetNotice: "Resets monthly.", usage: { storage: { used: 0, limit: 1 }, processingMinutes: { used: 0, limit: 1 }, exports: { used: 0, limit: 1 }, scheduledItems: { used: 0, limit: 1 } }, counts: { media: 1, collections: 1, cycles: 1, runningCycles: 0 }, campaigns: [], statusFilter: "all" }} />);
-  assert.ok(one.includes("<strong>1</strong> media file")); assert.ok(!one.includes("media files"));
-  assert.ok(one.includes("<strong>1</strong> collection")); assert.ok(!one.includes("collections"));
-  assert.ok(one.includes("<strong>1</strong> publishing cycle")); assert.ok(!one.includes("publishing cycles"));
+  assert.match(one, /<strong class="dashboard-stat-value">1<\/strong>[\s\S]*?<span class="dashboard-stat-description">file in your library<\/span>/);
+  assert.match(one, /<strong class="dashboard-stat-value">1<\/strong>[\s\S]*?<span class="dashboard-stat-description">collection<\/span>/);
+  assert.ok(one.includes('<span class="dashboard-stat-description">0 currently running</span>'));
+  assert.ok(!one.includes("media files"));
 });

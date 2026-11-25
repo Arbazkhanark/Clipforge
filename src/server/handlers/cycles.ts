@@ -184,7 +184,7 @@ export async function mixIntoCycle(ctx: RequestContext, rawInput: unknown): Prom
     const additions = orderedItems.filter((item) => newIds.has(item.id));
     const orderUpdates = orderedItems.filter((item) => !newIds.has(item.id) && item.version !== beforeById.get(item.id)?.version)
       .map((item) => ({ item, expectedVersion: (beforeById.get(item.id) as CycleItem).version }));
-    if (!(await ctx.repo.addCycleItems(additions, expectedCollectionSettingsVersions, orderUpdates, ctx.now))) throw conflict("This cycle or its collection settings changed while adding videos. Reload and try again.");
+    if (!(await ctx.repo.addCycleItems(additions, expectedCollectionSettingsVersions, orderUpdates, ctx.now, confirmedDuplicateMediaIds))) throw conflict("This cycle or its collection settings changed while adding videos. Reload and try again.");
   }
   await ctx.repo.appendAudit({ actorId: userId, action: "cycle.videos_mixed", entityType: "PublishingCycle", entityId: cycleId, metadata: { added: newItems.length, rejected: mixed.rejected.length + unavailable.length } });
   return { added: newItems.length, rejected: [...unavailable, ...mixed.rejected, ...unavailableCovers] };

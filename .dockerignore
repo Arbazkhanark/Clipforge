@@ -1,0 +1,24 @@
+# Never include environment files or local credentials in an image build context.
+.env*
+**/.env*
+.aws/
+**/.aws/
+.npmrc
+**/.npmrc
+
+.git/
+.next/
+node_modules/
+**/node_modules/
+src/generated/prisma/
+.local-media/
+.local-node/
+**/.local-node/
+coverage/
+test-results/
+playwright-report/
+tests/
+docs/
+*.log
+tsconfig.tsbuildinfo
+*.zip

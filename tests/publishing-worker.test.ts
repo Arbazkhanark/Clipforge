@@ -21,6 +21,8 @@ async function fixture(overrides: { cycleStatus?: "draft" | "running"; accountSt
   const selectedOutputId = overrides.selectedRenderOutputId !== undefined ? overrides.selectedRenderOutputId : "render-output-1";
   repo.items.set("item1", makeItem({ id: "item1", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "media1", selectedRenderOutputId: selectedOutputId, status: "scheduled", scheduledFor: new Date(NOW.getTime() - 1000), captionText: "Mock caption" }));
   repo.media.set("media1", { id: "media1", ownerId: "bob", status: "active", sizeBytes: 1000, deleteAfter: null, title: "Source video", kind: "video", durationMs: 5000, createdAt: NOW, width: 1080, height: 1920, validation: "verified", mimeType: "video/mp4" });
+  repo.collections.set("col1", { id: "col1", ownerId: "bob", visibility: "private", archived: false, mediaIds: ["media1"] });
+  repo.items.set("item1", { ...repo.items.get("item1")!, sourceCollectionId: "col1", sourceKind: "owned" });
   if (selectedOutputId) {
     repo.renders.set(selectedOutputId, { id: selectedOutputId, sourceMediaId: "media1", ownerId: "bob", storageKey: `render/bob/${selectedOutputId}`, sizeBytes: 2000, settingsHash: "hash1", createdAt: NOW });
   }

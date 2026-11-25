@@ -289,9 +289,10 @@ test("page data: your video only; other users' videos, images and missing ids al
 test("page: without a video it lists yours to choose from; templates show 'N of limit'", async () => {
   const none = html(await EditorPage({}));
   assert.ok(none.includes("Choose a video")); assert.ok(none.includes('href="/editor?media=v1"')); assert.ok(none.includes("Clip")); assert.ok(!none.includes("Eve clip"));
-  assert.ok(none.includes("Your templates (0 of 3)")); assert.ok(none.includes("The original video is kept"));
+  assert.match(none, /<h2>Your templates <span class="editor-count">0\/3<\/span><\/h2>/);
+  assert.ok(none.includes("Apply a saved editing style to another video.")); assert.ok(none.includes("No templates saved yet."));
   await save("bob", { name: "Saved look", settings: goodSettings() });
-  const withTemplate = html(await EditorPage({})); assert.ok(withTemplate.includes("Your templates (1 of 3)")); assert.ok(withTemplate.includes("Saved look")); assert.ok(withTemplate.includes("1:1, blurred background, zoom 1.2, 8px border"));
+  const withTemplate = html(await EditorPage({})); assert.match(withTemplate, /<h2>Your templates <span class="editor-count">1\/3<\/span><\/h2>/); assert.ok(withTemplate.includes("Saved look")); assert.ok(withTemplate.includes("1:1, blurred background, zoom 1.2, 8px border"));
 });
 
 test("page: the form has every control and the actual preview uses the authorized media route", async () => {
@@ -316,7 +317,7 @@ test("page: the form has every control and the actual preview uses the authorize
   assert.ok(page.includes("touch-action:none"));
   assert.ok(page.includes("Loading video preview")); assert.ok(page.includes("not pixel-identical"));
   assert.ok(page.includes('formAction="/api/forms/render"') && page.includes("Render video"));
-  assert.ok(page.includes("never change the original")); assert.ok(page.includes("up to 720p"));                                  // Free plan cap, from the catalog
+  assert.ok(page.includes("Your original video is always kept safe.")); assert.ok(page.includes("Export resolution:")); assert.ok(page.includes("720p")); // Free plan cap, from the catalog
   assert.ok(page.includes('aria-label="Edited video preview"'));
   assert.ok(!/storageKey|media\/bob/.test(page));
   assert.ok(!page.includes("data-logo-handle") && !page.includes("data-border"));

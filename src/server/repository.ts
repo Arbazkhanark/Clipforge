@@ -348,7 +348,7 @@ export interface Repository {
 
   getCycleItems(cycleId: string): Promise<CycleItem[]>;
   /** Adds items only while the parent cycle is still editable; serializes against cycle completion. */
-  addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions?: Record<string, number>, orderUpdates?: { item: CycleItem; expectedVersion: number }[], now?: Date): Promise<boolean>;
+  addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions?: Record<string, number>, orderUpdates?: { item: CycleItem; expectedVersion: number }[], now?: Date, confirmedDuplicateMediaIds?: string[]): Promise<boolean>;
   saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]>;
   /** Explicit, owner/source-checked output selection for a versioned item in an owned draft cycle. */
   selectCycleItemRenderOutput(input: SelectCycleItemRenderOutputInput): Promise<boolean>;

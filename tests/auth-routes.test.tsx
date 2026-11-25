@@ -1,5 +1,6 @@
 // The REAL authentication service behind the REAL routes and pages, in "local" mode (memory only).
 // Proves the flow works in plain Node. It does NOT prove it works in a browser or under Next.js (neither is installed here).
+import "./helpers/next-request-scope.ts";
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -24,6 +25,7 @@ import VerifyEmailPage from "../app/verify-email/page.tsx";
 import ResetPasswordPage from "../app/reset-password/page.tsx";
 import ForgotPasswordPage from "../app/forgot-password/page.tsx";
 import DevOutboxPage from "../app/dev/outbox/page.tsx";
+import { runWithNextRequestScope } from "./helpers/next-request-scope.ts";
 
 const html = (node: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(node);
 const FAST = { logN: 10, r: 8, p: 1 };
@@ -157,7 +159,9 @@ test("SESSIONS ON REQUESTS: the cookie identifies the user; anonymous, tampered 
 test("PAGES read the cookie from the request headers: signed-in users see their data, others are asked to sign in", async () => {
   const ann = await signUp("ann@example.com"); const bob = await signUp("bob@example.com"); await uploadAs(ann, "annpic.png");
   setPageCookieReaderForTests(async () => ann);
-  assert.ok(html(await DashboardPage({})).includes("Your plan: <strong>Free</strong>")); assert.ok(html(await MediaPage({})).includes("annpic.png"));
+  const dashboard = html(await DashboardPage({}));
+  assert.ok(dashboard.includes("CURRENT PLAN") && dashboard.includes("<strong>Free</strong>"));
+  assert.ok(html(await MediaPage({})).includes("annpic.png"));
   setPageCookieReaderForTests(async () => bob);
   assert.ok(!html(await MediaPage({})).includes("annpic.png")); assert.ok(html(await MediaPage({})).includes("Your library is empty"));
   for (const reader of [async () => null, async () => "clipforge_session=" + "B".repeat(43), async () => "garbage"]) {
@@ -172,12 +176,12 @@ test("PAGES read the cookie from the request headers: signed-in users see their 
   const googleConfigured = (await import("../src/server/auth/google-oauth.ts")).readGoogleOAuthConfig() !== null;
   assert.equal(layout.includes("Connect Google"), googleConfigured);
   assert.equal(layout.includes("Google sign-in is not configured."), !googleConfigured);
-  const header = html(await RootLayout({ children: <p>x</p> }));
+  const header = html(await runWithNextRequestScope(() => RootLayout({ children: <p>x</p> })));
   assert.ok(header.includes('data-auth-state="signed-in"')); assert.ok(!header.includes('data-auth-state="signed-out"'));
   setPageCookieReaderForTests(async () => null);
   const signedOut = html(await AppLayout({ children: <p>x</p> }));
   assert.ok(signedOut.includes("data-local-banner")); assert.ok(signedOut.includes('href="/login"')); assert.ok(!signedOut.includes('action="/api/auth/logout"')); assert.ok(!signedOut.includes("Connect Google"));
-  const signedOutHeader = html(await RootLayout({ children: <p>x</p> }));
+  const signedOutHeader = html(await runWithNextRequestScope(() => RootLayout({ children: <p>x</p> })));
   assert.ok(signedOutHeader.includes('data-auth-state="signed-out"')); assert.ok(signedOutHeader.includes(">Sign in</a>")); assert.ok(!signedOutHeader.includes("Signed in"));
 });
 
@@ -233,7 +237,7 @@ test("REDIRECTS and messages are fixed: user input never appears in a Location h
 });
 
 test("LOCAL MODE screens: forms are enabled and labelled; the dev outbox exists only in local mode and never in production", async () => {
-  for (const Page of [LoginPage, RegisterPage]) { const out = html(await Page({})); assert.ok(out.includes("Local development accounts")); assert.ok(!/<button type="submit" disabled/.test(out)); assert.ok(out.includes('action="/api/auth/')); }
+  for (const Page of [LoginPage, RegisterPage]) { const out = html(await Page({})); assert.ok(out.includes("Local development mode")); assert.ok(!/<button type="submit" disabled/.test(out)); assert.ok(out.includes('action="/api/auth/')); }
   assert.ok(html(await RegisterPage({})).includes("minLength"));
   await post.register("ann@example.com");
   assert.throws(() => DevOutboxPage());
@@ -247,7 +251,7 @@ test("getRuntime(): local mode turns on ONLY with the explicit flag, and never i
     assert.equal(getRuntime({}).mode, "unconfigured");
     const local = getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "development" });
     assert.equal(local.mode, "local"); assert.ok(local.auth);
-    assert.equal(getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "production" }).mode, "unconfigured");
+    assert.equal(getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "production", EMAIL_PROVIDER: "ses", AWS_REGION: "ap-southeast-2", EMAIL_FROM: "clipforge@example.test" }).mode, "unconfigured");
   } finally { delete holder.__clipforgeLocalRuntime; }
 });
 
