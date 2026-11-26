@@ -11,5 +11,5 @@ export const dynamic = "force-dynamic";
 export default async function RegisterPage(props: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const runtime = getRuntime();
   const search = await props.searchParams;
-  return <AuthForm mode="register" demoMode={runtime.mode === "demo"} available={runtime.auth !== undefined} persistence={runtime.mode === "database" ? "database" : "memory"} emailDelivery={runtime.emailDelivery} googleConfigured={readGoogleOAuthConfig() !== null} returnTo={safeCustomerReturnPath(search?.returnTo)} flash={parseFlash(search)} />;
+  return <AuthForm mode="register" demoMode={runtime.mode === "demo"} available={runtime.auth !== undefined} persistence={runtime.mode === "database" ? "database" : "memory"} emailDelivery={runtime.emailDelivery} passwordAuthEnabled={runtime.passwordAuthEnabled === true} googleConfigured={readGoogleOAuthConfig() !== null} returnTo={safeCustomerReturnPath(search?.returnTo)} flash={parseFlash(search)} />;
 }

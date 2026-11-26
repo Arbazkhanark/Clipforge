@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { AuthService, DEFAULT_AUTH_CONFIG } from "../src/server/auth/auth-service.ts";
 import type { UserRecord } from "../src/server/auth/auth-repository.ts";
-import { MemoryEmailOutbox, createEmailSetup } from "../src/server/auth/email.ts";
+import { MemoryEmailOutbox, createEmailSetup, createLazyEmailSetup } from "../src/server/auth/email.ts";
 import { InMemoryRateLimiter } from "../src/server/auth/rate-limiter.ts";
 import { MemoryAuthRepository } from "../src/server/auth/memory-auth-repository.ts";
 import { AppError } from "../src/server/errors.ts";
@@ -21,6 +21,31 @@ const NEXT = "a different database password";
 const databaseUrlAtStart = isolatedDatabaseUrl();
 const hasDatabase = Boolean(databaseUrlAtStart);
 const tokenFrom = (text: string): string => new URL(text.match(/https?:\/\/\S+/)![0]!).searchParams.get("token")!;
+
+test("email delivery is disabled by default and SES setup is deferred until an enabled send", async () => {
+  const disabled = createLazyEmailSetup({ NODE_ENV: "production", EMAIL_PROVIDER: "invalid", EMAIL_FROM: "invalid" }, false);
+  assert.equal(disabled.delivery, "unavailable");
+  await assert.rejects(() => disabled.sender.send({ to: "user@example.test", subject: "x", text: "x" }), (error: unknown) => error instanceof AppError && error.code === "email_not_configured");
+
+  const invalidButLazy = createLazyEmailSetup({ NODE_ENV: "production", CLIPFORGE_DEPLOYMENT_ENV: "production", EMAIL_PROVIDER: "ses" }, true);
+  assert.equal(invalidButLazy.delivery, "unavailable");
+  await assert.rejects(() => invalidButLazy.sender.send({ to: "user@example.test", subject: "x", text: "x" }), /Email provider configuration is invalid/);
+  const productionFake = createLazyEmailSetup({ NODE_ENV: "production", CLIPFORGE_DEPLOYMENT_ENV: "production", EMAIL_PROVIDER: "fake" }, true);
+  assert.equal(productionFake.delivery, "unavailable");
+  await assert.rejects(() => productionFake.sender.send({ to: "user@example.test", subject: "x", text: "x" }), /Email provider configuration is invalid/);
+
+  let credentialsResolved = 0;
+  let requests = 0;
+  const configured = createLazyEmailSetup({ NODE_ENV: "production", CLIPFORGE_DEPLOYMENT_ENV: "production", EMAIL_PROVIDER: "ses", AWS_REGION: "ap-south-1", EMAIL_FROM: "mail@example.test" }, true, {
+    resolveAwsCredentials: async () => { credentialsResolved++; return { accessKeyId: "synthetic-access", secretAccessKey: "synthetic-secret" }; },
+    fetch: async () => { requests++; return new Response(null, { status: 200 }); },
+  });
+  assert.equal(credentialsResolved, 0);
+  assert.equal(requests, 0);
+  await configured.sender.send({ to: "user@example.test", subject: "x", text: "x" });
+  assert.equal(credentialsResolved, 1);
+  assert.equal(requests, 1);
+});
 
 function service(repo: MemoryAuthRepository | PrismaAuthRepository, email: EmailSender, opts: { limiter?: InMemoryRateLimiter; now?: () => Date; requireVerifiedEmail?: boolean } = {}) {
   return new AuthService({

@@ -26,9 +26,13 @@ import { UploadForm } from "../src/components/UploadForm.tsx";
 import { MediaTable } from "../src/components/MediaTable.tsx";
 import { MediaDetailView } from "../src/components/MediaDetailView.tsx";
 import { FLASH_ERRORS, FLASH_NOTICES } from "../src/server/flash.ts";
-import { setRuntimeForTests, type Runtime } from "../src/server/runtime.ts";
+import { createLocalRuntime, setRuntimeForTests, type Runtime } from "../src/server/runtime.ts";
 import LoginPage from "../app/login/page.tsx";
 import RegisterPage from "../app/register/page.tsx";
+import ForgotPasswordPage from "../app/forgot-password/page.tsx";
+import ResetPasswordPage from "../app/reset-password/page.tsx";
+import VerifyEmailPage from "../app/verify-email/page.tsx";
+import AdminLoginPage from "../app/admin/login/page.tsx";
 import { withoutDatabaseEnv } from "./helpers/isolated-database.ts";
 import HomePage from "../app/page.tsx";
 import PricingPage from "../app/pricing/page.tsx";
@@ -257,36 +261,52 @@ test("pages render: home is honest, pricing uses the catalog, layout is accessib
 });
 
 test("registration and sign-in copy matches database, local memory, and unconfigured modes", async () => {
-  const outbox = html(<AuthForm mode="register" demoMode={false} available persistence="database" emailDelivery="outbox" />);
+  const outbox = html(<AuthForm mode="register" demoMode={false} available persistence="database" emailDelivery="outbox" passwordAuthEnabled />);
   assert.ok(outbox.includes('class="auth-storage-note"'));
-  assert.ok(outbox.includes("No email provider is connected"));
-  assert.ok(outbox.includes("confirmation and password-reset messages are not sent"));
-  assert.ok(outbox.includes("new accounts remain unverified"));
-  assert.ok(!outbox.includes("stays unverified"));
+  assert.ok(outbox.includes("Email confirmation and password-reset messages use the explicitly configured server-side provider."));
   assert.ok(!/we sent/i.test(outbox));
-  const unavailable = html(<AuthForm mode="login" demoMode={false} available persistence="database" emailDelivery="unavailable" />);
+  const unavailable = html(<AuthForm mode="login" demoMode={false} available persistence="database" emailDelivery="unavailable" passwordAuthEnabled />);
   assert.ok(unavailable.includes('class="auth-storage-note"'));
-  assert.ok(unavailable.includes("No email provider is connected"));
-  assert.ok(unavailable.includes("new accounts remain unverified"));
-  const local = html(<AuthForm mode="login" demoMode={false} available persistence="memory" />);
+  assert.ok(unavailable.includes("Email provider configuration is checked only when an email operation is requested."));
+  const local = html(<AuthForm mode="login" demoMode={false} available persistence="memory" passwordAuthEnabled />);
   assert.ok(local.includes('class="auth-storage-note"'));
   assert.ok(local.includes("Accounts stay in server memory and disappear when the server restarts."));
   assert.ok(local.includes("Email verification and password-reset messages are unavailable."));
   const off = html(<AuthForm mode="register" demoMode={false} available={false} />);
   assert.ok(off.includes("not available yet"));
-  assert.ok(/<button type="submit" disabled/.test(off));
+  assert.ok(off.includes("Email/password sign-in, registration, verification and password reset are temporarily disabled."));
+  assert.doesNotMatch(off, /type="password"|action="\/api\/auth\/register"/);
   assert.ok(FLASH_NOTICES.registered.includes("Check the inbox"));
   assert.ok(!/we sent/i.test(FLASH_NOTICES.registered));
   assert.ok(FLASH_ERRORS.email_not_verified.includes("confirm your email"));
-  const runtime = { mode: "database", emailDelivery: "outbox", auth: {}, currentUserId: async () => null, repo: {}, newId: () => "x", now: () => new Date(0) } as Runtime;
+  const runtime = { mode: "database", emailDelivery: "outbox", passwordAuthEnabled: true, auth: {}, currentUserId: async () => null, repo: {}, newId: () => "x", now: () => new Date(0) } as Runtime;
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(runtime);
     try {
-      assert.ok(html(await LoginPage({})).includes("No email provider is connected"));
-      assert.ok(html(await RegisterPage({})).includes("new accounts remain unverified"));
+      assert.ok(html(await LoginPage({})).includes("Email confirmation and password-reset messages use the explicitly configured server-side provider."));
       setRuntimeForTests({ ...runtime, emailDelivery: "unavailable" });
-      assert.ok(html(await LoginPage({})).includes("No email provider is connected"));
-      assert.ok(html(await LoginPage({})).includes("new accounts remain unverified"));
+      assert.ok(html(await LoginPage({})).includes("Email provider configuration is checked only when an email operation is requested."));
+    } finally { setRuntimeForTests(null); }
+  });
+});
+
+test("auth and admin pages render without SES while Google-only mode hides every password form", async () => {
+  await withoutDatabaseEnv(async () => {
+    setRuntimeForTests(createLocalRuntime());
+    try {
+      const pages = [
+        html(await LoginPage({})),
+        html(await RegisterPage({})),
+        html(await ForgotPasswordPage({ searchParams: Promise.resolve({}) })),
+        html(await ResetPasswordPage({ searchParams: Promise.resolve({ token: "r".repeat(32) }) })),
+        html(await VerifyEmailPage({ searchParams: Promise.resolve({ token: "v".repeat(32) }) })),
+        html(await AdminLoginPage({ searchParams: Promise.resolve({}) })),
+      ];
+      for (const page of pages) assert.doesNotMatch(page, /type="password"|action="\/api\/(auth|admin)\/(login|register|forgot-password|reset-password|verify-email)/);
+      for (const page of pages.slice(0, 5)) assert.match(page, /temporarily disabled/);
+      assert.match(pages[0]!, /Google sign-in/);
+      assert.match(pages[1]!, /Google sign-in/);
+      assert.match(pages[5]!, /Continue to Google sign-in/);
     } finally { setRuntimeForTests(null); }
   });
 });

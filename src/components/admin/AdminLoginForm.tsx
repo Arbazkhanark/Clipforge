@@ -1,7 +1,7 @@
 import { FlashMessage } from "../FlashMessage.tsx";
 import type { Flash } from "../../server/flash.ts";
 
-export function AdminLoginForm({ available, flash }: { available: boolean; flash: Flash | null }) {
+export function AdminLoginForm({ available, flash, passwordAuthEnabled = false }: { available: boolean; flash: Flash | null; passwordAuthEnabled?: boolean }) {
   return (
     <div className="admin-login-page">
       <section aria-labelledby="admin-login-title" className="admin-login-card">
@@ -15,8 +15,9 @@ export function AdminLoginForm({ available, flash }: { available: boolean; flash
           <p>Sign in with your ClipForge administrator account to continue.</p>
         </div>
         <FlashMessage flash={flash} />
-        {!available && <p role="status" className="admin-login-unavailable">Admin sign-in is unavailable right now.</p>}
-        <form className="admin-login-form" method="post" action={available ? "/api/admin/login" : "#"}>
+        {!passwordAuthEnabled && <p role="status" className="admin-login-unavailable">Email and password admin sign-in is disabled. Use your Google account; administrator access still requires the existing admin role. <a href="/login">Continue to Google sign-in</a>.</p>}
+        {passwordAuthEnabled && !available && <p role="status" className="admin-login-unavailable">Admin sign-in is unavailable right now.</p>}
+        {passwordAuthEnabled && <form className="admin-login-form" method="post" action={available ? "/api/admin/login" : "#"}>
           <label className="admin-login-field">
             <span>Email address</span>
             <input type="email" name="email" autoComplete="username" maxLength={320} required />
@@ -26,7 +27,7 @@ export function AdminLoginForm({ available, flash }: { available: boolean; flash
             <input type="password" name="password" autoComplete="current-password" maxLength={1024} required />
           </label>
           <button className="admin-login-submit" type="submit" disabled={!available}>Sign in to Admin</button>
-        </form>
+        </form>}
         <div className="admin-login-security-note"><span aria-hidden="true">●</span> Protected administrator access</div>
       </section>
       <p className="admin-login-footer">ClipForge · Administrator access · First Admin provisioning is operator-only.</p>

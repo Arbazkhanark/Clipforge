@@ -25,7 +25,7 @@ function form(path: string, fields: [string, string][], cookie = ""): Request {
 }
 
 async function signedIn() {
-  const runtime = createLocalRuntime({ scrypt: { logN: 10, r: 8, p: 1 }, now: () => NOW });
+  const runtime = createLocalRuntime({ scrypt: { logN: 10, r: 8, p: 1 }, now: () => NOW, emailEnabled: true, passwordAuthEnabled: true });
   assert.equal((await runtime.auth!.register({ email: "ada@example.com", password: "correct horse battery", name: "Ada" })).ok, true);
   const link = runtime.outbox!.messages.at(-1)!.text.match(/https?:\/\/\S+/)![0];
   assert.equal((await runtime.auth!.verifyEmail(new URL(link).searchParams.get("token")!)).ok, true);

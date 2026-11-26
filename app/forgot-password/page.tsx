@@ -8,5 +8,5 @@ export const dynamic = "force-dynamic";
 
 export default async function ForgotPasswordPage(props: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const runtime = getRuntime();
-  return <AuthForm mode="forgot" demoMode={false} available={runtime.auth !== undefined} persistence={runtime.mode === "database" ? "database" : "memory"} emailDelivery={runtime.emailDelivery} flash={parseFlash(await props.searchParams)} />;
+  return <AuthForm mode="forgot" demoMode={false} available={runtime.auth !== undefined} passwordAuthEnabled={runtime.passwordAuthEnabled === true} persistence={runtime.mode === "database" ? "database" : "memory"} emailDelivery={runtime.emailDelivery} flash={parseFlash(await props.searchParams)} />;
 }

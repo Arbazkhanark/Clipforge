@@ -33,7 +33,7 @@ test("a database connection failure is reported and does not fall back to memory
   setDatabaseConnectorForTests(async () => { throw new Error("connection refused"); });
   setRuntimeForTests(null);
   try {
-    const runtime = getRuntime({ NODE_ENV: "test", DATABASE_URL: "postgresql://127.0.0.1:9/clipforge" });
+    const runtime = getRuntime({ NODE_ENV: "test", DATABASE_URL: "postgresql://127.0.0.1:9/clipforge", CLIPFORGE_EMAIL_ENABLED: "true", CLIPFORGE_PASSWORD_AUTH_ENABLED: "true" });
     assert.equal(runtime.mode, "database");
     assert.equal(runtime.emailDelivery, "outbox");
     assert.ok(runtime.outbox, "test mode uses its fake email outbox");
@@ -80,6 +80,8 @@ test("production selects the PostgreSQL runtime from DATABASE_URL, never DIRECT_
       EMAIL_PROVIDER: "ses",
       AWS_REGION: "ap-southeast-2",
       EMAIL_FROM: "clipforge@example.test",
+      CLIPFORGE_EMAIL_ENABLED: "true",
+      CLIPFORGE_PASSWORD_AUTH_ENABLED: "true",
     });
     assert.equal(runtime.mode, "database");
     assert.deepEqual(await runtime.auth!.login({ email: "nobody@example.test", password: PASSWORD }), { ok: false, code: "invalid_credentials" });
@@ -104,6 +106,31 @@ test("production selects the PostgreSQL runtime from DATABASE_URL, never DIRECT_
   }
 }));
 
+test("production runtime starts without SES configuration and never resolves email credentials until explicitly enabled", async () => serial(async () => {
+  let connections = 0;
+  setRuntimeForTests(null);
+  setDatabaseConnectorForTests(async () => { connections++; return new FakePrismaClient(); });
+  try {
+    const runtime = getRuntime({
+      NODE_ENV: "production",
+      DATABASE_URL: "postgresql://database.example/clipforge",
+      CLIPFORGE_EXPECTED_DATABASE_HOST: "database.example",
+      CLIPFORGE_EXPECTED_DATABASE_NAME: "clipforge",
+      CLIPFORGE_EXPECTED_DATABASE_PORT: "5432",
+      EMAIL_PROVIDER: "ses",
+    });
+    assert.equal(runtime.mode, "database");
+    assert.equal(runtime.emailDelivery, "unavailable");
+    assert.equal(runtime.passwordAuthEnabled, false);
+    assert.equal(connections, 0);
+    await assert.rejects(() => runtime.emailSender!.send({ to: "user@example.test", subject: "x", text: "x" }), (error: unknown) => error instanceof AppError && error.code === "email_not_configured");
+    assert.equal(connections, 0);
+  } finally {
+    setDatabaseConnectorForTests(null);
+    setRuntimeForTests(null);
+  }
+}));
+
 test("failed database ping is logged without secrets and the same runtime can retry", async () => serial(async () => {
   const client = new FakePrismaClient();
   const originalQuery = client.$queryRaw.bind(client);
@@ -121,7 +148,7 @@ test("failed database ping is logged without secrets and the same runtime can re
     if (attempts === 1) client.$queryRaw = async () => { throw Object.assign(new Error("private-marker"), { code: "P1001" }); };
     else client.$queryRaw = originalQuery;
     return client;
-  }, { scrypt: FAST, email: createEmailSetup({ NODE_ENV: "development" }) });
+  }, { scrypt: FAST, email: createEmailSetup({ NODE_ENV: "development" }), emailEnabled: true, passwordAuthEnabled: true });
   try {
     await assert.rejects(() => runtime.auth!.register({ email: "nobody@example.test", password: PASSWORD }), (error: unknown) => error instanceof AppError && error.code === "database_unavailable");
     await assert.rejects(() => runtime.auth!.register({ email: "nobody@example.test", password: PASSWORD }), (error: unknown) => error instanceof AppError && error.code === "database_unavailable");
@@ -150,7 +177,7 @@ test("database auth query failures are logged with a safe category, not their me
   console.info = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
   console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
   client.user.create = async () => { throw Object.assign(new Error("email-and-password-must-not-be-logged"), { code: "P2022" }); };
-  const runtime = createDatabaseRuntime("postgresql://private-marker@db.example/clipforge", async () => client, { email: createEmailSetup({ NODE_ENV: "development" }) });
+  const runtime = createDatabaseRuntime("postgresql://private-marker@db.example/clipforge", async () => client, { email: createEmailSetup({ NODE_ENV: "development" }), emailEnabled: true, passwordAuthEnabled: true });
   try {
     await assert.rejects(() => runtime.auth!.register({ email: "private-email@example.test", password: PASSWORD }), (error: unknown) => error instanceof AppError && error.code === "database_unavailable");
     const logs = lines.join("\n");
@@ -198,7 +225,7 @@ test("complimentary schema mismatch maps to setup-required and logs only safe di
 
 test("signup and login persist users and sessions through the PostgreSQL auth repository", async () => {
   const client = new FakePrismaClient();
-  const runtime = createDatabaseRuntime("postgresql://private-marker@db.example/clipforge", async () => client, { scrypt: FAST, email: createEmailSetup({ NODE_ENV: "development" }) });
+  const runtime = createDatabaseRuntime("postgresql://private-marker@db.example/clipforge", async () => client, { scrypt: FAST, email: createEmailSetup({ NODE_ENV: "development" }), emailEnabled: true, passwordAuthEnabled: true });
   const email = `persist-${randomUUID()}@example.test`;
   assert.deepEqual(await runtime.auth!.register({ email, password: PASSWORD }), { ok: true });
   assert.equal(await client.user.count(), 1);
@@ -217,7 +244,7 @@ test("database mode does not send or store a verification message", async () => 
   const runtime = createDatabaseRuntime("postgresql://127.0.0.1:9/clipforge", async () => {
     calls += 1;
     return { $queryRaw: async () => [], user: { async create() { return {}; }, async findUnique() { return null; } } } as unknown as PrismaClientLike;
-  }, { scrypt: FAST, email: createEmailSetup({ NODE_ENV: "development" }) });
+  }, { scrypt: FAST, email: createEmailSetup({ NODE_ENV: "development" }), emailEnabled: true, passwordAuthEnabled: true });
   assert.deepEqual(await runtime.auth!.register({ email: "Ann@Example.com", password: PASSWORD }), { ok: true });
   assert.equal(calls, 1);
   await assert.rejects(() => email.send({ to: "ann@example.com", subject: "no", text: "no" }), (error: unknown) => error instanceof AppError && error.code === "email_not_configured");

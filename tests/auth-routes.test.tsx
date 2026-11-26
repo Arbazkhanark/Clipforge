@@ -36,7 +36,7 @@ let rt: Runtime; let storage: MemoryMediaStorage; const clock = { now: new Date(
 beforeEach(() => {
   clock.now = new Date("2026-06-01T12:00:00Z"); storage = new MemoryMediaStorage();
   const media: MediaServices = { storage, probe: null, maxUploadBytes: 1e7 };
-  rt = createLocalRuntime({ scrypt: FAST, now: () => clock.now, media: async () => media });
+  rt = createLocalRuntime({ scrypt: FAST, now: () => clock.now, media: async () => media, emailEnabled: true, passwordAuthEnabled: true });
   setRuntimeForTests(rt); setPageCookieReaderForTests(async () => null);
 });
 afterEach(() => { setRuntimeForTests(null); setPageCookieReaderForTests(null); });
@@ -73,10 +73,30 @@ test("DEFAULT MODE: no authentication exists - every auth route says so and sets
   }
 });
 
+test("Google-only mode rejects every password and email-auth endpoint before changing auth state", async () => {
+  const disabled = createLocalRuntime({ scrypt: FAST, now: () => clock.now });
+  const routes = [
+    [registerRoute, form("/api/auth/register", [["email", "new@example.test"], ["password", GOOD]])],
+    [loginRoute, form("/api/auth/login", [["email", "new@example.test"], ["password", GOOD]])],
+    [verifyEmailRoute, form("/api/auth/verify-email", [["token", "v".repeat(32)]])],
+    [forgotPasswordRoute, form("/api/auth/forgot-password", [["email", "new@example.test"]])],
+    [resetPasswordRoute, form("/api/auth/reset-password", [["token", "r".repeat(32)], ["password", GOOD]])],
+  ] as const;
+  for (const [route, request] of routes) {
+    const response = await route(() => disabled)(request);
+    assert.equal(response.status, 303);
+    assert.match(where(response), /error=password_auth_disabled$/);
+    assert.equal(response.headers.get("set-cookie"), null);
+  }
+  assert.deepEqual(await disabled.auth!.register({ email: "new@example.test", password: GOOD }), { ok: false, problems: ["Email and password authentication is disabled."] });
+  assert.deepEqual(await disabled.auth!.login({ email: "new@example.test", password: GOOD }), { ok: false, code: "password_auth_disabled" });
+  assert.equal(disabled.outbox?.messages.length, 0);
+});
+
 test("REGISTER: same answer whether or not the email exists; weak passwords and bad emails are refused; nothing created for bad input", async () => {
-  const first = await post.register("Ann@Example.com"); assert.equal(where(first), "/login?notice=registered_no_email");
+  const first = await post.register("Ann@Example.com"); assert.equal(where(first), "/login?notice=registered");
   assert.equal(rt.outbox!.messages.length, 1); assert.match(rt.outbox!.messages[0]!.text, /\/verify-email\?token=/);
-  const again = await post.register("ann@example.com", "another good password"); assert.equal(where(again), "/login?notice=registered_no_email"); assert.equal(rt.outbox!.messages.length, 1);
+  const again = await post.register("ann@example.com", "another good password"); assert.equal(where(again), "/login?notice=registered"); assert.equal(rt.outbox!.messages.length, 1);
   assert.equal(where(await post.register("bob@example.com", "short")), "/register?error=weak_password");
   assert.equal(where(await post.register("not-an-email")), "/register?error=invalid_email");
   assert.equal(rt.outbox!.messages.length, 1);
@@ -197,8 +217,8 @@ test("LOGOUT ends the session everywhere that cookie is used and clears it", asy
 test("PASSWORD RESET: generic answers, link only shows a form, a typo does not burn the link, success ends ALL sessions", async () => {
   const ann = await signUp("ann@example.com"); const ann2 = (await post.login("ann@example.com")).headers.get("set-cookie")!.split(";")[0]!;
   const before = rt.outbox!.messages.length;
-  assert.equal(where(await post.forgot("ghost@example.com")), "/forgot-password?notice=reset_unavailable"); assert.equal(rt.outbox!.messages.length, before);
-  assert.equal(where(await post.forgot("ann@example.com")), "/forgot-password?notice=reset_unavailable"); assert.equal(rt.outbox!.messages.length, before + 1);
+  assert.equal(where(await post.forgot("ghost@example.com")), "/forgot-password?notice=reset_email_sent"); assert.equal(rt.outbox!.messages.length, before);
+  assert.equal(where(await post.forgot("ann@example.com")), "/forgot-password?notice=reset_email_sent"); assert.equal(rt.outbox!.messages.length, before + 1);
   const token = lastToken();
   assert.ok(html(await ResetPasswordPage({ searchParams: Promise.resolve({ token }) })).includes('action="/api/auth/reset-password"'));
   const typo = await post.reset(token, "short"); assert.equal(where(typo), `/reset-password?error=weak_password&token=${token}`);
@@ -236,12 +256,22 @@ test("REDIRECTS and messages are fixed: user input never appears in a Location h
   assert.equal(parseFlash({ error: "invalid_credentials" })?.message, "Email or password is not correct.");
 });
 
-test("LOCAL MODE screens: forms are enabled and labelled; the dev outbox exists only in local mode and never in production", async () => {
-  for (const Page of [LoginPage, RegisterPage]) { const out = html(await Page({})); assert.ok(out.includes("Local development mode")); assert.ok(!/<button type="submit" disabled/.test(out)); assert.ok(out.includes('action="/api/auth/')); }
-  assert.ok(html(await RegisterPage({})).includes("minLength"));
-  await post.register("ann@example.com");
-  assert.throws(() => DevOutboxPage());
-  setRuntimeForTests({ ...rt, mode: "demo", outbox: undefined }); assert.throws(() => DevOutboxPage());
+test("LOCAL MODE screens: forms require both explicit email/password flags; the dev outbox is local only", async () => {
+  const previous = globalThis as { __clipforgeLocalRuntime?: Runtime };
+  delete previous.__clipforgeLocalRuntime;
+  try {
+    const local = getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "development", CLIPFORGE_EMAIL_ENABLED: "true", CLIPFORGE_PASSWORD_AUTH_ENABLED: "true" });
+    assert.equal(local.passwordAuthEnabled, true);
+    setRuntimeForTests(local);
+    for (const Page of [LoginPage, RegisterPage]) { const out = html(await Page({})); assert.ok(out.includes("Local development mode")); assert.ok(!/<button type="submit" disabled/.test(out)); assert.ok(out.includes('action="/api/auth/')); }
+    assert.ok(html(await RegisterPage({})).includes("minLength"));
+    await post.register("ann@example.com");
+    assert.throws(() => DevOutboxPage());
+    setRuntimeForTests({ ...rt, mode: "demo", outbox: undefined }); assert.throws(() => DevOutboxPage());
+  } finally {
+    setRuntimeForTests(null);
+    delete previous.__clipforgeLocalRuntime;
+  }
 });
 
 test("getRuntime(): local mode turns on ONLY with the explicit flag, and never in production", async () => {
@@ -250,7 +280,7 @@ test("getRuntime(): local mode turns on ONLY with the explicit flag, and never i
   try {
     assert.equal(getRuntime({}).mode, "unconfigured");
     const local = getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "development" });
-    assert.equal(local.mode, "local"); assert.ok(local.auth);
+    assert.equal(local.mode, "local"); assert.ok(local.auth); assert.equal(local.passwordAuthEnabled, false);
     assert.equal(getRuntime({ CLIPFORGE_LOCAL_AUTH: "true", NODE_ENV: "production", EMAIL_PROVIDER: "ses", AWS_REGION: "ap-southeast-2", EMAIL_FROM: "clipforge@example.test" }).mode, "unconfigured");
   } finally { delete holder.__clipforgeLocalRuntime; }
 });

@@ -28,13 +28,14 @@ function respond(location: string, extraHeaders: Record<string, string> = {}): R
 const withToken = (location: string, token: string | null): string => (token && TOKEN_PATTERN.test(token) ? `${location}&token=${token}` : location);
 const withCustomerReturnPath = (location: string, returnTo: string): string => returnTo === "/dashboard" ? location : `${location}&returnTo=${encodeURIComponent(returnTo)}`;
 
-async function authRoute(request: Request, runtime: RuntimeProvider, work: (auth: NonNullable<Runtime["auth"]>, fields: FormFields, rt: Runtime) => Promise<Response>, failurePath: string): Promise<Response> {
+async function authRoute(request: Request, runtime: RuntimeProvider, work: (auth: NonNullable<Runtime["auth"]>, fields: FormFields, rt: Runtime) => Promise<Response>, failurePath: string, passwordAuthFlow = false): Promise<Response> {
   if (checkSameOrigin(request)) return new Response("Cross-site requests are not allowed.", { status: 403, headers: { "Cache-Control": "no-store" } });
   const rt = runtime();
   if (!rt.auth) {
     const code: FlashErrorCode = rt.mode === "unconfigured" && process.env["NODE_ENV"] === "production" ? "database_unavailable" : "auth_not_available";
     return respond(buildFlashLocation(failurePath, "error", code));
   }
+  if (passwordAuthFlow && rt.passwordAuthEnabled !== true) return respond(buildFlashLocation(failurePath, "error", "password_auth_disabled"));
   try { return await work(rt.auth, await readUrlEncoded(request), rt); }
   catch (error) {
     const code: FlashErrorCode = error instanceof AppError && error.code === "database_unavailable" ? "database_unavailable"
@@ -48,9 +49,9 @@ export const registerRoute = (runtime: RuntimeProvider = getRuntime) => (request
     const returnTo = safeCustomerReturnPath(f.get("returnTo"));
     const result = await auth.register({ email: f.get("email"), password: f.get("password"), name: f.get("name") });
     if (!result.ok) { const code: FlashErrorCode = result.problems.some((p) => /email/i.test(p) && /valid/i.test(p)) ? "invalid_email" : "weak_password"; return respond(withCustomerReturnPath(buildFlashLocation("/register", "error", code), returnTo)); }
-    const notice = rt.emailDelivery === "ses" || rt.emailDelivery === "nodemailer" ? "registered" : "registered_no_email";
+    const notice = rt.passwordAuthEnabled === true ? "registered" : "registered_no_email";
     return respond(withCustomerReturnPath(buildFlashLocation("/login", "notice", notice), returnTo));   // the same answer whether or not the email already existed
-  }, "/register");
+  }, "/register", true);
 
 export const loginRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
   authRoute(request, runtime, async (auth, f, rt) => {
@@ -58,7 +59,7 @@ export const loginRoute = (runtime: RuntimeProvider = getRuntime) => (request: R
     const result = await auth.login({ email: f.get("email"), password: f.get("password"), ip: clientIpForRateLimit(request) });
     if (!result.ok) return respond(withCustomerReturnPath(buildFlashLocation("/login", "error", result.code), returnTo));
     return respond(returnTo, { "Set-Cookie": buildSessionCookie(result.sessionToken, result.expiresAt, rt.now(), useSecureCookies(request)) });
-  }, "/login");
+  }, "/login", true);
 
 function isDevelopmentLoopbackAlias(request: Request, origin: URL, requestUrl: URL): boolean {
   if (process.env["NODE_ENV"] === "production" || origin.protocol !== requestUrl.protocol || origin.port !== requestUrl.port) return false;
@@ -101,7 +102,7 @@ export const adminLoginRoute = (runtime: RuntimeProvider = getRuntime) => async 
   }
 
   const rt = runtime();
-  if (!rt.auth) return failure();
+  if (!rt.auth || rt.passwordAuthEnabled !== true) return failure();
   let temporarySessionToken: string | null = null;
   try {
     const fields = await readUrlEncoded(request);
@@ -143,10 +144,10 @@ export const verifyEmailRoute = (runtime: RuntimeProvider = getRuntime) => (requ
   authRoute(request, runtime, async (auth, f) => {
     const result = await auth.verifyEmail(f.get("token"));
     return respond(result.ok ? buildFlashLocation("/login", "notice", "verified") : buildFlashLocation("/login", "error", "invalid_token"));
-  }, "/login");
+  }, "/login", true);
 
 export const forgotPasswordRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
-  authRoute(request, runtime, async (auth, f, rt) => { await auth.requestPasswordReset(f.get("email")); return respond(buildFlashLocation("/forgot-password", "notice", rt.emailDelivery === "ses" || rt.emailDelivery === "nodemailer" ? "reset_email_sent" : "reset_unavailable")); }, "/forgot-password");
+  authRoute(request, runtime, async (auth, f, rt) => { await auth.requestPasswordReset(f.get("email")); return respond(buildFlashLocation("/forgot-password", "notice", rt.passwordAuthEnabled === true ? "reset_email_sent" : "reset_unavailable")); }, "/forgot-password", true);
 
 export const resetPasswordRoute = (runtime: RuntimeProvider = getRuntime) => (request: Request): Promise<Response> =>
   authRoute(request, runtime, async (auth, f) => {
@@ -155,4 +156,4 @@ export const resetPasswordRoute = (runtime: RuntimeProvider = getRuntime) => (re
     if (result.ok) return respond(buildFlashLocation("/login", "notice", "password_changed"), { "Set-Cookie": buildClearedSessionCookie(useSecureCookies(request)) });
     const invalidLink = result.problems.some((p) => /not valid or has expired/.test(p));
     return respond(invalidLink ? buildFlashLocation("/login", "error", "invalid_token") : withToken(buildFlashLocation("/reset-password", "error", "weak_password"), token));
-  }, "/reset-password");
+  }, "/reset-password", true);

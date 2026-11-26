@@ -36,7 +36,7 @@ async function fixture(role: "user" | "admin" = "user") {
     config: { ...DEFAULT_AUTH_CONFIG("http://localhost:3000"), requireVerifiedEmail: false, scrypt: FAST_SCRYPT },
   });
   const runtime: Runtime = {
-    mode: "local", repo: new MemoryRepository(), auth,
+    mode: "local", repo: new MemoryRepository(), auth, passwordAuthEnabled: true,
     currentUserId: async () => null,
     currentPrincipal: async (request) => auth.getSessionPrincipal(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
     newId: () => `runtime-${++serial}`, now: () => NOW,
@@ -73,6 +73,15 @@ test("admin login issues a secure session only after persisted admin role verifi
   const token = readSessionToken(cookie);
   assert.equal((await auth.getSessionPrincipal(token))?.role, "admin");
   assert.equal(response.headers.get("cache-control"), "no-store");
+});
+
+test("admin password endpoint is unavailable when Google-only mode is active", async () => {
+  const { runtime } = await fixture("admin");
+  const disabled = { ...runtime, passwordAuthEnabled: false };
+  const response = await adminLoginRoute(() => disabled)(postLogin({ email: "admin@example.test", password: PASSWORD }));
+  assert.equal(response.status, 303);
+  assert.match(location(response) ?? "", /admin_login_failed$/);
+  assert.equal(response.headers.get("set-cookie"), null);
 });
 
 test("ordinary-user credentials and invalid credentials have identical generic responses and no session cookie", async () => {
@@ -229,14 +238,15 @@ test("admin routes redirect anonymous visitors to the private login and conceal 
 
 test("admin login page is separate, contains no public login links, and admin metadata disables indexing", async () => {
   const { runtime } = await fixture("user");
-  setRuntimeForTests(runtime);
+  setRuntimeForTests({ ...runtime, passwordAuthEnabled: false });
   const page = await AdminLoginPage({ searchParams: Promise.resolve({}) });
   const html = renderToStaticMarkup(page);
-  assert.match(html, /action="\/api\/admin\/login"/);
-  assert.doesNotMatch(html, /href="\/(login|register)"/);
+  assert.match(html, /href="\/login"/);
+  assert.doesNotMatch(html, /action="\/api\/admin\/login"/);
+  assert.doesNotMatch(html, /type="password"/);
   assert.deepEqual(adminMetadata.robots, { index: false, follow: false });
   assert.deepEqual(loginMetadata.robots, { index: false, follow: false });
-  assert.match(renderToStaticMarkup(<AdminLoginForm available={true} flash={null} />), /Administrator sign in/);
+  assert.match(renderToStaticMarkup(<AdminLoginForm available={true} passwordAuthEnabled={true} flash={null} />), /Administrator sign in/);
   assert.match(renderToStaticMarkup(<AdminLoginForm available={true} flash={null} />), /class="admin-login-card"/);
   assert.equal(shouldShowPublicSiteChrome("/admin/login"), false);
   assert.equal(shouldShowPublicSiteChrome("/admin/users"), false);

@@ -25,6 +25,7 @@ export default async function LoginPage(props: {
       available={runtime.auth !== undefined}
       persistence={runtime.mode === "database" ? "database" : "memory"}
       emailDelivery={runtime.emailDelivery}
+      passwordAuthEnabled={runtime.passwordAuthEnabled === true}
       googleConfigured={readGoogleOAuthConfig() !== null}
       returnTo={safeCustomerReturnPath(search?.returnTo)}
       flash={parseFlash(search)}

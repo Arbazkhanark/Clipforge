@@ -14,5 +14,5 @@ export default async function VerifyEmailPage(props: { searchParams?: Promise<Se
   const search = await props.searchParams;
   const token = typeof search?.["token"] === "string" && /^[A-Za-z0-9_-]{20,100}$/.test(search["token"]) ? search["token"] : null;
   const runtime = getRuntime();
-  return <AuthForm mode="verify" demoMode={false} available={runtime.auth !== undefined && token !== null} persistence={runtime.mode === "database" ? "database" : "memory"} emailDelivery={runtime.emailDelivery} token={token} flash={parseFlash(search)} />;
+  return <AuthForm mode="verify" demoMode={false} available={runtime.auth !== undefined && token !== null} passwordAuthEnabled={runtime.passwordAuthEnabled === true} persistence={runtime.mode === "database" ? "database" : "memory"} emailDelivery={runtime.emailDelivery} token={token} flash={parseFlash(search)} />;
 }

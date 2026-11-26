@@ -1,6 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
 import { createRequire } from "node:module";
-import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { AppError } from "../errors.ts";
 import type { Environment } from "../environment.ts";
 
@@ -25,6 +24,42 @@ export interface EmailSetup {
   requireVerifiedEmail: boolean;
   configurationError?: EmailConfigurationError;
   outbox?: MemoryEmailOutbox;
+}
+
+/**
+ * Runtime-safe provider wrapper. Merely constructing a runtime must not validate SES
+ * configuration or initialize its credential chain; that work starts on the first
+ * explicitly enabled email operation.
+ */
+export function createLazyEmailSetup(env: Environment, enabled: boolean, dependencies: EmailSetupDependencies = {}): EmailSetup {
+  if (enabled && isEnabledFakeProvider(env)) return fakeEmailSetup();
+  let setup: EmailSetup | undefined;
+  const sender: EmailSender = {
+    async send(message) {
+      if (!enabled) {
+        await new UnavailableEmailSender().send(message);
+        return;
+      }
+      try {
+        setup ??= createEmailSetup(env, dependencies);
+        await setup.sender.send(message);
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        throw new AppError(503, "email_configuration_invalid", "Email provider configuration is invalid. No message was sent.");
+      }
+    },
+  };
+  return { sender, delivery: "unavailable", provider: "unavailable", requireVerifiedEmail: enabled };
+}
+
+function isEnabledFakeProvider(env: Environment): boolean {
+  const deployment = emailDeployment(env);
+  const primary = normalizeEmailProvider(env["EMAIL_PROVIDER"]);
+  const legacy = normalizeEmailProvider(env["CLIPFORGE_EMAIL_PROVIDER"]);
+  if (primary.invalid || legacy.invalid || (primary.value && legacy.value && primary.value !== legacy.value)) return false;
+  const choice = primary.value ?? legacy.value;
+  const fakeAllowed = deployment === "test" || deployment === "development" || deployment === "staging" || deployment === "preview";
+  return fakeAllowed && (choice === "fake" || (!choice && (deployment === "test" || deployment === "staging" || deployment === "preview")));
 }
 
 export interface SmtpTransport {
@@ -143,7 +178,10 @@ function createSesSetup(env: Environment, dependencies: EmailSetupDependencies):
   }
   const credentials = accessKey
     ? async () => ({ accessKeyId: accessKey, secretAccessKey: secretKey, ...(sessionToken ? { sessionToken } : {}) })
-    : dependencies.resolveAwsCredentials ?? defaultProvider();
+    : dependencies.resolveAwsCredentials ?? (async () => {
+      const { defaultProvider } = await import("@aws-sdk/credential-provider-node");
+      return defaultProvider()();
+    });
   return { sender: new SesEmailSender(region, credentials, from, dependencies.fetch ?? fetch, dependencies.now ?? (() => new Date())), delivery: "ses", provider: "ses", requireVerifiedEmail: true };
 }
 

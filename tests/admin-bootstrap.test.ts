@@ -16,7 +16,7 @@ test("Admin login refuses an unverified Admin even when ordinary login verificat
   const unverifiedPassword = await hashPassword(password, { logN: 10, r: 8, p: 1 });
   await repo.createUser({ id: "unverified-admin", email: "admin@example.test", emailVerifiedAt: null, passwordHash: unverifiedPassword, name: null, role: "admin", createdAt: now });
   const auth = new AuthService({ repo, email: new MemoryEmailOutbox(), limiter: new InMemoryRateLimiter(), now: () => now, newId: () => "session-id", config: { ...DEFAULT_AUTH_CONFIG("http://localhost:3000"), scrypt: { logN: 10, r: 8, p: 1 }, requireVerifiedEmail: false } });
-  const runtime = { ...createLocalRuntime(), auth };
+  const runtime = { ...createLocalRuntime({ emailEnabled: true, passwordAuthEnabled: true }), auth, passwordAuthEnabled: true };
   const body = new URLSearchParams({ email: "admin@example.test", password });
   const response = await adminLoginRoute(() => runtime)(new Request("http://localhost:3000/api/admin/login", { method: "POST", headers: { host: "localhost:3000", origin: "http://localhost:3000", "content-type": "application/x-www-form-urlencoded" }, body }));
   assert.equal(response.status, 303);
@@ -25,7 +25,7 @@ test("Admin login refuses an unverified Admin even when ordinary login verificat
 });
 
 test("normal signup ignores role: admin", async () => {
-  const runtime = createLocalRuntime({ scrypt: { logN: 10, r: 8, p: 1 } });
+  const runtime = createLocalRuntime({ scrypt: { logN: 10, r: 8, p: 1 }, emailEnabled: true, passwordAuthEnabled: true });
   const authRepo = new MemoryAuthRepository();
   const auth = new AuthService({ repo: authRepo, email: runtime.outbox!, limiter: new InMemoryRateLimiter(), now: () => now, newId: () => randomBytes(12).toString("hex"), config: { ...DEFAULT_AUTH_CONFIG("http://localhost:3000"), scrypt: { logN: 10, r: 8, p: 1 }, requireVerifiedEmail: true } });
   const signupRuntime = { ...runtime, auth };

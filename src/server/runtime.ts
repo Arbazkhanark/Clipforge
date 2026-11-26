@@ -20,7 +20,7 @@ import type { Repository } from "./repository.ts";
 import { DEMO_USER_ID, seedDemoData } from "./demo-data.ts";
 import { AuthService, DEFAULT_AUTH_CONFIG } from "./auth/auth-service.ts";
 import { MemoryAuthRepository } from "./auth/memory-auth-repository.ts";
-import { MemoryEmailOutbox, createEmailSetup } from "./auth/email.ts";
+import { MemoryEmailOutbox, UnavailableEmailSender, createEmailSetup, createLazyEmailSetup } from "./auth/email.ts";
 import { createRenderScheduler, type RenderScheduler } from "./render/export-service.ts";
 import type { AuthRepository } from "./auth/auth-repository.ts";
 import type { UserRole } from "./auth/auth-repository.ts";
@@ -70,6 +70,8 @@ export interface Runtime {
   outbox?: MemoryEmailOutbox;
   /** "unavailable" means no email is sent and none is pretended. */
   emailDelivery?: EmailDelivery;
+  /** Email/password flows are off unless both explicit feature flags are enabled. */
+  passwordAuthEnabled?: boolean;
   /** In-process execution queue. Render job records are persisted by the repository in database mode. */
   renders?: RenderScheduler;
   /** One-use OAuth state backed by AuthToken (database mode) or memory (local mode). */
@@ -242,7 +244,7 @@ function guardAuthRepository(load: () => Promise<DatabaseServices>): AuthReposit
  * Normal database mode uses the explicitly configured S3 provider. An explicit local-disk provider is limited to
  * non-production development/test use. A database error stays an error; missing S3 config never falls back to disk or memory.
  */
-export function createDatabaseRuntime(connectionString: string, connect: DatabaseConnector = createPrismaClient, opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; mediaDir?: string | null; storageEnvironment?: Environment; email?: ReturnType<typeof createEmailSetup> } = {}): Runtime {
+export function createDatabaseRuntime(connectionString: string, connect: DatabaseConnector = createPrismaClient, opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; mediaDir?: string | null; storageEnvironment?: Environment; email?: ReturnType<typeof createEmailSetup>; emailEnabled?: boolean; passwordAuthEnabled?: boolean } = {}): Runtime {
   const now = opts.now ?? (() => new Date());
   let ready: Promise<DatabaseServices> | null = null;
   let dbClient: PrismaClientLike | null = null;
@@ -277,8 +279,11 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
     return ready;
   };
   const authRepo: AuthRepository = guardAuthRepository(load);
-  const email = opts.email ?? createEmailSetup();
-  const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? process.env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000"), requireVerifiedEmail: email.requireVerifiedEmail, ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };
+  const emailEnvironment = opts.storageEnvironment ?? process.env;
+  const emailEnabled = opts.emailEnabled === true;
+  const passwordAuthEnabled = emailEnabled && opts.passwordAuthEnabled === true;
+  const email = opts.email ?? createLazyEmailSetup(emailEnvironment, emailEnabled);
+  const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? emailEnvironment["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000"), requireVerifiedEmail: email.requireVerifiedEmail, passwordAuthEnabled, ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };
   const auth = new AuthService({ repo: authRepo, email: email.sender, limiter: new InMemoryRateLimiter(), now, newId: () => randomUUID(), config });
   const instagramOAuthStates = new AuthTokenInstagramOAuthStateStore(authRepo, () => randomUUID());
   const content = guardRepository(delegateRepository(async () => (await load()).content));
@@ -291,7 +296,7 @@ export function createDatabaseRuntime(connectionString: string, connect: Databas
   let openedMedia: Promise<MediaServices> | null = null;
   const loadMedia = () => (openedMedia ??= createMedia());
   return {
-    mode: "database", repo: content, auth, outbox: email.outbox, emailDelivery: email.delivery, emailSender: email.sender, ...(email.configurationError ? { emailConfigurationError: email.configurationError } : {}), renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => guardAdminData((await load()).adminData),
+    mode: "database", repo: content, auth, passwordAuthEnabled, outbox: email.outbox, emailDelivery: email.delivery, emailSender: email.sender, ...(email.configurationError ? { emailConfigurationError: email.configurationError } : {}), renders: createRenderScheduler(), instagramOAuthStates, ...(publishingMediaAccess ? { publishingMediaAccess } : {}), adminData: async () => guardAdminData((await load()).adminData),
     now, newId: () => randomUUID(),
     // A supplied mediaDir is an explicit legacy test/development fallback. Normal app runtime
     // always uses the validated provider selected in the environment; it never falls back silently.
@@ -383,13 +388,15 @@ function demoMediaServices(): Promise<MediaServices> {
  * server MEMORY and disappears on restart, and "emails" go to an in-memory outbox. Data starts empty.
  * It exists so the real auth flow can be developed and tested without a database. It is not a production mode.
  */
-export function createLocalRuntime(opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; media?: () => Promise<MediaServices | null> } = {}): Runtime {
+export function createLocalRuntime(opts: { baseUrl?: string; scrypt?: ScryptParams; now?: () => Date; media?: () => Promise<MediaServices | null>; emailEnabled?: boolean; passwordAuthEnabled?: boolean } = {}): Runtime {
   const repo = new MemoryRepository(); const outbox = new MemoryEmailOutbox(); const now = opts.now ?? (() => new Date());
   const authRepository = new MemoryAuthRepository();
-  const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? "http://localhost:3000"), ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };
-  const auth = new AuthService({ repo: authRepository, email: outbox, limiter: new InMemoryRateLimiter(), now, newId: () => randomUUID(), config });
+  const emailEnabled = opts.emailEnabled === true;
+  const passwordAuthEnabled = emailEnabled && opts.passwordAuthEnabled === true;
+  const config = { ...DEFAULT_AUTH_CONFIG(opts.baseUrl ?? "http://localhost:3000"), requireVerifiedEmail: emailEnabled, passwordAuthEnabled, ...(opts.scrypt ? { scrypt: opts.scrypt } : {}) };
+  const auth = new AuthService({ repo: authRepository, email: emailEnabled ? outbox : new UnavailableEmailSender(), limiter: new InMemoryRateLimiter(), now, newId: () => randomUUID(), config });
   return {
-    mode: "local", repo, auth, outbox, emailDelivery: "outbox", renders: createRenderScheduler(), instagramOAuthStates: new AuthTokenInstagramOAuthStateStore(authRepository, () => randomUUID()), now, newId: () => randomUUID(), media: opts.media ?? demoMediaServices,
+    mode: "local", repo, auth, passwordAuthEnabled, outbox, emailDelivery: emailEnabled ? "outbox" : "unavailable", renders: createRenderScheduler(), instagramOAuthStates: new AuthTokenInstagramOAuthStateStore(authRepository, () => randomUUID()), now, newId: () => randomUUID(), media: opts.media ?? demoMediaServices,
     // The cookie comes from the request when we have one (API routes); pages read it from Next.js's request headers.
     currentUserId: async (request) => auth.getSessionUserId(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
     currentPrincipal: async (request) => auth.getSessionPrincipal(readSessionToken(request ? request.headers.get("cookie") : await readPageCookieHeader())),
@@ -399,19 +406,17 @@ export function createLocalRuntime(opts: { baseUrl?: string; scrypt?: ScryptPara
 export function getRuntime(env: Environment = process.env): Runtime {
   assertWebDatabaseIdentity(env);
   if (testOverride) return testOverride;
-  const deployment = (env["CLIPFORGE_DEPLOYMENT_ENV"] ?? env["NODE_ENV"] ?? "").trim().toLowerCase();
-  const strictEmailSetup = env["NODE_ENV"] === "production" || deployment === "staging" || deployment === "production" || deployment === "preview"
-    ? createEmailSetup(env)
-    : undefined;
+  const emailEnabled = env["CLIPFORGE_EMAIL_ENABLED"] === "true";
+  const passwordAuthEnabled = emailEnabled && env["CLIPFORGE_PASSWORD_AUTH_ENABLED"] === "true";
   if (env["CLIPFORGE_LOCAL_AUTH"] === "true" && env["NODE_ENV"] !== "production") {
     const holder = globalThis as GlobalWithDemo;
-    holder.__clipforgeLocalRuntime ??= createLocalRuntime({ baseUrl: env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000" });
+    holder.__clipforgeLocalRuntime ??= createLocalRuntime({ baseUrl: env["CLIPFORGE_BASE_URL"] ?? "http://localhost:3000", emailEnabled, passwordAuthEnabled });
     return holder.__clipforgeLocalRuntime;
   }
   const databaseUrl = env["DATABASE_URL"]?.trim();
   if (databaseUrl) {
     const holder = globalThis as GlobalWithDemo;
-    holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient, { storageEnvironment: env, email: strictEmailSetup ?? createEmailSetup(env) });
+    holder.__clipforgeDatabaseRuntime ??= createDatabaseRuntime(databaseUrl, databaseConnectorForTests ?? createPrismaClient, { storageEnvironment: env, emailEnabled, passwordAuthEnabled });
     return holder.__clipforgeDatabaseRuntime;
   }
   if (env["NODE_ENV"] === "production") {
@@ -426,9 +431,9 @@ export function getRuntime(env: Environment = process.env): Runtime {
     const holder = globalThis as GlobalWithDemo;
     if (!holder.__clipforgeDemoRepo) { holder.__clipforgeDemoRepo = new MemoryRepository(); seedDemoData(holder.__clipforgeDemoRepo, new Date()); }
     let counter = 0;
-    return { mode: "demo", repo: holder.__clipforgeDemoRepo, currentUserId: async () => DEMO_USER_ID, currentPrincipal: async () => ({ userId: DEMO_USER_ID, role: "user" }), media: demoMediaServices, renders: holder.__clipforgeDemoRenders ??= createRenderScheduler(), newId: () => `demo-${Date.now().toString(36)}-${++counter}`, now: () => new Date() };
+    return { mode: "demo", repo: holder.__clipforgeDemoRepo, passwordAuthEnabled: false, currentUserId: async () => DEMO_USER_ID, currentPrincipal: async () => ({ userId: DEMO_USER_ID, role: "user" }), media: demoMediaServices, renders: holder.__clipforgeDemoRenders ??= createRenderScheduler(), newId: () => `demo-${Date.now().toString(36)}-${++counter}`, now: () => new Date() };
   }
-  return { mode: "unconfigured", repo: unavailableRepository(), currentUserId: async () => null, currentPrincipal: async () => null, newId: () => { throw new AppError(503, "not_configured", "Not configured."); }, now: () => new Date() };
+  return { mode: "unconfigured", repo: unavailableRepository(), passwordAuthEnabled: false, currentUserId: async () => null, currentPrincipal: async () => null, newId: () => { throw new AppError(503, "not_configured", "Not configured."); }, now: () => new Date() };
 }
 
 export async function buildContext(runtime: Runtime = getRuntime(), request?: Request): Promise<RequestContext> {

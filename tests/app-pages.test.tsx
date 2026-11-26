@@ -261,17 +261,15 @@ test("CLIPFORGE_DEMO_MODE=true switches to sample data and shows the demo banner
   });
 });
 
-test("login and register: real fields and labels, but submit is disabled and says why; no fake success", async () => {
+test("login and register: email/password controls are absent when auth is unconfigured", async () => {
   await withoutDatabaseEnv(async () => {
     setRuntimeForTests(null); // default mode: not demo, no authentication
     for (const [Page, heading] of [[LoginPage, "Sign in"], [RegisterPage, "Create your account"]] as const) {
       const out = html(await Page({}));
-      assert.ok(out.includes(heading)); assert.ok(out.includes("not available yet")); assert.ok(/<button type="submit" disabled/.test(out));
-      assert.ok(out.includes('type="email"') && out.includes('type="password"') && out.includes("required"));
-      assert.ok(/<label>/.test(out)); assert.ok(out.includes('action="#"')); assert.ok(!out.includes("/api/auth/"));
+      assert.ok(out.includes(heading)); assert.ok(out.includes("not available yet"));
+      assert.ok(out.includes("Email/password sign-in, registration, verification and password reset are temporarily disabled."));
+      assert.doesNotMatch(out, /type="email"|type="password"|action="\/api\/auth\//);
     }
-    const register = html(await RegisterPage({}));
-    assert.ok(register.includes('autoComplete="new-password"') || register.includes('autocomplete="new-password"'));
     assert.ok(!html(await LoginPage({})).includes("Demo mode is on"));
   });
 });

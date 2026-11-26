@@ -22,9 +22,10 @@ function GoogleMark() {
 }
 
 /** Account forms submit to the existing server routes; this component changes presentation only. */
-export function AuthForm({ mode, demoMode, available = false, flash = null, token = null, persistence = "memory", emailDelivery, googleConfigured = false, returnTo = "/dashboard" }: { mode: Mode; demoMode: boolean; available?: boolean; flash?: Flash | null; token?: string | null; persistence?: "memory" | "database"; emailDelivery?: EmailDelivery; googleConfigured?: boolean; returnTo?: string }) {
+export function AuthForm({ mode, demoMode, available = false, flash = null, token = null, persistence = "memory", emailDelivery, googleConfigured = false, passwordAuthEnabled = false, returnTo = "/dashboard" }: { mode: Mode; demoMode: boolean; available?: boolean; flash?: Flash | null; token?: string | null; persistence?: "memory" | "database"; emailDelivery?: EmailDelivery; googleConfigured?: boolean; passwordAuthEnabled?: boolean; returnTo?: string }) {
   const isRegister = mode === "register";
   const isSignInOrRegister = mode === "login" || isRegister;
+  const showPasswordForm = passwordAuthEnabled;
   const needsEmail = mode === "login" || isRegister || mode === "forgot";
   const needsPassword = mode === "login" || isRegister || mode === "reset";
 
@@ -35,9 +36,9 @@ export function AuthForm({ mode, demoMode, available = false, flash = null, toke
       {isSignInOrRegister && <p className="auth-panel-description">{isRegister ? "Set up your ClipForge workspace and bring your content workflow together." : "Sign in to pick up where your content workflow left off."}</p>}
       <FlashMessage flash={flash} variant={isSignInOrRegister ? "toast" : "default"} />
 
-      {!available && <p role="note" className="notice">Accounts and sign-in are not available yet: there is no authentication or database in this build. The form below cannot be submitted.</p>}
+      {!available && <p role="note" className="notice">Accounts and sign-in are not available yet: there is no authentication or database in this build.</p>}
       {available && persistence === "memory" && <aside role="note" className="auth-storage-note"><strong>Local development mode</strong><span>Accounts stay in server memory and disappear when the server restarts. Email verification and password-reset messages are unavailable.</span></aside>}
-      {available && persistence === "database" && <aside role="note" className="auth-storage-note"><strong>Account storage</strong><span>This deployment stores accounts and sessions in PostgreSQL. If the database reports an error, the operation was not confirmed as saved. {emailDelivery === "ses" || emailDelivery === "nodemailer" ? "Email confirmation and password-reset messages use the configured server-side provider." : "No email provider is connected, so confirmation and password-reset messages are not sent; new accounts remain unverified."}</span></aside>}
+      {available && persistence === "database" && <aside role="note" className="auth-storage-note"><strong>Account storage</strong><span>This deployment stores accounts and sessions in PostgreSQL. If the database reports an error, the operation was not confirmed as saved. {showPasswordForm ? emailDelivery === "ses" || emailDelivery === "nodemailer" || emailDelivery === "outbox" ? "Email confirmation and password-reset messages use the explicitly configured server-side provider." : "Email provider configuration is checked only when an email operation is requested." : "Email/password authentication and email delivery are disabled; existing account records are unchanged."}</span></aside>}
 
       {available && googleConfigured && isSignInOrRegister && (
         <form method="post" action="/api/auth/google/start" className="auth-google-form">
@@ -49,22 +50,22 @@ export function AuthForm({ mode, demoMode, available = false, flash = null, toke
       )}
       {available && !googleConfigured && isSignInOrRegister && <p role="note" className="muted auth-google-unavailable">Google sign-in is not configured for this deployment.</p>}
 
-      {available && googleConfigured && isSignInOrRegister && <div className="auth-divider" aria-hidden="true"><span>or continue with email</span></div>}
+      {available && googleConfigured && isSignInOrRegister && showPasswordForm && <div className="auth-divider" aria-hidden="true"><span>or continue with email</span></div>}
 
-      <form method="post" action={available ? ACTIONS[mode] : "#"} className="auth-fields" aria-describedby="auth-heading">
-        {mode === "verify" && <p>Press the button to confirm that this is your email address.</p>}
-        {(mode === "verify" || mode === "reset") && <input type="hidden" name="token" value={token ?? ""} />}
-        {isSignInOrRegister && <input type="hidden" name="returnTo" value={returnTo} />}
-        {isRegister && <div className="auth-field"><label><span>Name <small>Optional</small></span><input id="auth-name" type="text" name="name" autoComplete="name" maxLength={100} placeholder="Your name" /></label></div>}
-        {needsEmail && <div className="auth-field"><label><span>Email address</span><input id="auth-email" type="email" name="email" autoComplete="email" required placeholder="you@example.com" /></label></div>}
-        {needsPassword && <div className="auth-field"><label htmlFor="auth-password">{mode === "reset" ? "New password" : "Password"}</label><AuthPasswordField id="auth-password" name="password" autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={mode === "login" ? undefined : 10} required placeholder={mode === "login" ? "Enter your password" : "At least 10 characters"} /></div>}
-        {isRegister && <p className="auth-password-hint">Use 10–128 characters. Avoid common or highly repetitive passwords, and don’t use your email address.</p>}
-        {mode === "login" && available && <a className="auth-forgot-link" href="/forgot-password">Forgot your password?</a>}
-        <AuthSubmitButton available={available} label={BUTTONS[mode]} pendingLabel={PENDING_BUTTONS[mode]} />
-      </form>
+      {showPasswordForm ? <form method="post" action={available ? ACTIONS[mode] : "#"} className="auth-fields" aria-describedby="auth-heading">
+          {mode === "verify" && <p>Press the button to confirm that this is your email address.</p>}
+          {(mode === "verify" || mode === "reset") && <input type="hidden" name="token" value={token ?? ""} />}
+          {isSignInOrRegister && <input type="hidden" name="returnTo" value={returnTo} />}
+          {isRegister && <div className="auth-field"><label><span>Name <small>Optional</small></span><input id="auth-name" type="text" name="name" autoComplete="name" maxLength={100} placeholder="Your name" /></label></div>}
+          {needsEmail && <div className="auth-field"><label><span>Email address</span><input id="auth-email" type="email" name="email" autoComplete="email" required placeholder="you@example.com" /></label></div>}
+          {needsPassword && <div className="auth-field"><label htmlFor="auth-password">{mode === "reset" ? "New password" : "Password"}</label><AuthPasswordField id="auth-password" name="password" autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={mode === "login" ? undefined : 10} required placeholder={mode === "login" ? "Enter your password" : "At least 10 characters"} /></div>}
+          {isRegister && <p className="auth-password-hint">Use 10–128 characters. Avoid common or highly repetitive passwords, and don’t use your email address.</p>}
+          {mode === "login" && available && <a className="auth-forgot-link" href="/forgot-password">Forgot your password?</a>}
+          <AuthSubmitButton available={available} label={BUTTONS[mode]} pendingLabel={PENDING_BUTTONS[mode]} />
+        </form> : <p role="status" className="notice">Email/password sign-in, registration, verification and password reset are temporarily disabled. Use Google sign-in when it is configured. {mode !== "login" && mode !== "register" && <a href="/login">Go to sign-in</a>}</p>}
 
-      {mode === "login" && <p className="auth-switch-link">New to ClipForge? <a href={returnTo === "/dashboard" ? "/register" : `/register?returnTo=${encodeURIComponent(returnTo)}`}>Create an account</a></p>}
-      {isRegister && <p className="auth-switch-link">Already have an account? <a href={returnTo === "/dashboard" ? "/login" : `/login?returnTo=${encodeURIComponent(returnTo)}`}>Sign in</a></p>}
+      {showPasswordForm && mode === "login" && <p className="auth-switch-link">New to ClipForge? <a href={returnTo === "/dashboard" ? "/register" : `/register?returnTo=${encodeURIComponent(returnTo)}`}>Create an account</a></p>}
+      {showPasswordForm && isRegister && <p className="auth-switch-link">Already have an account? <a href={returnTo === "/dashboard" ? "/login" : `/login?returnTo=${encodeURIComponent(returnTo)}`}>Sign in</a></p>}
       {demoMode && <p role="note" className="notice">Demo mode is on: you are already using a sample user. <a href="/dashboard">Open the dashboard</a></p>}
     </>
   );

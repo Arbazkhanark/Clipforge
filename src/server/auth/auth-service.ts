@@ -24,10 +24,12 @@ export interface AuthConfig {
   touchEveryMs: number;
   /** Require a confirmation link when real delivery is configured; first-Admin activation always requires its own confirmation. */
   requireVerifiedEmail: boolean;
+  /** Runtime override used to keep password-based flows unavailable in Google-only mode. */
+  passwordAuthEnabled?: boolean;
 }
 export const DEFAULT_AUTH_CONFIG = (baseUrl: string): AuthConfig => ({
   baseUrl, scrypt: DEFAULT_SCRYPT_PARAMS, sessionAbsoluteMs: 30 * 86_400_000, sessionIdleMs: 7 * 86_400_000,
-  verificationTtlMs: 24 * 3_600_000, resetTtlMs: 3_600_000, touchEveryMs: 60_000, requireVerifiedEmail: true,
+  verificationTtlMs: 24 * 3_600_000, resetTtlMs: 3_600_000, touchEveryMs: 60_000, requireVerifiedEmail: true, passwordAuthEnabled: true,
 });
 
 export interface AuthDeps { repo: AuthRepository; email: EmailSender; limiter: RateLimiter; now: () => Date; newId: () => string; config: AuthConfig; }
@@ -35,7 +37,7 @@ export interface AuthDeps { repo: AuthRepository; email: EmailSender; limiter: R
 export type RegisterResult = { ok: true } | { ok: false; problems: string[] };
 export type LoginResult =
   | { ok: true; sessionToken: string; expiresAt: Date; userId: string }
-  | { ok: false; code: "invalid_credentials" | "email_not_verified" | "account_suspended" | "rate_limited"; retryAfterSeconds?: number };
+  | { ok: false; code: "invalid_credentials" | "email_not_verified" | "account_suspended" | "rate_limited" | "password_auth_disabled"; retryAfterSeconds?: number };
 
 /** Claims read from a verified Google ID token. No access token is included. */
 export interface GoogleProfile { sub: string; email: string; emailVerified: boolean; name: string | null; }
@@ -57,6 +59,7 @@ export class AuthService {
   /** Creates an unverified account and "sends" a verification email. An existing email gets the SAME success answer (no enumeration). */
   async register(input: { email: unknown; password: unknown; name?: unknown }): Promise<RegisterResult> {
     const { repo, config } = this.deps;
+    if (config.passwordAuthEnabled === false) return { ok: false, problems: ["Email and password authentication is disabled."] };
     const problems: string[] = [];
     const email = typeof input.email === "string" ? normaliseEmail(input.email) : "";
     if (!EMAIL_PATTERN.test(email) || email.length > 320) problems.push("Enter a valid email address.");
@@ -85,6 +88,7 @@ export class AuthService {
   }
 
   async verifyEmail(token: unknown): Promise<{ ok: boolean }> {
+    if (this.deps.config.passwordAuthEnabled === false) return { ok: false };
     if (typeof token !== "string" || token.length < 20 || token.length > 100) return { ok: false };
     const key = `verify:${hashToken(token)}`; const now = this.deps.now();
     if (!this.deps.limiter.check(key, now).allowed) return { ok: false };
@@ -97,6 +101,7 @@ export class AuthService {
 
   /** Always answers ok: never reveals whether an email is registered or already verified. */
   async resendVerification(emailInput: unknown): Promise<{ ok: true }> {
+    if (this.deps.config.passwordAuthEnabled === false) return { ok: true };
     const email = typeof emailInput === "string" ? normaliseEmail(emailInput) : "";
     const user = email ? await this.deps.repo.getUserByEmail(email) : null;
     if (user && !user.emailVerifiedAt) await this.issueToken(user.id, user.email, "email_verification");
@@ -104,6 +109,7 @@ export class AuthService {
   }
 
   async login(input: { email: unknown; password: unknown; ip?: string | null }): Promise<LoginResult> {
+    if (this.deps.config.passwordAuthEnabled === false) return { ok: false, code: "password_auth_disabled" };
     const { repo, limiter, config } = this.deps; const now = this.deps.now();
     const email = typeof input.email === "string" ? normaliseEmail(input.email) : "";
     const password = typeof input.password === "string" ? input.password : "";
@@ -223,6 +229,7 @@ export class AuthService {
 
   /** Always answers ok (no account enumeration). Only verified accounts get a reset email. Repeated requests are slowed down and still get the same answer. */
   async requestPasswordReset(emailInput: unknown): Promise<{ ok: true }> {
+    if (this.deps.config.passwordAuthEnabled === false) return { ok: true };
     const email = typeof emailInput === "string" ? normaliseEmail(emailInput) : "";
     const key = `reset:${hashToken(email || "blank")}`; const now = this.deps.now();
     if (!this.deps.limiter.check(key, now).allowed) return { ok: true };
@@ -234,6 +241,7 @@ export class AuthService {
 
   async resetPassword(token: unknown, newPassword: unknown): Promise<{ ok: true } | { ok: false; problems: string[] }> {
     const { repo, config } = this.deps;
+    if (config.passwordAuthEnabled === false) return { ok: false, problems: ["Email and password authentication is disabled."] };
     if (typeof token !== "string" || token.length < 20 || token.length > 100) return { ok: false, problems: ["This reset link is not valid or has expired."] };
     const password = typeof newPassword === "string" ? newPassword : "";
     // Validate the password BEFORE consuming the token, so a typo does not burn the link.

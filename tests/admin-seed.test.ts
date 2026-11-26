@@ -221,7 +221,7 @@ test("the provisioned verified Admin can sign in through the existing Admin logi
     newId: () => "session-id", now: () => new Date("2040-01-01T00:01:00.000Z"),
     config: { ...DEFAULT_AUTH_CONFIG("http://localhost:3000"), scrypt: { logN: 10, r: 8, p: 1 }, requireVerifiedEmail: true },
   });
-  const runtime = { ...createLocalRuntime(), auth };
+  const runtime = { ...createLocalRuntime({ emailEnabled: true, passwordAuthEnabled: true }), auth, passwordAuthEnabled: true };
   const response = await adminLoginRoute(() => runtime)(new Request("http://localhost:3000/api/admin/login", {
     method: "POST",
     headers: { host: "localhost:3000", origin: "http://localhost:3000", "content-type": "application/x-www-form-urlencoded" },

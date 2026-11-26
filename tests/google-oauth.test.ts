@@ -113,10 +113,10 @@ test("callback rejects cancelled consent, bad state, and an expired code without
   })(new Request(`http://localhost:3000/api/auth/google/callback?code=expired-code&state=${state}`, { headers: { cookie: jar } }));
   assert.equal(exchanged, 1);
   assert.match(expired.headers.get("location") ?? "", /error=google_expired_code/);
-  assert.deepEqual(await rt.auth!.login({ email: "ada@example.com", password: GOOD }), { ok: false, code: "invalid_credentials" });
+  assert.deepEqual(await rt.auth!.login({ email: "ada@example.com", password: GOOD }), { ok: false, code: "password_auth_disabled" });
 });
 
-test("callback creates one session, refuses a second identity, and keeps email/password login working", async () => {
+test("callback logs in and signs up using Google while password authentication stays disabled", async () => {
   const rt = runtime();
   const seen: string[] = [];
   const exchange = async (next: GoogleProfile) => googleCallbackRoute({
@@ -145,14 +145,11 @@ test("callback creates one session, refuses a second identity, and keeps email/p
 
   const password = await rt.auth!.login({ email: "ada@example.com", password: GOOD });
   assert.equal(password.ok, false);
-  if (!password.ok) assert.equal(password.code, "invalid_credentials");
+  if (!password.ok) assert.equal(password.code, "password_auth_disabled");
 
   const registered = await rt.auth!.register({ email: "pat@example.com", password: GOOD, name: "Pat" });
-  assert.equal(registered.ok, true);
-  const token = new URL((rt.outbox as MemoryEmailOutbox).messages.at(-1)!.text.match(/https?:\/\/\S+/)![0]).searchParams.get("token")!;
-  assert.equal((await rt.auth!.verifyEmail(token)).ok, true);
-  const login = await rt.auth!.login({ email: "pat@example.com", password: GOOD });
-  assert.equal(login.ok, true);
+  assert.deepEqual(registered, { ok: false, problems: ["Email and password authentication is disabled."] });
+  assert.equal((rt.outbox as MemoryEmailOutbox).messages.length, 0);
 });
 
 test("an existing email is not linked unless the signed-in user owns that verified address", async () => {
