@@ -8,5 +8,5 @@ export async function createPrismaClient(connectionString: string): Promise<Pris
   assertWebDatabaseIdentity(process.env, connectionString);
   const { PrismaPg } = await import("@prisma/adapter-pg");
   const { PrismaClient } = await import("../../generated/prisma/client.ts");
-  return new PrismaClient({ adapter: new PrismaPg({ connectionString, connectionTimeoutMillis: 5_000 }) }) as unknown as PrismaClientLike;
+  return new PrismaClient({ adapter: new PrismaPg({ connectionString, connectionTimeoutMillis: 5_000, enableChannelBinding: true }) }) as unknown as PrismaClientLike;
 }

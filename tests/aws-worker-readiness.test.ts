@@ -25,7 +25,7 @@ test("production worker requires the configured database host and name to match 
       "host=redirect.example", "port=6432", "hostaddr=192.0.2.9", "service=other", "target_session_attrs=any",
       "load_balance_hosts=disable", "%68ost=redirect.example", "HOST=redirect.example", "host=one&%68ost=two",
       "host%00=redirect.example", "sslmode=require&sslmode=disable", "application_name=one&%61pplication_name=two",
-      "unexpected=value", "sslmode=%ZZ", "?",
+      "unexpected=value", "sslmode=%ZZ", "channel_binding=disable", "channel_binding=prefer", "channel_binding=require&channel_binding=require", "?",
     ].map((query) => ({ NODE_ENV: "production", DATABASE_URL: `${url.split("?")[0]}?${query}`, ...expected })),
   ]) {
     assert.throws(() => assertWorkerDatabaseIdentity(env), (error: unknown) => {
@@ -39,7 +39,7 @@ test("production worker requires the configured database host and name to match 
 test("deployed database URL accepts approved non-routing options and encoded safe values", () => {
   assert.doesNotThrow(() => assertWorkerDatabaseIdentity({
     NODE_ENV: "production",
-    DATABASE_URL: "postgresql://private-user:private-password@db.dev.example/clipforge_dev?sslmode=%72equire&application_name=clipforge-worker",
+    DATABASE_URL: "postgresql://private-user:private-password@db.dev.example/clipforge_dev?sslmode=%72equire&application_name=clipforge-worker&channel_binding=require",
     CLIPFORGE_EXPECTED_DATABASE_HOST: "db.dev.example",
     CLIPFORGE_EXPECTED_DATABASE_NAME: "clipforge_dev",
     CLIPFORGE_EXPECTED_DATABASE_PORT: "5432",

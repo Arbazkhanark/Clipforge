@@ -11,7 +11,7 @@ export type DatabaseTarget = { host: string; database: string; port: number; use
 
 const SAFE_HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?))*$/;
 const SAFE_QUERY_PARAMETERS = new Set([
-  "application_name", "connect_timeout", "schema", "ssl", "sslcert", "sslkey", "sslmode",
+  "application_name", "channel_binding", "connect_timeout", "schema", "ssl", "sslcert", "sslkey", "sslmode",
   "sslnegotiation", "sslpassword", "sslrootcert",
 ]);
 
@@ -36,6 +36,7 @@ export function parseSafeDatabaseTarget(databaseUrl: string | undefined): Databa
         throw new WorkerDatabaseIdentityError();
       }
       seen.add(normalizedKey);
+      if (normalizedKey === "channel_binding" && value.toLowerCase() !== "require") throw new WorkerDatabaseIdentityError();
       if (normalizedKey === "application_name" && (Buffer.byteLength(value, "utf8") > 63 || /[\u0000-\u001f\u007f]/.test(value))) {
         throw new WorkerDatabaseIdentityError();
       }
