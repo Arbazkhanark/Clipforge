@@ -9,6 +9,8 @@ import { DEMO_CYCLE_ID, DEMO_OTHER_USER_ID, DEMO_USER_ID, seedDemoData } from ".
 import { setRuntimeForTests, type Runtime } from "../src/server/runtime.ts";
 import type { MediaServices } from "../src/server/context.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
+import { S3MediaStorage } from "../src/server/storage/s3-storage.ts";
+import type { S3Client } from "@aws-sdk/client-s3";
 import { LocalDiskMediaStorage } from "../src/server/storage/local-disk-storage.ts";
 import { detectProbe } from "../src/server/storage/media-inspection.ts";
 import { buildFlashLocation, parseFlash, FLASH_NOTICES, FLASH_ERRORS } from "../src/server/flash.ts";
@@ -235,6 +237,50 @@ test("UPLOAD ROUTE (API caller): JSON result without any path or storage key", n
   const body = await response.json() as Record<string, unknown>;
   assert.deepEqual([body["kind"], body["validation"], body["verificationStatus"], body["storage"]], ["image", "incomplete", "processing", "local-disk"]);
   assert.ok(!/clipforge-forms|media\/|staging|storageKey/.test(JSON.stringify(body)));
+});
+
+test("UPLOAD ROUTE reports a safe S3 authentication error and correlatable request id", async () => {
+  class InvalidTokenS3 {
+    async send(command: unknown): Promise<Record<string, unknown>> {
+      if ((command as { constructor: { name: string } }).constructor.name === "PutObjectCommand") {
+        throw Object.assign(new Error("synthetic credential and private-key response text"), { name: "InvalidToken", code: "InvalidToken", $metadata: { httpStatusCode: 400, requestId: "aws-request-id", extendedRequestId: "aws-extended-id" } });
+      }
+      return {};
+    }
+    destroy(): void {}
+  }
+  const before = repo.media.size;
+  const storage = new S3MediaStorage(new InvalidTokenS3() as unknown as S3Client, "clipforge-test-bucket");
+  setRuntimeForTests(runtime(DEMO_USER_ID, { storage, probe: null, maxUploadBytes: 1_000 }));
+  const lines: string[] = [];
+  const oldError = console.error; const oldInfo = console.info;
+  console.error = (...args: unknown[]) => { lines.push(String(args[0])); };
+  console.info = (...args: unknown[]) => { lines.push(String(args[0])); };
+  let response: Response;
+  try {
+    const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    response = await uploadRoute()(await multipart(png, "safe.png", "image/png"));
+  } finally { console.error = oldError; console.info = oldInfo; }
+  const body = await response.json() as { error: { code: string; message: string; requestId: string; confirmationRequired: boolean } };
+  assert.deepEqual([response.status, body.error.code, body.error.message, body.error.confirmationRequired], [502, "storage_authentication_failed", "Media storage authentication failed. Please contact support.", false]);
+  assert.match(body.error.requestId, /^[0-9a-f-]{36}$/i);
+  assert.equal(response.headers.get("X-Request-Id"), body.error.requestId);
+  assert.equal(repo.media.size, before);
+  const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  const failed = events.find((event) => event["event"] === "media_s3_operation_failed");
+  const summary = events.find((event) => event["event"] === "media_upload_failed");
+  assert.deepEqual([failed?.["requestId"], failed?.["operation"], failed?.["errorCategory"], failed?.["storageHttpStatus"], failed?.["awsRequestId"]], [body.error.requestId, "s3.PutObject", "aws_credentials_or_session_token", 400, "aws-request-id"]);
+  assert.equal(summary?.["errorCategory"], "aws_credentials_or_session_token");
+  assert.doesNotMatch(JSON.stringify({ response: body, logs: events }), /synthetic credential|private-key response|clipforge-test-bucket|media\/|staging\//);
+});
+
+test("UPLOAD ROUTE preserves the safe file validation reason and adds a request reference", async () => {
+  setRuntimeForTests(runtime(DEMO_USER_ID, await mediaServices({ probe: null })));
+  const response = await uploadRoute()(await multipart(new TextEncoder().encode("not a supported media file".padEnd(40)), "bad.mp4", "video/mp4"));
+  const body = await response.json() as { error: { code: string; message: string; requestId: string } };
+  assert.deepEqual([response.status, body.error.code, body.error.message], [415, "unsupported_media_type", "That file is not a supported video or image. Use MP4, MOV or WebM video, or JPEG, PNG or WebP images."]);
+  assert.match(body.error.requestId, /^[0-9a-f-]{36}$/i);
+  assert.equal(response.headers.get("X-Request-Id"), body.error.requestId);
 });
 
 test("UPLOAD ROUTE: no ffprobe -> redirect says the check was incomplete (never 'upload complete')", needReal, async () => {

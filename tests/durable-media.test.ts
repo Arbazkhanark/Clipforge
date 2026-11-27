@@ -100,7 +100,7 @@ test("invalid types, oversized files, path traversal, and a missing file are ref
   assert.equal(missing.message, "File was not found.");
 });
 
-test("a failed database write removes the file that was just saved", async () => {
+test("an unconfirmed database write keeps the committed file for a safe library check", async () => {
   const dir = tempDir();
   const storage = await LocalDiskMediaStorage.create(dir);
   const repo = new MemoryRepository();
@@ -108,7 +108,7 @@ test("a failed database write removes the file that was just saved", async () =>
   const error = await errorOf(uploadMedia(context(repo, storage, "ann"), { filename: "a.png", declaredMimeType: "image/png", data: PNG }));
   assert.equal(error.code, "database_unavailable");
   assert.equal(repo.media.size, 0);
-  assert.deepEqual(filesUnder(dir), []);
+  assert.equal(filesUnder(dir).length, 1, "do not remove a file if the database might have committed its media row");
 });
 
 test("the plan storage quota still refuses a file and leaves the private folder empty", async () => {

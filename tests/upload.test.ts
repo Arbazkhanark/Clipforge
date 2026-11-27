@@ -9,6 +9,7 @@ import type { MediaServices, RequestContext } from "../src/server/context.ts";
 import { AppError } from "../src/server/errors.ts";
 import { uploadMedia, type UploadResult } from "../src/server/handlers/media-upload.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
+import { withMediaUploadDiagnosticContext } from "../src/server/storage/media-upload-diagnostics.ts";
 import { LocalDiskMediaStorage } from "../src/server/storage/local-disk-storage.ts";
 import { detectProbe, isFfprobeAvailable, type MediaProbe } from "../src/server/storage/media-inspection.ts";
 import type { MediaStorage } from "../src/server/storage/media-storage.ts";
@@ -24,11 +25,11 @@ before(async () => { if (ffmpegAvailable) fixtures = makeFixtures(); realProbe =
 after(() => { fixtures?.cleanup(); for (const r of tmpRoots) rmSync(r, { recursive: true, force: true }); });
 
 let counter = 0;
-function setup(opts: { plan?: "free" | "creator"; probe?: MediaProbe | null; maxUploadBytes?: number; storage?: MediaStorage; withMedia?: boolean } = {}) {
+function setup(opts: { plan?: "free" | "creator"; probe?: MediaProbe | null; thumbnail?: MediaServices["thumbnail"]; maxUploadBytes?: number; storage?: MediaStorage; withMedia?: boolean } = {}) {
   const repo = new MemoryRepository();
   repo.plans.set("bob", opts.plan ?? "free"); repo.plans.set("eve", "free");
   const storage = opts.storage ?? new MemoryMediaStorage();
-  const media: MediaServices = { storage, probe: opts.probe === undefined ? realProbe : opts.probe, maxUploadBytes: opts.maxUploadBytes ?? 10 * 1024 * 1024 };
+  const media: MediaServices = { storage, probe: opts.probe === undefined ? realProbe : opts.probe, ...(opts.thumbnail ? { thumbnail: opts.thumbnail } : {}), maxUploadBytes: opts.maxUploadBytes ?? 10 * 1024 * 1024 };
   const ctxFor = (userId: string | null): RequestContext => ({ userId, now: NOW, repo, newId: () => `up${++counter}`, config: { coverSupport: "unknown" }, ...(opts.withMedia === false ? {} : { media }) });
   return { repo, storage, ctxFor };
 }
@@ -236,6 +237,48 @@ test("a probe that throws or reports no picture/duration is treated as invalid m
   const noDuration = setup({ probe: async () => ({ width: 100, height: 100, durationSeconds: 0 }) });
   assert.equal((await errorOf(upload(noDuration.ctxFor("bob"), fixtures.mp4))).code, "invalid_media");
   for (const s of [throwing, noPicture, noDuration]) assert.deepEqual(memoryCounts(s.storage as MemoryMediaStorage), { staged: 0, objects: 0 });
+});
+
+test("thumbnail failure is diagnosed but remains non-fatal and the media upload is saved", async () => {
+  const state = setup({ probe: null, thumbnail: async () => { throw new Error("synthetic ffmpeg failure /private/path"); } });
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { lines.push(String(args[0])); };
+  let result: UploadResult;
+  try {
+    result = await withMediaUploadDiagnosticContext({ requestId: "thumbnail-request", environment: "test", provider: "memory" }, () => upload(state.ctxFor("bob"), fixtures.png, "thumbnail.png", "image/png"));
+  } finally { console.error = original; }
+  assert.equal(result.hasThumbnail, false);
+  assert.equal(state.repo.media.size, 1);
+  assert.equal((state.storage as MemoryMediaStorage).objects.size, 1);
+  const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(events.find((event) => event["event"] === "media_thumbnail_failed")?.["operation"], "thumbnail.generate");
+  assert.doesNotMatch(lines.join("\n"), /private\/path|thumbnail\.png|media\/bob/);
+});
+
+test("failed database record write cleans only this upload; a later retry creates one record and object", needFfmpeg, async () => {
+  const state = setup({ probe: null });
+  const persist = state.repo.addMediaWithVerificationJobIfStorageWithin.bind(state.repo);
+  let fail = true;
+  state.repo.addMediaWithVerificationJobIfStorageWithin = async (...args: Parameters<typeof state.repo.addMediaWithVerificationJobIfStorageWithin>) => {
+    if (fail) { fail = false; throw Object.assign(new Error("synthetic database detail"), { code: "P2025" }); }
+    return persist(...args);
+  };
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { lines.push(String(args[0])); };
+  try {
+    await assert.rejects(withMediaUploadDiagnosticContext({ requestId: "db-failure-request", environment: "test", provider: "memory" }, () => upload(state.ctxFor("bob"), fixtures.png, "retry.png", "image/png")));
+    assert.deepEqual(memoryCounts(state.storage as MemoryMediaStorage), { staged: 0, objects: 0 });
+    assert.equal(state.repo.media.size, 0);
+    const retry = await withMediaUploadDiagnosticContext({ requestId: "retry-request", environment: "test", provider: "memory" }, () => upload(state.ctxFor("bob"), fixtures.png, "retry.png", "image/png"));
+    assert.equal(state.repo.media.size, 1);
+    assert.deepEqual(memoryCounts(state.storage as MemoryMediaStorage), { staged: 0, objects: 1 });
+    assert.ok((state.storage as MemoryMediaStorage).objects.has(`media/bob/${retry.mediaId}`));
+  } finally { console.error = original; }
+  const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.ok(events.some((event) => event["event"] === "media_database_record_failed" && event["operation"] === "database.media_record_create"));
+  assert.doesNotMatch(lines.join("\n"), /synthetic database detail|retry\.png|media\/bob/);
 });
 
 test("PATH TRAVERSAL through the file name: hostile names become harmless titles and never reach storage keys", needFfmpeg, async () => {

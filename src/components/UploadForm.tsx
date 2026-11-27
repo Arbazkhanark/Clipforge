@@ -11,7 +11,7 @@ const ACCEPT = ".mp4,.mov,.webm,.jpg,.jpeg,.png,.webp,video/mp4,video/quicktime,
 const UPLOAD_CONCURRENCY = 2;
 
 type UploadState = "queued" | "uploading" | "failed";
-type QueueItem = { id: string; file: File; status: UploadState; progress: number; error?: string; uncertain?: boolean };
+type QueueItem = { id: string; file: File; status: UploadState; progress: number; error?: string; requestId?: string; uncertain?: boolean };
 type UploadedItem = { id: string; name: string; mediaId: string; storage: string; destinationConfirmed: boolean; verification: MediaVerificationState };
 
 function formatFileSize(bytes: number): string {
@@ -25,12 +25,18 @@ function fileType(file: File): string {
   return extension ? `${extension} file` : "Unknown file type";
 }
 
-function safeResponseError(xhr: XMLHttpRequest): { message: string; uncertain: boolean } {
+function safeResponseError(xhr: XMLHttpRequest): { message: string; uncertain: boolean; requestId?: string } {
+  const headerRequestId = xhr.getResponseHeader("X-Request-Id");
+  const fallbackRequestId = headerRequestId && /^[0-9a-f-]{36}$/i.test(headerRequestId) ? headerRequestId : undefined;
   try {
-    const body = JSON.parse(xhr.responseText) as { error?: { message?: unknown } };
-    if (typeof body.error?.message === "string") return { message: body.error.message, uncertain: xhr.status >= 500 };
+    const body = JSON.parse(xhr.responseText) as { error?: { message?: unknown; requestId?: unknown; confirmationRequired?: unknown } };
+    if (typeof body.error?.message === "string") {
+      const bodyRequestId = typeof body.error.requestId === "string" && /^[0-9a-f-]{36}$/i.test(body.error.requestId) ? body.error.requestId : undefined;
+      const requestId = bodyRequestId ?? fallbackRequestId;
+      return { message: body.error.message, uncertain: typeof body.error.confirmationRequired === "boolean" ? body.error.confirmationRequired : xhr.status >= 500, ...(requestId ? { requestId } : {}) };
+    }
   } catch { /* The server response is not shown verbatim. */ }
-  return { message: xhr.status >= 500 ? "The server could not confirm whether this file was saved. Check your library before retrying." : "This file could not be uploaded.", uncertain: xhr.status >= 500 };
+  return { message: xhr.status >= 500 ? "The server could not confirm whether this file was saved. Check your library before retrying." : "This file could not be uploaded.", uncertain: xhr.status >= 500, ...(fallbackRequestId ? { requestId: fallbackRequestId } : {}) };
 }
 
 function uploadOne(file: File, onProgress: (percent: number) => void, collectionId?: string): Promise<{ mediaId: string; storage: string; collectionId?: string }> {
@@ -45,7 +51,7 @@ function uploadOne(file: File, onProgress: (percent: number) => void, collection
     xhr.addEventListener("load", () => {
       if (xhr.status < 200 || xhr.status >= 300) {
         const error = safeResponseError(xhr);
-        reject(Object.assign(new Error(error.message), { uncertain: error.uncertain }));
+        reject(Object.assign(new Error(error.message), { uncertain: error.uncertain, ...(error.requestId ? { requestId: error.requestId } : {}) }));
         return;
       }
       try {
@@ -133,7 +139,8 @@ export function UploadForm({ info, collectionId, collectionName }: { info: Uploa
         succeeded += 1;
       } catch (error) {
         const uncertain = typeof error === "object" && error !== null && "uncertain" in error && error.uncertain === true;
-        setQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "failed", progress: 0, error: error instanceof Error ? error.message : "This file could not be uploaded.", uncertain } : candidate));
+        const requestId = typeof error === "object" && error !== null && "requestId" in error && typeof error.requestId === "string" ? error.requestId : undefined;
+        setQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "failed", progress: 0, error: error instanceof Error ? error.message : "This file could not be uploaded.", uncertain, requestId } : candidate));
         failed += 1;
       }
     });
@@ -193,10 +200,10 @@ export function UploadForm({ info, collectionId, collectionName }: { info: Uploa
             <span className={`media-queue-file-icon${item.file.type.startsWith("image/") ? " is-image" : ""}`} aria-hidden="true">{item.file.type.startsWith("image/") ? "▧" : "▶"}</span>
             <div className="media-queue-file-details"><strong title={item.file.name}>{item.file.name}</strong><span>{fileType(item.file)} · {formatFileSize(item.file.size)}</span>
               <span className={`media-upload-status is-${item.status}`} role="status">{item.status === "queued" ? "Ready" : item.status === "uploading" ? `Uploading · ${item.progress}%` : item.uncertain ? "Needs confirmation" : "Upload failed"}</span>
-              {item.error && <span className="media-upload-error">{item.error}</span>}
+              {item.error && <span className="media-upload-error">{item.error}{item.requestId && <small>Reference: {item.requestId}</small>}</span>}
               {item.status === "uploading" && <progress max="100" value={item.progress} aria-label={`Upload progress for ${item.file.name}`}>{item.progress}%</progress>}
             </div>
-            {item.status === "failed" && !item.uncertain ? <button type="button" className="media-upload-secondary" onClick={() => setQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "queued", progress: 0, error: undefined } : candidate))} disabled={uploading}>Retry</button>
+            {item.status === "failed" && !item.uncertain ? <button type="button" className="media-upload-secondary" onClick={() => setQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "queued", progress: 0, error: undefined, requestId: undefined } : candidate))} disabled={uploading}>Retry</button>
               : item.status === "queued" || item.status === "failed" ? <button type="button" className="media-remove-file-button" onClick={() => setQueue((current) => current.filter((candidate) => candidate.id !== item.id))} disabled={uploading} aria-label={`Remove ${item.file.name}`}>Remove</button> : null}
           </article>)}
           {queue.some((item) => item.uncertain) && <p className="media-upload-caution" role="alert">Some results could not be confirmed. Refresh or search your library before attempting those files again.</p>}

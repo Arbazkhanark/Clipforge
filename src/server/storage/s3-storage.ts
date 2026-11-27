@@ -12,6 +12,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { InvalidStorageKeyError, parseStorageKey, type MediaStorage } from "./media-storage.ts";
+import { logMediaUploadEvent, runMediaUploadOperation } from "./media-upload-diagnostics.ts";
 
 const NOT_FOUND = new Set(["NotFound", "NoSuchKey"]);
 
@@ -48,9 +49,9 @@ export class S3MediaStorage implements MediaStorage {
   async stage(stagingKey: string, data: Uint8Array, metadata: { contentType?: string } = {}): Promise<void> {
     this.validate(stagingKey);
     try {
-      await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: stagingKey, Body: data, IfNoneMatch: "*", ...(metadata.contentType ? { ContentType: metadata.contentType } : {}) }));
+      await runMediaUploadOperation("s3.PutObject", () => this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: stagingKey, Body: data, IfNoneMatch: "*", ...(metadata.contentType ? { ContentType: metadata.contentType } : {}) })));
     } catch (error) {
-      if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.");
+      if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.", { cause: error });
       throw new Error("Private storage could not save the staged file.", { cause: error });
     }
   }
@@ -62,66 +63,68 @@ export class S3MediaStorage implements MediaStorage {
   async commit(stagingKey: string, finalKey: string): Promise<void> {
     this.validate(stagingKey); this.validate(finalKey);
     try {
-      await this.client.send(new CopyObjectCommand({ Bucket: this.bucket, Key: finalKey, CopySource: copySource(this.bucket, stagingKey), IfNoneMatch: "*" }));
+      await runMediaUploadOperation("s3.CopyObject", () => this.client.send(new CopyObjectCommand({ Bucket: this.bucket, Key: finalKey, CopySource: copySource(this.bucket, stagingKey), IfNoneMatch: "*" })));
     } catch (error) {
-      if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.");
+      if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.", { cause: error });
       throw new Error("Private storage could not commit the staged file.", { cause: error });
     }
     // The final object is now committed. A staging cleanup failure must not report the commit as failed;
     // an age-based staging sweep can remove the leftover object after checking active import leases.
-    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: stagingKey })).catch(() => undefined);
+    await runMediaUploadOperation("s3.DeleteObject", () => this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: stagingKey }))).catch((error) => {
+      logMediaUploadEvent("media_cleanup_failed", "s3.DeleteObject", error);
+    });
   }
 
   async discardStaged(stagingKey: string): Promise<void> {
     this.validate(stagingKey);
-    try { await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: stagingKey })); }
-    catch { throw new Error("Private storage could not discard the staged file."); }
+    try { await runMediaUploadOperation("s3.DeleteObject", () => this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: stagingKey }))); }
+    catch (error) { throw new Error("Private storage could not discard the staged file.", { cause: error }); }
   }
 
   async exists(key: string): Promise<boolean> {
     this.validate(key);
-    try { await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key })); return true; }
-    catch (error) { if (isNotFound(error)) return false; throw new Error("Private storage could not check the file."); }
+    try { await runMediaUploadOperation("s3.HeadObject", () => this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }))); return true; }
+    catch (error) { if (isNotFound(error)) return false; throw new Error("Private storage could not check the file.", { cause: error }); }
   }
 
   async statSize(key: string): Promise<number | null> {
     this.validate(key);
     try {
-      const response = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      const response = await runMediaUploadOperation("s3.HeadObject", () => this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key })));
       return typeof response.ContentLength === "number" && Number.isSafeInteger(response.ContentLength) && response.ContentLength >= 0 ? response.ContentLength : null;
-    } catch (error) { if (isNotFound(error)) return null; throw new Error("Private storage could not read file details."); }
+    } catch (error) { if (isNotFound(error)) return null; throw new Error("Private storage could not read file details.", { cause: error }); }
   }
 
   async getPrivateMetadata(key: string) {
     this.validate(key);
     try {
-      const response = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      const response = await runMediaUploadOperation("s3.HeadObject", () => this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key })));
       return typeof response.ContentLength === "number" && Number.isSafeInteger(response.ContentLength) && response.ContentLength >= 0 ? { sizeBytes: response.ContentLength, storageKind: this.kind, contentType: response.ContentType ?? null } : null;
-    } catch (error) { if (isNotFound(error)) return null; throw new Error("Private storage could not read file details."); }
+    } catch (error) { if (isNotFound(error)) return null; throw new Error("Private storage could not read file details.", { cause: error }); }
   }
 
   async openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>> {
     this.validate(key);
     try {
-      const response = await this.client.send(new GetObjectCommand({
+      const response = await runMediaUploadOperation("s3.GetObject", () => this.client.send(new GetObjectCommand({
         Bucket: this.bucket, Key: key,
         ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
-      }));
+      })));
       if (!response.Body) throw new Error("Private storage returned no file stream.");
       return response.Body.transformToWebStream() as ReadableStream<Uint8Array>;
-    } catch { throw new Error("Private storage could not read the file."); }
+    } catch (error) { throw new Error("Private storage could not read the file.", { cause: error }); }
   }
 
   async deleteUnreferencedUpload(finalKey: string): Promise<void> {
     this.validate(finalKey);
-    try { await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: finalKey })); }
-    catch { throw new Error("Private storage could not remove the unreferenced upload."); }
+    try { await runMediaUploadOperation("s3.DeleteObject", () => this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: finalKey }))); }
+    catch (error) { throw new Error("Private storage could not remove the unreferenced upload.", { cause: error }); }
   }
 
   async deleteCommittedMediaObject(key: string): Promise<void> {
     this.validate(key);
-    try { await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key })); }
-    catch { throw new Error("Private storage could not permanently remove the media file."); }
+    try { await runMediaUploadOperation("s3.DeleteObject", () => this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }))); }
+    catch (error) { throw new Error("Private storage could not permanently remove the media file.", { cause: error }); }
   }
 
   async runWithCommittedFile<T>(key: string, work: (filePath: string) => Promise<T>): Promise<T> {
@@ -134,19 +137,21 @@ export class S3MediaStorage implements MediaStorage {
     const filePath = path.join(dir, "private-media.bin");
     try {
       let response;
-      try { response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key })); }
-      catch (error) { if (isNotFound(error)) throw new Error(missingMessage); throw new Error("Private storage could not retrieve the file."); }
+      try { response = await runMediaUploadOperation("s3.GetObject", () => this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }))); }
+      catch (error) { if (isNotFound(error)) throw new Error(missingMessage, { cause: error }); throw new Error("Private storage could not retrieve the file.", { cause: error }); }
       if (!response.Body) throw new Error("Private storage returned no file stream.");
       try {
-        await pipeline(response.Body as NodeJS.ReadableStream, createWriteStream(filePath, { flags: "wx", mode: 0o600 }));
+        await runMediaUploadOperation("s3.GetObjectStream", () => pipeline(response.Body as NodeJS.ReadableStream, createWriteStream(filePath, { flags: "wx", mode: 0o600 })));
         await chmod(filePath, 0o600);
         const info = await stat(filePath);
         if (!info.isFile()) throw new Error("Private storage returned an invalid file.");
-        return await work(filePath);
       } catch (error) {
         if (error instanceof Error && error.message === missingMessage) throw error;
-        throw new Error("Private storage could not prepare the file for processing.");
+        throw new Error("Private storage could not prepare the file for processing.", { cause: error });
       }
+      // Keep application inspection failures distinct from S3 download/stream failures.
+      try { return await work(filePath); }
+      catch (error) { throw new Error("Private storage could not prepare the file for processing.", { cause: error }); }
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
 
@@ -155,11 +160,11 @@ export class S3MediaStorage implements MediaStorage {
     const { createReadStream } = await import("node:fs");
     const { size } = await stat(sourcePath).catch(() => { throw new Error("The generated file is unavailable."); });
     try {
-      await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: finalKey, Body: createReadStream(sourcePath), ContentLength: size, IfNoneMatch: "*" }));
+      await runMediaUploadOperation("s3.PutObject", () => this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: finalKey, Body: createReadStream(sourcePath), ContentLength: size, IfNoneMatch: "*" })));
       return size;
     } catch (error) {
-      if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.");
-      throw new Error("Private storage could not save the generated file.");
+      if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.", { cause: error });
+      throw new Error("Private storage could not save the generated file.", { cause: error });
     }
   }
 
@@ -167,7 +172,7 @@ export class S3MediaStorage implements MediaStorage {
     this.validate(sourceKey); this.validate(stagingKey); assertLease?.();
     let copied = false;
     try {
-      await this.client.send(new CopyObjectCommand({ Bucket: this.bucket, Key: stagingKey, CopySource: copySource(this.bucket, sourceKey), IfNoneMatch: "*" }));
+      await runMediaUploadOperation("s3.CopyObject", () => this.client.send(new CopyObjectCommand({ Bucket: this.bucket, Key: stagingKey, CopySource: copySource(this.bucket, sourceKey), IfNoneMatch: "*" })));
       copied = true;
       assertLease?.();
       const size = await this.statSize(stagingKey);
@@ -175,11 +180,11 @@ export class S3MediaStorage implements MediaStorage {
       if (size === null) throw new Error("Private storage could not verify the copied file.");
       return size;
     } catch (error) {
-      if (copied) await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: stagingKey })).catch(() => undefined);
+      if (copied) await runMediaUploadOperation("s3.DeleteObject", () => this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: stagingKey }))).catch((cleanupError) => logMediaUploadEvent("media_cleanup_failed", "s3.DeleteObject", cleanupError));
       if (error instanceof InvalidStorageKeyError) throw error;
       if (error instanceof Error && error.message === "Media import lease was lost.") throw error;
-      if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.");
-      throw error instanceof Error && error.message === "Media import lease was lost." ? error : new Error("Private storage could not copy the file.");
+      if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.", { cause: error });
+      throw error instanceof Error && error.message === "Media import lease was lost." ? error : new Error("Private storage could not copy the file.", { cause: error });
     }
   }
 }
