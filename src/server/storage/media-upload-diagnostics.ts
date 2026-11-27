@@ -5,6 +5,8 @@ export type MediaUploadDiagnosticContext = {
   requestId: string;
   environment: "development" | "preview" | "test" | "staging" | "production" | "unknown";
   provider: "s3" | "local-disk" | "memory" | "unavailable";
+  /** Route-level callers can suppress per-operation events while retaining cause/operation correlation. */
+  logOperations?: boolean;
 };
 
 export type MediaUploadErrorInfo = {
@@ -154,7 +156,13 @@ export function logMediaUploadEvent(event: string, operation: string, error?: un
 
 export async function runMediaUploadOperation<T>(operation: string, work: () => Promise<T>): Promise<T> {
   const context = contextStorage.getStore();
-  if (!context) return work();
+  if (!context || context.logOperations === false) {
+    try { return await work(); }
+    catch (error) {
+      if (typeof error === "object" && error !== null) operationByError.set(error, operation);
+      throw error;
+    }
+  }
   const prefix = operation.startsWith("s3.") ? "media_s3_operation" : operation.startsWith("database.") ? "media_database_operation" : "media_storage_operation";
   logMediaUploadEvent(`${prefix}_started`, operation);
   try {

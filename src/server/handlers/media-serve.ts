@@ -7,6 +7,8 @@
 import { decideMediaAccess, MEDIA_VARIANTS, type ContainingCollection, type MediaVariant } from "../../lib/domain/media-access.ts";
 import { requireUser, type RequestContext } from "../context.ts";
 import { AppError, notFound, validationFailed } from "../errors.ts";
+import { runMediaUploadOperation } from "../storage/media-upload-diagnostics.ts";
+import type { MediaStorage } from "../storage/media-storage.ts";
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** Types we will show inline. Anything else is forced to download as an opaque file. */
@@ -15,6 +17,11 @@ const INLINE_MIME_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm",
 export const MAX_PARTIAL_BYTES = 8 * 1024 * 1024;
 
 export interface ServedMedia { status: 200 | 206 | 416; headers: Record<string, string>; body: ReadableStream<Uint8Array> | null; }
+
+function withStorageOperation<T>(storage: MediaStorage, operation: string, work: () => Promise<T>): Promise<T> {
+  // S3 records the precise HeadObject/GetObject command; other adapters get a useful storage stage.
+  return storage.kind === "s3" ? work() : runMediaUploadOperation(`storage.${operation}`, work);
+}
 
 /** Parses ONE byte range ("bytes=0-99", "bytes=100-", "bytes=-50"). null = no usable range header (serve everything). "unsatisfiable" = 416. */
 export function parseRange(header: string | null, size: number): { start: number; end: number } | "unsatisfiable" | null {
@@ -43,20 +50,24 @@ export async function serveMedia(ctx: RequestContext, input: { mediaId: unknown;
   if (typeof input.variant !== "string" || !(MEDIA_VARIANTS as readonly string[]).includes(input.variant)) throw validationFailed(["variant must be thumbnail, preview or download."]);
   const variant = input.variant as MediaVariant;
 
-  const media = await ctx.repo.getMedia(input.mediaId);
+  const media = await runMediaUploadOperation("database.media_record_lookup", () => ctx.repo.getMedia(input.mediaId as string));
   if (!media) throw notFound("File");
 
   let containing: ContainingCollection[] = [];
   if (media.ownerId !== userId) {
-    const collections = await ctx.repo.listCollectionsContainingMedia(media.id);
-    containing = await Promise.all(collections.map(async (collection) => ({ collection, grants: await ctx.repo.getGrants(collection.id) })));
+    const collections = await runMediaUploadOperation("database.media_access_collections", () => ctx.repo.listCollectionsContainingMedia(media.id));
+    containing = await Promise.all(collections.map(async (collection) => ({
+      collection,
+      grants: await runMediaUploadOperation("database.media_access_grants", () => ctx.repo.getGrants(collection.id)),
+    })));
   }
   if (!decideMediaAccess({ userId, media, containing, variant, now: ctx.now }).allowed) throw notFound("File"); // same answer as "missing"
 
-  const info = await ctx.repo.getMediaStorageInfo(media.id);
+  const info = await runMediaUploadOperation("database.media_storage_info", () => ctx.repo.getMediaStorageInfo(media.id));
   const key = variant === "thumbnail" ? info?.thumbnailKey : info?.storageKey;
   if (!info || !key) throw notFound("File");
-  const size = await ctx.media.storage.statSize(key);
+  const storage = ctx.media.storage;
+  const size = await withStorageOperation(storage, "stat_size", () => storage.statSize(key));
   if (size === null) throw notFound("File");
 
   const mime = variant === "thumbnail" ? "image/jpeg" : info.mimeType && INLINE_MIME_TYPES.has(info.mimeType) ? info.mimeType : "application/octet-stream";
@@ -70,11 +81,12 @@ export async function serveMedia(ctx: RequestContext, input: { mediaId: unknown;
 
   const range = parseRange(input.rangeHeader, size);
   if (range === "unsatisfiable") return { status: 416, headers: { ...headers, "Content-Range": `bytes */${size}` }, body: null };
-  if (variant === "download") await ctx.repo.appendAudit({ actorId: userId, action: "media.downloaded", entityType: "MediaAsset", entityId: media.id, metadata: { byOwner: media.ownerId === userId } });
+  if (variant === "download") await runMediaUploadOperation("database.media_download_audit", () => ctx.repo.appendAudit({ actorId: userId, action: "media.downloaded", entityType: "MediaAsset", entityId: media.id, metadata: { byOwner: media.ownerId === userId } }));
 
   if (range) {
     const end = variant === "preview" ? Math.min(range.end, range.start + MAX_PARTIAL_BYTES - 1) : range.end;
-    return { status: 206, headers: { ...headers, "Content-Range": `bytes ${range.start}-${end}/${size}`, "Content-Length": String(end - range.start + 1) }, body: await ctx.media.storage.openRead(key, { start: range.start, end }) };
+    return { status: 206, headers: { ...headers, "Content-Range": `bytes ${range.start}-${end}/${size}`,
+      "Content-Length": String(end - range.start + 1) }, body: await withStorageOperation(storage, "open_read", () => storage.openRead(key, { start: range.start, end })) };
   }
-  return { status: 200, headers: { ...headers, "Content-Length": String(size) }, body: await ctx.media.storage.openRead(key) };
+  return { status: 200, headers: { ...headers, "Content-Length": String(size) }, body: await withStorageOperation(storage, "open_read", () => storage.openRead(key)) };
 }

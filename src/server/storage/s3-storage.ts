@@ -12,7 +12,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { InvalidStorageKeyError, parseStorageKey, type MediaStorage } from "./media-storage.ts";
-import { logMediaUploadEvent, runMediaUploadOperation } from "./media-upload-diagnostics.ts";
+import { logMediaUploadEvent, mediaUploadDiagnosticContext, runMediaUploadOperation, withMediaUploadDiagnosticContext } from "./media-upload-diagnostics.ts";
 
 const NOT_FOUND = new Set(["NotFound", "NoSuchKey"]);
 
@@ -32,6 +32,34 @@ function isNotFound(error: unknown): boolean {
 
 function copySource(bucket: string, key: string): string {
   return `${bucket}/${key.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+function observeReadStream(stream: ReadableStream<Uint8Array>, operation: string): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  const diagnosticContext = mediaUploadDiagnosticContext();
+  let cancelled = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const result = await reader.read();
+        if (result.done) { reader.releaseLock(); controller.close(); }
+        else controller.enqueue(result.value);
+      } catch (error) {
+        if (!cancelled && diagnosticContext) {
+          await withMediaUploadDiagnosticContext(diagnosticContext, async () => {
+            logMediaUploadEvent("media_s3_operation_failed", operation, error);
+          });
+        }
+        try { reader.releaseLock(); } catch { /* The stream may already have released the reader. */ }
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      cancelled = true;
+      try { await reader.cancel(reason); }
+      finally { try { reader.releaseLock(); } catch { /* Ignore a reader already released by completion. */ } }
+    },
+  });
 }
 
 /** Private S3 implementation of the existing storage contract. No method returns a bucket, key, or URL. */
@@ -106,12 +134,16 @@ export class S3MediaStorage implements MediaStorage {
   async openRead(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>> {
     this.validate(key);
     try {
-      const response = await runMediaUploadOperation("s3.GetObject", () => this.client.send(new GetObjectCommand({
-        Bucket: this.bucket, Key: key,
-        ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
-      })));
-      if (!response.Body) throw new Error("Private storage returned no file stream.");
-      return response.Body.transformToWebStream() as ReadableStream<Uint8Array>;
+      const body = await runMediaUploadOperation("s3.GetObject", async () => {
+        const response = await this.client.send(new GetObjectCommand({
+          Bucket: this.bucket, Key: key,
+          ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
+        }));
+        if (!response.Body) throw new Error("S3 returned no file stream.");
+        return response.Body;
+      });
+      const stream = await runMediaUploadOperation("s3.GetObjectStream", async () => body.transformToWebStream() as ReadableStream<Uint8Array>);
+      return observeReadStream(stream, "s3.GetObjectStream");
     } catch (error) { throw new Error("Private storage could not read the file.", { cause: error }); }
   }
 

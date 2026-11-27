@@ -1,6 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { Readable } from "node:stream";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,8 @@ import { mediaFileRoute } from "../src/server/media-route.ts";
 import { decideMediaAccess } from "../src/lib/domain/media-access.ts";
 import { LocalDiskMediaStorage } from "../src/server/storage/local-disk-storage.ts";
 import { MemoryMediaStorage } from "../src/server/storage/memory-storage.ts";
+import { S3MediaStorage } from "../src/server/storage/s3-storage.ts";
+import type { S3Client } from "@aws-sdk/client-s3";
 import { detectProbe, makeThumbnailWithFfmpeg, type ThumbnailMaker } from "../src/server/storage/media-inspection.ts";
 import { getMediaDetail, getMediaLibrary } from "../src/server/queries.ts";
 import { MediaDetailView } from "../src/components/MediaDetailView.tsx";
@@ -231,14 +234,110 @@ test("ROUTE: unexpected storage failure logs only safe diagnostics and keeps the
     assert.match(requestId ?? "", /^[0-9a-f-]{36}$/i);
     assert.equal(lines.length, 1);
     const log = JSON.parse(lines[0]!) as Record<string, unknown>;
-    assert.deepEqual(log, {
-      event: "media_file_serve_failed", requestId, variant: "thumbnail",
-      errorCategory: "unexpected_media_serve_failure", errorType: "exception",
-      errorName: "AccessDenied", errorCode: "AccessDenied", storageHttpStatus: 403,
-    });
+    assert.deepEqual([log["event"], log["requestId"], log["variant"], log["operation"], log["provider"], log["errorCategory"], log["errorType"], log["errorName"], log["errorCode"], log["storageHttpStatus"]], [
+      "media_file_serve_failed", requestId, "thumbnail", "storage.stat_size", "memory", "aws_permission_denied", "exception", "AccessDenied", "AccessDenied", 403,
+    ]);
     assert.equal(lines.join(" ").includes(sensitiveMessage), false);
     assert.doesNotMatch(lines.join(" "), /aws-secret|private\.example|media\/owner\/m1|uploaded-name\.mp4|secret-token/);
   } finally { console.error = oldError; }
+});
+
+function s3StorageForRoute(options: { headError?: Error; getError?: Error; streamError?: Error } = {}) {
+  const client = {
+    async send(command: unknown): Promise<Record<string, unknown>> {
+      const name = (command as { constructor: { name: string } }).constructor.name;
+      if (name === "HeadObjectCommand") {
+        if (options.headError) throw options.headError;
+        return { ContentLength: BYTES.length, ContentType: "video/mp4" };
+      }
+      if (name === "GetObjectCommand") {
+        if (options.getError) throw options.getError;
+        const body = options.streamError
+          ? Readable.from((async function* () { throw options.streamError; })())
+          : Readable.from([BYTES]);
+        Object.assign(body, { transformToWebStream: () => Readable.toWeb(body) as ReadableStream<Uint8Array> });
+        return { Body: body };
+      }
+      throw new Error("Unexpected synthetic S3 command.");
+    },
+    destroy(): void {},
+  };
+  return new S3MediaStorage(client as unknown as S3Client, "clipforge-test-bucket");
+}
+
+test("ROUTE: S3 GetObject failure logs the underlying safe AWS cause and operation", async () => {
+  const { repo } = setup();
+  const sensitiveMessage = "synthetic token, signed URL, private media key";
+  const storage = s3StorageForRoute({ getError: Object.assign(new Error(sensitiveMessage), { name: "InvalidToken", code: "InvalidToken", $metadata: { httpStatusCode: 400, requestId: "synthetic-s3-request" } }) });
+  const runtime: Runtime = { mode: "demo", repo, currentUserId: async () => "owner", newId: () => "x", now: () => NOW, media: async () => ({ storage, probe: null, maxUploadBytes: 1e9 }) };
+  const lines: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { lines.push(String(args[0])); };
+  try {
+    const response = await mediaFileRoute(() => runtime)(new Request("http://localhost:3000/api/media/file?id=m1&variant=preview"));
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: { code: "internal_error", message: "Something went wrong on our side. Please try again." } });
+    const requestId = response.headers.get("x-request-id");
+    assert.match(requestId ?? "", /^[0-9a-f-]{36}$/i);
+    assert.equal(lines.length, 1);
+    const log = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.deepEqual([log["event"], log["requestId"], log["variant"], log["operation"], log["provider"], log["errorCategory"], log["errorName"], log["errorCode"], log["storageHttpStatus"], log["awsRequestId"]], [
+      "media_file_serve_failed", requestId, "original", "s3.GetObject", "s3", "aws_credentials_or_session_token", "InvalidToken", "InvalidToken", 400, "synthetic-s3-request",
+    ]);
+    assert.doesNotMatch(lines.join(" "), /synthetic token|signed URL|private media key|clipforge-test-bucket|media\/owner/);
+  } finally { console.error = originalError; }
+});
+
+test("ROUTE: S3 HeadObject failure is distinguished from GetObject and keeps the response generic", async () => {
+  const { repo } = setup();
+  const storage = s3StorageForRoute({ headError: Object.assign(new Error("synthetic permission response"), { name: "AccessDenied", code: "AccessDenied", $metadata: { httpStatusCode: 403, requestId: "synthetic-head-request" } }) });
+  const runtime: Runtime = { mode: "demo", repo, currentUserId: async () => "owner", newId: () => "x", now: () => NOW, media: async () => ({ storage, probe: null, maxUploadBytes: 1e9 }) };
+  const lines: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { lines.push(String(args[0])); };
+  try {
+    const response = await mediaFileRoute(() => runtime)(new Request("http://localhost:3000/api/media/file?id=m1&variant=preview"));
+    assert.equal(response.status, 500);
+    const requestId = response.headers.get("x-request-id");
+    assert.match(requestId ?? "", /^[0-9a-f-]{36}$/i);
+    assert.equal(lines.length, 1);
+    const log = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.deepEqual([log["requestId"], log["operation"], log["errorCategory"], log["errorName"], log["errorCode"], log["storageHttpStatus"], log["awsRequestId"]], [
+      requestId, "s3.HeadObject", "aws_permission_denied", "AccessDenied", "AccessDenied", 403, "synthetic-head-request",
+    ]);
+    assert.doesNotMatch(lines.join(" "), /synthetic permission response|clipforge-test-bucket|media\/owner/);
+  } finally { console.error = originalError; }
+});
+
+test("ROUTE: S3 media read returns the private object bytes with safe response headers", async () => {
+  const { repo } = setup();
+  const storage = s3StorageForRoute();
+  const runtime: Runtime = { mode: "demo", repo, currentUserId: async () => "owner", newId: () => "x", now: () => NOW, media: async () => ({ storage, probe: null, maxUploadBytes: 1e9 }) };
+  const response = await mediaFileRoute(() => runtime)(new Request("http://localhost:3000/api/media/file?id=m1&variant=preview"));
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("x-request-id") ?? "", /^[0-9a-f-]{36}$/i);
+  assert.equal(response.headers.get("content-type"), "video/mp4");
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), BYTES);
+});
+
+test("ROUTE: S3 media read succeeds, and a later body-stream failure is logged with its request reference", async () => {
+  const { repo } = setup();
+  const storage = s3StorageForRoute({ streamError: Object.assign(new Error("synthetic stream detail"), { code: "ECONNRESET" }) });
+  const runtime: Runtime = { mode: "demo", repo, currentUserId: async () => "owner", newId: () => "x", now: () => NOW, media: async () => ({ storage, probe: null, maxUploadBytes: 1e9 }) };
+  const lines: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { lines.push(String(args[0])); };
+  try {
+    const response = await mediaFileRoute(() => runtime)(new Request("http://localhost:3000/api/media/file?id=m1&variant=preview"));
+    assert.equal(response.status, 200);
+    const requestId = response.headers.get("x-request-id");
+    assert.match(requestId ?? "", /^[0-9a-f-]{36}$/i);
+    await assert.rejects(() => response.arrayBuffer());
+    assert.equal(lines.length, 1);
+    const log = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.deepEqual([log["event"], log["requestId"], log["operation"], log["errorCategory"], log["errorCode"]], ["media_s3_operation_failed", requestId, "s3.GetObjectStream", "storage_network_error", "ECONNRESET"]);
+    assert.doesNotMatch(lines.join(" "), /synthetic stream detail|clipforge-test-bucket|media\/owner/);
+  } finally { console.error = originalError; }
 });
 
 test("ROUTE: missing thumbnail remains a 404 and does not emit an unexpected-failure log", async () => {
