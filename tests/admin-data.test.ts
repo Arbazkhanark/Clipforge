@@ -53,6 +53,19 @@ test("Admin campaign and Instagram listings join safe owner summaries without ex
   assert.equal("accessToken" in accounts.items[0]!, false);
 });
 
+test("admin cycle listings and overview preserve deleted history without counting tombstones as stopped", async () => {
+  const { db, service } = makeService(); seed(db);
+  const deletedAt = new Date("2026-11-09T10:00:00.000Z");
+  db.publishingCycle.rows.push({ id: "c-deleted", ownerId: "u1", name: "Deleted launch", status: "stopped", deletedAt, timezone: "UTC", createdAt: at, updatedAt: deletedAt });
+  const cycles = await service.listCycles(parseAdminListQuery(new URL("http://local/")));
+  assert.equal(cycles.items.find((cycle) => cycle.id === "c-deleted")?.deletedAt?.getTime(), deletedAt.getTime());
+  const overview = await service.getOverview();
+  assert.equal(overview.cycles.total, 2);
+  assert.equal(overview.cycles.deleted, 1);
+  assert.equal(overview.cycles.byStatus["running"], 1);
+  assert.equal(overview.cycles.byStatus["stopped"], 0);
+});
+
 test("billing and audit DTOs use explicit safe fields and do not expose payload metadata", async () => {
   const { db, service } = makeService(); seed(db);
   const payments = await service.listPayments(parseAdminListQuery(new URL("http://local/?status=captured"), { status: new Set(["captured"]) }));
@@ -409,6 +422,15 @@ test("campaign details distinguish schedule, queue, attempts, published record, 
   const serialized = JSON.stringify(detail);
   for (const secret of ["secret-token", "secret-lock", "secret-worker", "secret-idempotency", "raw provider message", "provider body", "private-container", "private-render", "passwordHash", "encryptedAccessToken"]) assert.equal(serialized.includes(secret), false, secret);
   assert.equal(await service.getCycleDetails("missing"), null);
+});
+
+test("campaign details expose deletedAt while preserving the tombstone's stored status", async () => {
+  const db = new FakePrismaClient(); const deletedAt = new Date("2026-11-08T13:00:00.000Z");
+  db.user.rows.push({ id: "owner", name: "Owner", email: "owner@example.test", role: "user", createdAt: at });
+  db.publishingCycle.rows.push({ id: "deleted-cycle", ownerId: "owner", socialAccountId: "missing", name: "Deleted", status: "stopped", deletedAt, finalReviewConfirmed: true, orderMode: "manual", repeatBehavior: "never", timezone: "UTC", scheduleSettings: {}, createdAt: at, updatedAt: at });
+  const detail = await makeService(db).service.getCycleDetails("deleted-cycle");
+  assert.equal(detail?.cycle.status, "stopped");
+  assert.equal(detail?.cycle.deletedAt?.getTime(), deletedAt.getTime());
 });
 
 test("campaign detail API requires Admin authorization and never returns a live-status claim", async () => {

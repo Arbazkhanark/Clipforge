@@ -1071,6 +1071,7 @@ model PublishingCycle {
    * Interval, days of week, time windows, daily maximum, end date. Validated in application code.
    */
   scheduleSettings     Json
+  deletedAt            DateTime?
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
 

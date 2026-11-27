@@ -83,6 +83,28 @@ test("cycle import unique conflict rolls back earlier order updates", async () =
   ]);
 });
 
+test("cycle deletion validates every expired claim before cancelling any job or item", async () => {
+  const client = new FakePrismaClient(); const repo = new PrismaRepository(client);
+  const now = new Date("2026-11-28T12:00:00Z");
+  await repo.createCycle({ ...makeCycle({ id: "delete-claims-cycle", ownerId: "bob", status: "running" }), name: "Delete claims regression", socialAccountId: "delete-claims-account" });
+  const first = makeItem({ id: "delete-claims-item-a", cycleId: "delete-claims-cycle", cycleOwnerId: "bob", status: "publishing", lockedBy: "worker-a" });
+  const later = makeItem({ id: "delete-claims-item-b", cycleId: "delete-claims-cycle", cycleOwnerId: "bob", status: "publishing", lockedBy: "wrong-worker" });
+  await client.cycleItem.create({ data: itemToRow(first) });
+  await client.cycleItem.create({ data: itemToRow(later) });
+  for (const [id, item, workerId, attemptNumber] of [["delete-claims-job-a", first, "worker-a", 1], ["delete-claims-job-b", later, "worker-b", 2]] as const) {
+    await client.publishingJob.create({ data: { id, ownerId: "bob", cycleId: "delete-claims-cycle", cycleItemId: item.id, socialAccountId: "delete-claims-account", attemptNumber, idempotencyKey: id, stage: "claimed", outcome: "in_progress", workerId, lockToken: `${id}-token`, leaseExpiresAt: new Date(now.getTime() - 1), createdAt: now, startedAt: now, updatedAt: now } });
+  }
+
+  assert.equal(await repo.deletePublishingCycle("delete-claims-cycle", "bob", now), "conflict");
+  assert.equal(client.publishingCycle.rows[0]?.["deletedAt"], null);
+  assert.equal(client.publishingCycle.rows[0]?.["status"], "running");
+  assert.equal(client.publishingJob.rows.find((row) => row["id"] === "delete-claims-job-a")?.["stage"], "claimed");
+  assert.equal(client.publishingJob.rows.find((row) => row["id"] === "delete-claims-job-b")?.["stage"], "claimed");
+  assert.equal(client.cycleItem.rows.find((row) => row["id"] === first.id)?.["status"], "publishing");
+  assert.equal(client.cycleItem.rows.find((row) => row["id"] === later.id)?.["status"], "publishing");
+  assert.equal(client.auditLog.rows.some((row) => row["action"] === "cycle.deleted"), false);
+});
+
 function memoryHarness(): RepoHarness {
   const repo = new MemoryRepository();
   return {
@@ -312,6 +334,7 @@ test("every version-checked save is a single conditional UPDATE keyed by id, ver
   const original = client.cycleItem.updateMany.bind(client.cycleItem);
   client.cycleItem.updateMany = async (args) => { seen.push(args.where); return original(args); };
   client.cycleItem.update = async () => { throw new Error("must not use plain update for versioned saves"); };
+  await client.publishingCycle.create({ data: { id: "cycle1", ownerId: "bob", socialAccountId: "acct1", name: "Cycle", status: "running", finalReviewConfirmed: true, orderMode: "manual", repeatBehavior: "never", timezone: "UTC", scheduleSettings: {}, deletedAt: null } });
   const repo = new PrismaRepository(client); await client.cycleItem.create({ data: itemToRow(makeItem({ id: "i1", version: 4 })) });
   await repo.saveCycleItemsIfVersionMatches([{ item: makeItem({ id: "i1", version: 5, captionText: "x" }), expectedVersion: 4 }]);
   assert.deepEqual(seen, [{ id: "i1", cycleId: "cycle1", cycleOwnerId: "bob", mediaAssetId: "media1", sourceKind: "shared_reference", sourceCollectionId: "col1", selectedRenderOutputId: null, version: 4 }]);

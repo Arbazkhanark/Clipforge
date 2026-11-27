@@ -6,6 +6,7 @@ import { PreflightPanel } from "./PreflightPanel.tsx";
 import { CycleScheduleForm } from "./CycleScheduleForm.tsx";
 import { isEditableItem } from "../lib/domain/cycle-state.ts";
 import { formatDateTime } from "./format.ts";
+import { CycleDeleteAction } from "./CycleDeleteAction.tsx";
 
 const ACCOUNT_STATUS = { connected: "Connected", token_expired: "Token expired", revoked: "Permissions revoked", disconnected: "Disconnected" } as const;
 
@@ -61,7 +62,7 @@ export function CyclesOverviewView({ cycles }: { cycles: CycleCard[] }) {
           <div className="cycles-table-scroll" role="region" aria-label="Publishing cycles" tabIndex={0}>
             <table className="cycles-table">
               <caption className="visually-hidden">Publishing cycles and their current progress</caption>
-              <thead><tr><th scope="col">Cycle</th><th scope="col">Status</th><th scope="col">Published</th><th scope="col">Upcoming</th><th scope="col">Attention</th><th scope="col"><span className="visually-hidden">Details</span></th></tr></thead>
+              <thead><tr><th scope="col">Cycle</th><th scope="col">Status</th><th scope="col">Published</th><th scope="col">Upcoming</th><th scope="col">Attention</th><th scope="col"><span className="visually-hidden">Details</span></th><th scope="col"><span className="visually-hidden">Actions</span></th></tr></thead>
               <tbody>{cycles.map((cycle) => {
                 const percent = cycle.totalItems > 0 ? Math.round((cycle.published / cycle.totalItems) * 100) : 0;
                 return (
@@ -72,6 +73,7 @@ export function CyclesOverviewView({ cycles }: { cycles: CycleCard[] }) {
                     <td aria-label={`${cycle.upcoming} upcoming ${cycle.upcoming === 1 ? "video" : "videos"}`}><strong>{cycle.upcoming}</strong><span className="cycles-cell-caption">{cycle.upcoming === 1 ? "video" : "videos"}</span></td>
                     <td>{cycle.needsAttention > 0 ? <span className="cycles-attention-count">{cycle.needsAttention} need review</span> : <span className="cycles-cell-caption">None</span>}</td>
                     <td><a className="cycles-detail-link" href={`/cycles/${cycle.id}`} aria-label={`View ${cycle.name} details`}>View details <span aria-hidden="true">→</span></a></td>
+                    <td><CycleDeleteAction cycleId={cycle.id} cycleName={cycle.name} /></td>
                   </tr>
                 );
               })}</tbody>

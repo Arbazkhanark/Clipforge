@@ -43,6 +43,7 @@ const EXPECTED_MIGRATIONS = [
   "20261121120000_complimentary_access_hold",
   "20261121120000_edited_media_replacements",
   "20261122120000_admin_user_suspension",
+  "20261127120000_cycle_soft_deletion",
 ] as const;
 
 type TestClient = PrismaClientLike & { $disconnect(): Promise<void> };

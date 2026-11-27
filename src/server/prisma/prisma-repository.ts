@@ -1115,14 +1115,14 @@ export class PrismaRepository implements Repository {
     }
   }
 
-  async getCycle(cycleId: string): Promise<CycleRecord | null> { const row = await this.db.publishingCycle.findUnique({ where: { id: cycleId } }); return row ? rowToCycle(row) : null; }
-  async countActiveCycles(userId: string): Promise<number> { return this.db.publishingCycle.count({ where: { ownerId: userId, status: { in: ACTIVE_CYCLE_STATUSES } } }); }
+  async getCycle(cycleId: string): Promise<CycleRecord | null> { const row = await this.db.publishingCycle.findFirst({ where: { id: cycleId, deletedAt: null } }); return row ? rowToCycle(row) : null; }
+  async countActiveCycles(userId: string): Promise<number> { return this.db.publishingCycle.count({ where: { ownerId: userId, deletedAt: null, status: { in: ACTIVE_CYCLE_STATUSES } } }); }
   async createCycle(cycle: CycleRecord): Promise<void> { await this.db.publishingCycle.create({ data: cycleToRow(cycle) }); }
   async createCycleWithinLimit(cycle: CycleRecord, activeCycleLimit: number): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
       const lockedUser = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${cycle.ownerId} FOR UPDATE`;
       if (!Array.isArray(lockedUser) || lockedUser.length === 0 || !Number.isInteger(activeCycleLimit) || activeCycleLimit < 1) return false;
-      const active = await tx.publishingCycle.count({ where: { ownerId: cycle.ownerId, status: { in: ACTIVE_CYCLE_STATUSES } } });
+      const active = await tx.publishingCycle.count({ where: { ownerId: cycle.ownerId, deletedAt: null, status: { in: ACTIVE_CYCLE_STATUSES } } });
       if (active >= activeCycleLimit) return false;
       await tx.publishingCycle.create({ data: cycleToRow(cycle) });
       return true;
@@ -1137,7 +1137,7 @@ export class PrismaRepository implements Repository {
     return this.db.$transaction(async (tx) => {
       const lockedUser = await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${cycle.ownerId} FOR UPDATE`;
       if (!Array.isArray(lockedUser) || lockedUser.length !== 1) return false;
-      const active = await tx.publishingCycle.count({ where: { ownerId: cycle.ownerId, status: { in: ACTIVE_CYCLE_STATUSES } } });
+      const active = await tx.publishingCycle.count({ where: { ownerId: cycle.ownerId, deletedAt: null, status: { in: ACTIVE_CYCLE_STATUSES } } });
       if (active >= activeCycleLimit) return false;
       for (const [collectionId, expectedVersion] of Object.entries(expectedCollectionSettingsVersions).sort(([a], [b]) => a.localeCompare(b))) {
         const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${collectionId} FOR SHARE`;
@@ -1173,7 +1173,7 @@ export class PrismaRepository implements Repository {
   async listRunningCyclesForSettlement(afterCycleId: string | null, limit: number): Promise<CycleRecord[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) return [];
     return (await this.db.publishingCycle.findMany({
-      where: { status: "running", ...(afterCycleId === null ? {} : { id: { gt: afterCycleId } }) },
+      where: { status: "running", deletedAt: null, ...(afterCycleId === null ? {} : { id: { gt: afterCycleId } }) },
       orderBy: { id: "asc" }, take: limit,
     })).map(rowToCycle);
   }
@@ -1185,7 +1185,7 @@ export class PrismaRepository implements Repository {
       const lockedCycle = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${input.cycleId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
       if (!Array.isArray(lockedCycle) || lockedCycle.length === 0) return "not_found";
       const row = await tx.publishingCycle.findUnique({ where: { id: input.cycleId } });
-      if (!row || row["ownerId"] !== input.ownerId) return "not_found";
+      if (!row || row["ownerId"] !== input.ownerId || row["deletedAt"] instanceof Date) return "not_found";
       if (row["status"] === "completed") return "already_completed";
       if (row["status"] !== "running") return "not_ready";
 
@@ -1228,7 +1228,7 @@ export class PrismaRepository implements Repository {
         }
         const eligible = await validateRepeatCandidates();
 
-      const completed = await tx.publishingCycle.updateMany({ where: { id: cycle.id, ownerId: input.ownerId, status: "running" }, data: { status: "completed" } });
+      const completed = await tx.publishingCycle.updateMany({ where: { id: cycle.id, ownerId: input.ownerId, status: "running", deletedAt: null }, data: { status: "completed" } });
       if (completed.count !== 1) return "already_completed";
       let nextCycle: CycleRecord | null = null;
       let nextItems: CycleItem[] = [];
@@ -1259,14 +1259,14 @@ export class PrismaRepository implements Repository {
     });
   }
   async transitionCycleStatus(cycleId: string, from: CycleStatus, to: CycleStatus, finalReviewConfirmed: boolean): Promise<boolean> {
-    const result = await this.db.publishingCycle.updateMany({ where: { id: cycleId, status: from }, data: { status: to, finalReviewConfirmed } });
+    const result = await this.db.publishingCycle.updateMany({ where: { id: cycleId, status: from, deletedAt: null }, data: { status: to, finalReviewConfirmed } });
     return result.count === 1;
   }
   async stopCycle(cycleId: string, ownerId: string, from: CycleStatus, finalReviewConfirmed: boolean, updates: { item: CycleItem; expectedVersion: number }[]): Promise<boolean> {
     const changedDuringStop = Symbol("cycle changed during stop");
     try {
       return await this.db.$transaction(async (tx) => {
-        const cycle = await tx.publishingCycle.updateMany({ where: { id: cycleId, ownerId, status: from }, data: { status: "stopped", finalReviewConfirmed } });
+        const cycle = await tx.publishingCycle.updateMany({ where: { id: cycleId, ownerId, status: from, deletedAt: null }, data: { status: "stopped", finalReviewConfirmed } });
         if (cycle.count !== 1) return false;
         for (const { item, expectedVersion } of updates) {
           const saved = await tx.cycleItem.updateMany({ where: { id: item.id, cycleId, cycleOwnerId: ownerId, mediaAssetId: item.mediaAssetId, sourceKind: item.sourceKind, sourceCollectionId: item.sourceCollectionId, selectedRenderOutputId: item.selectedRenderOutputId, version: expectedVersion, status: { in: ["upcoming", "scheduled"] } }, data: itemToMutableData(item) });
@@ -1279,7 +1279,70 @@ export class PrismaRepository implements Repository {
       throw error;
     }
   }
-  async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { return (await this.db.publishingCycle.findMany({ where: { ownerId: userId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })).map(rowToCycle); }
+  async deletePublishingCycle(cycleId: string, ownerId: string, now: Date): Promise<import("../repository.ts").DeletePublishingCycleResult> {
+    const changedDuringDelete = Symbol("publishing cycle changed during deletion");
+    try {
+      return await this.db.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${cycleId} AND "ownerId" = ${ownerId} FOR UPDATE`;
+      if (!Array.isArray(locked) || locked.length !== 1) return "not_found";
+      const cycle = await tx.publishingCycle.findUnique({ where: { id: cycleId } });
+      if (!cycle || cycle["ownerId"] !== ownerId) return "not_found";
+      if (cycle["deletedAt"] instanceof Date) return "already_deleted";
+
+      // A heartbeat may renew a claimed lease without changing the cycle row.
+      // Lock all attempts before evaluating leases so cancellation and heartbeat
+      // either complete before this snapshot or observe the tombstone afterward.
+      await tx.$queryRaw`SELECT "id" FROM "PublishingJob" WHERE "cycleId" = ${cycleId} ORDER BY "id" FOR UPDATE`;
+      const jobs = await tx.publishingJob.findMany({ where: { cycleId } });
+      if (jobs.some((job) => job["stage"] === "needs_manual_review" || job["outcome"] === "ambiguous")) return "ambiguous_outcome";
+      const activeStages = new Set(["claimed", "container_creation_pending", "container_processing", "ready_to_publish", "publishing"]);
+      const activeJobs = jobs.filter((job) => activeStages.has(String(job["stage"])));
+      const expiredClaimed = activeJobs.filter((job) => job["stage"] === "claimed" && job["leaseExpiresAt"] instanceof Date && job["leaseExpiresAt"] <= now);
+      if (activeJobs.some((job) => !expiredClaimed.includes(job))) return "active_worker";
+
+      const items = await tx.cycleItem.findMany({ where: { cycleId } });
+      if (items.some((item) => item["status"] === "processing" || item["status"] === "needs_review")) return "processing";
+      const expiredClaimItemIds = new Set(expiredClaimed.map((job) => String(job["cycleItemId"])));
+      if (items.some((item) => item["status"] === "publishing" && !expiredClaimItemIds.has(String(item["id"])))) return "ambiguous_outcome";
+
+      const expiredClaimPairs = expiredClaimed.map((job) => ({
+        job,
+        item: items.find((candidate) => candidate["id"] === job["cycleItemId"]),
+      }));
+      // Validate the complete set before writing anything. A normal return from
+      // an interactive transaction commits, so finding a malformed later claim
+      // inside the mutation loop could otherwise commit cancellations already
+      // performed for earlier claims.
+      if (expiredClaimPairs.some(({ job, item }) =>
+        job["ownerId"] !== ownerId || job["cycleId"] !== cycleId || job["stage"] !== "claimed" ||
+        !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] > now ||
+        typeof job["workerId"] !== "string" || !job["workerId"] ||
+        typeof job["lockToken"] !== "string" || !job["lockToken"] ||
+        !item || item["cycleId"] !== cycleId || item["cycleOwnerId"] !== ownerId ||
+        item["status"] !== "publishing" || item["lockedBy"] !== job["workerId"]
+      )) return "conflict";
+
+      for (const { job, item } of expiredClaimPairs) {
+        // The full validation above guarantees an item for every pair.
+        if (!item) throw changedDuringDelete;
+        const itemUpdate = await tx.cycleItem.updateMany({ where: { id: item["id"], cycleId, status: "publishing", lockedBy: job["workerId"], version: item["version"] }, data: { status: "cancelled", scheduledFor: null, lockedBy: null, lockExpiresAt: null, version: { increment: 1 } } });
+        if (itemUpdate.count !== 1) throw changedDuringDelete;
+        const jobUpdate = await tx.publishingJob.updateMany({ where: { id: job["id"], ownerId, cycleId, stage: "claimed", workerId: job["workerId"], lockToken: job["lockToken"], leaseExpiresAt: { lte: now } }, data: { stage: "cancelled", workerId: null, lockToken: null, leaseExpiresAt: null, updatedAt: now, finishedAt: now } });
+        if (jobUpdate.count !== 1) throw changedDuringDelete;
+      }
+      await tx.publishingJob.updateMany({ where: { cycleId, stage: "queued" }, data: { stage: "cancelled", workerId: null, lockToken: null, leaseExpiresAt: null, updatedAt: now, finishedAt: now } });
+      await tx.cycleItem.updateMany({ where: { cycleId, status: { in: ["upcoming", "scheduled"] } }, data: { status: "cancelled", scheduledFor: null, version: { increment: 1 } } });
+      const changed = await tx.publishingCycle.updateMany({ where: { id: cycleId, ownerId, deletedAt: null }, data: { deletedAt: now, status: "stopped", updatedAt: now } });
+      if (changed.count !== 1) throw changedDuringDelete;
+      await tx.auditLog.create({ data: { actorId: ownerId, action: "cycle.deleted", entityType: "PublishingCycle", entityId: cycleId, metadata: { cancelledQueuedAttempts: jobs.filter((job) => job["stage"] === "queued").length, retainedPublishedHistory: true } } });
+      return "deleted";
+      });
+    } catch (error) {
+      if (error === changedDuringDelete) return "conflict";
+      throw error;
+    }
+  }
+  async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { return (await this.db.publishingCycle.findMany({ where: { ownerId: userId, deletedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "asc" }] })).map(rowToCycle); }
 
   async getCycleItems(cycleId: string): Promise<CycleItem[]> { return (await this.db.cycleItem.findMany({ where: { cycleId }, orderBy: [{ position: "asc" }, { id: "asc" }] })).map(rowToItem); }
   async addCycleItems(items: CycleItem[], expectedCollectionSettingsVersions: Record<string, number> = {}, orderUpdates: { item: CycleItem; expectedVersion: number }[] = [], now = new Date(), confirmedDuplicateMediaIds: string[] = []): Promise<boolean> {
@@ -1300,7 +1363,7 @@ export class PrismaRepository implements Repository {
       const lockedCycle = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${cycleId} AND "ownerId" = ${ownerId} FOR UPDATE`;
       if (!Array.isArray(lockedCycle) || lockedCycle.length === 0) return false;
       const cycle = await tx.publishingCycle.findUnique({ where: { id: cycleId } });
-      if (!cycle || cycle["ownerId"] !== ownerId || cycle["status"] === "completed" || cycle["status"] === "stopped") return false;
+      if (!cycle || cycle["deletedAt"] instanceof Date || cycle["ownerId"] !== ownerId || cycle["status"] === "completed" || cycle["status"] === "stopped") return false;
       // The handler's earlier duplicate scan can be stale. The parent lock
       // serializes adders, so recheck active media here before ordering/inserting.
       const existingItems = await tx.cycleItem.findMany({ where: { cycleId, mediaAssetId: { in: mediaIds }, status: { not: "cancelled" } }, select: { mediaAssetId: true } });
@@ -1341,18 +1404,30 @@ export class PrismaRepository implements Repository {
     }); } catch (error) { if (error === orderConflict || error === insertConflict) return false; throw error; }
   }
   async saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]> {
-    const results: { itemId: string; saved: boolean }[] = [];
-    for (const { item, expectedVersion } of updates) {
-      // One conditional UPDATE: it changes the row only if nobody changed it since the caller read it.
-      const outcome = await this.db.cycleItem.updateMany({ where: { id: item.id, cycleId: item.cycleId, cycleOwnerId: item.cycleOwnerId, mediaAssetId: item.mediaAssetId, sourceKind: item.sourceKind, sourceCollectionId: item.sourceCollectionId, selectedRenderOutputId: item.selectedRenderOutputId, version: expectedVersion }, data: itemToMutableData(item) });
-      results.push({ itemId: item.id, saved: outcome.count === 1 });
+    const results = new Map<string, boolean>();
+    const groups = new Map<string, typeof updates>();
+    for (const update of updates) groups.set(update.item.cycleId, [...(groups.get(update.item.cycleId) ?? []), update]);
+    for (const [cycleId, group] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
+      await this.db.$transaction(async (tx) => {
+        // Serialize item edits with cycle deletion. A deleted cycle cannot acquire
+        // new editable item state after its pending items have been cancelled.
+        const locked = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${cycleId} FOR UPDATE`;
+        const cycle = Array.isArray(locked) && locked.length === 1 ? await tx.publishingCycle.findUnique({ where: { id: cycleId }, select: { ownerId: true, deletedAt: true } }) : null;
+        for (const { item, expectedVersion } of group) {
+          if (!cycle || cycle["deletedAt"] instanceof Date || cycle["ownerId"] !== item.cycleOwnerId) { results.set(item.id, false); continue; }
+          const outcome = await tx.cycleItem.updateMany({ where: { id: item.id, cycleId, cycleOwnerId: item.cycleOwnerId, mediaAssetId: item.mediaAssetId, sourceKind: item.sourceKind, sourceCollectionId: item.sourceCollectionId, selectedRenderOutputId: item.selectedRenderOutputId, version: expectedVersion }, data: itemToMutableData(item) });
+          results.set(item.id, outcome.count === 1);
+        }
+      });
     }
-    return results;
+    return updates.map(({ item }) => ({ itemId: item.id, saved: results.get(item.id) ?? false }));
   }
   async selectCycleItemRenderOutput(input: SelectCycleItemRenderOutputInput): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
+      const lockedCycle = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${input.cycleId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+      if (!Array.isArray(lockedCycle) || lockedCycle.length !== 1) return false;
       const cycle = await tx.publishingCycle.findUnique({ where: { id: input.cycleId } });
-      if (!cycle || cycle["ownerId"] !== input.ownerId || cycle["status"] !== "draft") return false;
+      if (!cycle || cycle["deletedAt"] instanceof Date || cycle["ownerId"] !== input.ownerId || cycle["status"] !== "draft") return false;
       const item = await tx.cycleItem.findUnique({ where: { id: input.itemId } });
       if (!item || item["cycleId"] !== input.cycleId || item["cycleOwnerId"] !== input.ownerId || item["version"] !== input.expectedVersion || (item["status"] !== "upcoming" && item["status"] !== "scheduled")) return false;
       if (input.renderOutputId !== null) {
@@ -1377,7 +1452,7 @@ export class PrismaRepository implements Repository {
     try {
       return await this.db.$transaction(async (tx) => {
         const cycle = await tx.publishingCycle.updateMany({
-          where: { id: cycleId, ownerId, status: "draft" },
+          where: { id: cycleId, ownerId, status: "draft", deletedAt: null },
           data: { scheduleSettings, timezone: scheduleSettings.timeZone, orderMode: scheduleSettings.orderMode ?? "manual" },
         });
         if (cycle.count !== 1) return false;
@@ -2639,7 +2714,7 @@ export class PrismaRepository implements Repository {
     }
   }
   async updateCycleRepeat(cycleId: string, ownerId: string, repeatBehavior: "never" | "ask" | "automatic"): Promise<boolean> {
-    const result = await this.db.publishingCycle.updateMany({ where: { id: cycleId, ownerId }, data: { repeatBehavior } });
+    const result = await this.db.publishingCycle.updateMany({ where: { id: cycleId, ownerId, deletedAt: null }, data: { repeatBehavior } });
     return result.count === 1;
   }
   async listPublishingJobsForAccount(userId: string, socialAccountId: string): Promise<PublishingJobRecord[]> {
@@ -2687,8 +2762,10 @@ export class PrismaRepository implements Repository {
     const identityMatches = (row: Record<string, unknown>) => row["ownerId"] === input.ownerId && row["cycleId"] === input.cycleId && row["cycleItemId"] === input.cycleItemId && row["socialAccountId"] === input.socialAccountId;
     try {
       const result = await this.db.$transaction(async (tx) => {
+        const lockedCycle = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${input.cycleId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+        if (!Array.isArray(lockedCycle) || lockedCycle.length !== 1) return { status: "conflict" as const };
         const [cycle, item, account] = await Promise.all([tx.publishingCycle.findUnique({ where: { id: input.cycleId } }), tx.cycleItem.findUnique({ where: { id: input.cycleItemId } }), tx.socialAccount.findUnique({ where: { id: input.socialAccountId } })]);
-        if (!cycle || !item || !account || cycle["ownerId"] !== input.ownerId || cycle["socialAccountId"] !== input.socialAccountId || item["cycleId"] !== input.cycleId || item["cycleOwnerId"] !== input.ownerId || account["userId"] !== input.ownerId || input.attemptNumber < 1) return { status: "conflict" as const };
+        if (!cycle || cycle["deletedAt"] instanceof Date || !item || !account || cycle["ownerId"] !== input.ownerId || cycle["socialAccountId"] !== input.socialAccountId || item["cycleId"] !== input.cycleId || item["cycleOwnerId"] !== input.ownerId || account["userId"] !== input.ownerId || input.attemptNumber < 1) return { status: "conflict" as const };
         const existing = await tx.publishingJob.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
         if (existing) return identityMatches(existing) ? { status: "existing" as const, job: publishingAttemptFromRow(existing) } : { status: "conflict" as const };
         const row = await tx.publishingJob.create({ data: { id: input.id, ownerId: input.ownerId, cycleId: input.cycleId, cycleItemId: input.cycleItemId, socialAccountId: input.socialAccountId, attemptNumber: input.attemptNumber, idempotencyKey: input.idempotencyKey, stage: "queued", outcome: "in_progress", startedAt: input.now, createdAt: input.now, updatedAt: input.now } });
@@ -2708,11 +2785,13 @@ export class PrismaRepository implements Repository {
         // Serializes claims for one account. The partial unique index is the second line of defense.
         const locked = await tx.$queryRaw`SELECT "id" FROM "SocialAccount" WHERE "id" = ${input.socialAccountId} FOR UPDATE`;
         if (!Array.isArray(locked) || locked.length !== 1) return null;
+        const cycleLock = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${input.cycleId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+        if (!Array.isArray(cycleLock) || cycleLock.length !== 1) return null;
         const [job, cycle, item, account] = await Promise.all([tx.publishingJob.findUnique({ where: { id: input.attemptId } }), tx.publishingCycle.findUnique({ where: { id: input.cycleId } }), tx.cycleItem.findUnique({ where: { id: input.cycleItemId } }), tx.socialAccount.findUnique({ where: { id: input.socialAccountId } })]);
         if (!job || job["stage"] !== "queued" || !cycle || !item || !account) return null;
         const accountEligibility = evaluateInstagramEligibility({ platform: account["platform"], status: account["status"], accountType: account["accountType"], grantedScopes: account["grantedScopes"], hasToken: typeof account["encryptedAccessToken"] === "string" && account["encryptedAccessToken"].length > 0, tokenExpiresAt: account["tokenExpiresAt"], now: input.now });
         const eligible = accountEligibility.eligible && account["userId"] === input.ownerId;
-        const valid = eligible && cycle["ownerId"] === input.ownerId && cycle["socialAccountId"] === input.socialAccountId && cycle["status"] === "running" && item["cycleId"] === input.cycleId && item["cycleOwnerId"] === input.ownerId && item["version"] === input.expectedItemVersion && (item["status"] === "upcoming" || item["status"] === "scheduled") && (!(item["scheduledFor"] instanceof Date) || item["scheduledFor"] <= input.now) && job["ownerId"] === input.ownerId && job["cycleId"] === input.cycleId && job["cycleItemId"] === input.cycleItemId && job["socialAccountId"] === input.socialAccountId;
+        const valid = eligible && cycle["deletedAt"] == null && cycle["ownerId"] === input.ownerId && cycle["socialAccountId"] === input.socialAccountId && cycle["status"] === "running" && item["cycleId"] === input.cycleId && item["cycleOwnerId"] === input.ownerId && item["version"] === input.expectedItemVersion && (item["status"] === "upcoming" || item["status"] === "scheduled") && (!(item["scheduledFor"] instanceof Date) || item["scheduledFor"] <= input.now) && job["ownerId"] === input.ownerId && job["cycleId"] === input.cycleId && job["cycleItemId"] === input.cycleItemId && job["socialAccountId"] === input.socialAccountId;
         if (!valid) return null;
         const active = await tx.publishingJob.findFirst({ where: { socialAccountId: input.socialAccountId, stage: { in: ["claimed", "container_creation_pending", "container_processing", "ready_to_publish", "publishing"] } } });
         if (active) return null;
@@ -2735,6 +2814,12 @@ export class PrismaRepository implements Repository {
     const stale = Symbol("attempt changed");
     try {
       return await this.db.$transaction(async (tx) => {
+        const initial = await tx.publishingJob.findUnique({ where: { id: input.jobId } });
+        if (!initial || initial["ownerId"] !== input.ownerId) return false;
+        const cycleLock = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${initial["cycleId"]} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
+        if (!Array.isArray(cycleLock) || cycleLock.length !== 1) return false;
+        const cycle = await tx.publishingCycle.findUnique({ where: { id: initial["cycleId"] } });
+        if (!cycle || cycle["deletedAt"] instanceof Date) return false;
         const job = await tx.publishingJob.findUnique({ where: { id: input.jobId } });
         if (!job || job["ownerId"] !== input.ownerId || job["workerId"] !== input.workerId || job["lockToken"] !== input.lockToken || job["stage"] !== input.expectedStage || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] <= input.now) return false;
         if (["ready_to_publish", "publishing"].includes(input.nextStage) && !(input.containerId ?? job["containerId"])) return false;
@@ -2750,15 +2835,27 @@ export class PrismaRepository implements Repository {
     } catch (error) { if (error === stale) return false; throw error; }
   }
   async heartbeatPublishingAttempt(jobId: string, ownerId: string, workerId: string, lockToken: string, now: Date, leaseSeconds: number): Promise<boolean> {
-    const job = await this.db.publishingJob.findUnique({ where: { id: jobId } });
-    if (!job || job["ownerId"] !== ownerId || job["workerId"] !== workerId || job["lockToken"] !== lockToken || !isActivePublishingAttempt(job["stage"] as PublishingAttemptRecord["stage"]) || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] <= now) return false;
-    const changed = await this.db.publishingJob.updateMany({ where: { id: jobId, ownerId, workerId, lockToken, stage: job["stage"], leaseExpiresAt: { gt: now } }, data: { leaseExpiresAt: new Date(now.getTime() + Math.max(1, leaseSeconds) * 1000), updatedAt: now } });
-    return changed.count === 1;
+    const initial = await this.db.publishingJob.findUnique({ where: { id: jobId }, select: { cycleId: true } });
+    if (!initial) return false;
+    return this.db.$transaction(async (tx) => {
+      const lockedCycle = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${initial["cycleId"]} AND "ownerId" = ${ownerId} FOR UPDATE`;
+      if (!Array.isArray(lockedCycle) || lockedCycle.length !== 1) return false;
+      const job = await tx.publishingJob.findUnique({ where: { id: jobId } });
+      if (!job || job["ownerId"] !== ownerId || job["workerId"] !== workerId || job["lockToken"] !== lockToken || !isActivePublishingAttempt(job["stage"] as PublishingAttemptRecord["stage"]) || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] <= now) return false;
+      const cycle = await tx.publishingCycle.findUnique({ where: { id: initial["cycleId"] } });
+      if (!cycle || cycle["deletedAt"] instanceof Date) return false;
+      const changed = await tx.publishingJob.updateMany({ where: { id: jobId, ownerId, workerId, lockToken, stage: job["stage"], leaseExpiresAt: { gt: now } }, data: { leaseExpiresAt: new Date(now.getTime() + Math.max(1, leaseSeconds) * 1000), updatedAt: now } });
+      return changed.count === 1;
+    });
   }
   async cancelPublishingAttempt(jobId: string, ownerId: string, now: Date): Promise<boolean> {
     const stale = Symbol("cancel changed");
+    const initial = await this.db.publishingJob.findUnique({ where: { id: jobId }, select: { cycleId: true } });
+    if (!initial) return false;
     try {
       return await this.db.$transaction(async (tx) => {
+        const cycleLock = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${initial["cycleId"]} AND "ownerId" = ${ownerId} FOR UPDATE`;
+        if (!Array.isArray(cycleLock) || cycleLock.length !== 1) return false;
         const job = await tx.publishingJob.findUnique({ where: { id: jobId } });
         if (!job || job["ownerId"] !== ownerId || (job["stage"] !== "queued" && job["stage"] !== "claimed")) return false;
         if (job["stage"] === "claimed" && (!(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] > now)) return false;
@@ -2776,8 +2873,12 @@ export class PrismaRepository implements Repository {
   }
   async cancelClaimedPublishingAttempt(jobId: string, ownerId: string, workerId: string, lockToken: string, now: Date): Promise<boolean> {
     const stale = Symbol("claim cancellation changed");
+    const initial = await this.db.publishingJob.findUnique({ where: { id: jobId }, select: { cycleId: true } });
+    if (!initial) return false;
     try {
       return await this.db.$transaction(async (tx) => {
+        const cycleLock = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${initial["cycleId"]} AND "ownerId" = ${ownerId} FOR UPDATE`;
+        if (!Array.isArray(cycleLock) || cycleLock.length !== 1) return false;
         const job = await tx.publishingJob.findUnique({ where: { id: jobId } });
         if (!job || job["ownerId"] !== ownerId || job["workerId"] !== workerId || job["lockToken"] !== lockToken || job["stage"] !== "claimed" || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] <= now) return false;
         const [item, cycle] = await Promise.all([tx.cycleItem.findUnique({ where: { id: job["cycleItemId"] } }), tx.publishingCycle.findUnique({ where: { id: job["cycleId"] } })]);
@@ -2793,8 +2894,12 @@ export class PrismaRepository implements Repository {
   }
   async markExpiredPublishingAttemptForReview(jobId: string, ownerId: string, now: Date): Promise<boolean> {
     const stale = Symbol("expired attempt changed");
+    const initial = await this.db.publishingJob.findUnique({ where: { id: jobId }, select: { cycleId: true } });
+    if (!initial) return false;
     try {
       return await this.db.$transaction(async (tx) => {
+        const cycleLock = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${initial["cycleId"]} AND "ownerId" = ${ownerId} FOR UPDATE`;
+        if (!Array.isArray(cycleLock) || cycleLock.length !== 1) return false;
         const job = await tx.publishingJob.findUnique({ where: { id: jobId } });
         if (!job || job["ownerId"] !== ownerId || !isActivePublishingAttempt(job["stage"] as PublishingAttemptRecord["stage"]) || !(job["leaseExpiresAt"] instanceof Date) || job["leaseExpiresAt"] > now) return false;
         const item = await tx.cycleItem.findUnique({ where: { id: job["cycleItemId"] } });

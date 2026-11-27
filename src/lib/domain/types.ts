@@ -150,4 +150,6 @@ export interface PublishingCycle {
   finalReviewConfirmed: boolean;
   /** Saved order for editable items; older fixtures and records default to manual. */
   orderMode?: import("./ordering.ts").OrderMode;
+  /** Soft-delete marker. Rows and publishing history are retained. */
+  deletedAt?: Date | null;
 }

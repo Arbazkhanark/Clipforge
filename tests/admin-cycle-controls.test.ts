@@ -59,3 +59,14 @@ test("cycle controls are idempotent, reject unsupported transitions and require 
     assert.equal(unverified.db.auditLog.rows.length, 0);
   } finally { unverified.reset(); }
 });
+
+test("cycle pause and resume reject deleted cycles without changing state or auditing", async () => {
+  const fixture = install();
+  try {
+    fixture.db.publishingCycle.rows[0]!["deletedAt"] = at;
+    assert.equal((await POST(request({ action: "pause" }))).status, 404);
+    assert.equal((await POST(request({ action: "resume" }))).status, 404);
+    assert.equal(fixture.db.publishingCycle.rows[0]?.["status"], "running");
+    assert.equal(fixture.db.auditLog.rows.length, 0);
+  } finally { fixture.reset(); }
+});

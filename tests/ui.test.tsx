@@ -168,7 +168,7 @@ test("cycles overview summarizes only supplied data and presents an accessible d
     { id: "cycle-running", name: "Weekly clips", status: "running", totalItems: 4, upcoming: 2, published: 2, needsAttention: 1 },
     { id: "cycle-draft", name: "Launch week", status: "draft", totalItems: 0, upcoming: 0, published: 0, needsAttention: 0 },
   ]} />);
-  for (const text of ["Publishing cycles", "All cycles", "Running", "Paused", "Completed / stopped", "Cycles needing attention", "Weekly clips", "View details", 'aria-valuenow="2"', 'aria-label="2 upcoming videos"']) assert.ok(out.includes(text), `missing ${text}`);
+  for (const text of ["Publishing cycles", "All cycles", "Running", "Paused", "Completed / stopped", "Cycles needing attention", "Weekly clips", "View details", "Delete Cycle", 'aria-valuenow="2"', 'aria-label="2 upcoming videos"']) assert.ok(out.includes(text), `missing ${text}`);
   assert.ok(out.includes('role="progressbar"'));
   assert.ok(out.includes('href="#new-cycle-heading"'));
   assert.doesNotMatch(out, /<th scope="col">Instagram account<\/th>/); // CycleCard has no account label to show in a column.

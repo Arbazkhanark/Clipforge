@@ -61,12 +61,12 @@ function cycleScheduleFromJson(value: unknown): PersistedCycleSchedule | null {
   return { ...settings, startDate, orderMode, shuffleSeed };
 }
 
-export const cycleToRow = (c: CycleRecord): Row => ({ id: c.id, ownerId: c.ownerId, socialAccountId: c.socialAccountId, name: c.name, status: c.status, finalReviewConfirmed: c.finalReviewConfirmed, orderMode: c.orderMode ?? c.scheduleSettings?.orderMode ?? "manual", repeatBehavior: c.repeatBehavior ?? "never", timezone: c.scheduleSettings?.timeZone ?? c.timezone ?? "Asia/Kolkata", scheduleSettings: c.scheduleSettings ?? {}, ...(c.createdAt ? { createdAt: c.createdAt } : {}) });
+export const cycleToRow = (c: CycleRecord): Row => ({ id: c.id, ownerId: c.ownerId, socialAccountId: c.socialAccountId, name: c.name, status: c.status, finalReviewConfirmed: c.finalReviewConfirmed, orderMode: c.orderMode ?? c.scheduleSettings?.orderMode ?? "manual", repeatBehavior: c.repeatBehavior ?? "never", timezone: c.scheduleSettings?.timeZone ?? c.timezone ?? "Asia/Kolkata", scheduleSettings: c.scheduleSettings ?? {}, deletedAt: c.deletedAt ?? null, ...(c.createdAt ? { createdAt: c.createdAt } : {}) });
 export const rowToCycle = (row: Row): CycleRecord => {
   const scheduleSettings = cycleScheduleFromJson(row["scheduleSettings"]);
   const orderMode = typeof row["orderMode"] === "string" && (ORDER_MODES as readonly string[]).includes(row["orderMode"]) ? row["orderMode"] as OrderMode : scheduleSettings?.orderMode ?? "manual";
   const timezone = scheduleSettings?.timeZone ?? (typeof row["timezone"] === "string" && isValidTimeZone(row["timezone"]) ? row["timezone"] : "Asia/Kolkata");
-  return { id: row["id"], ownerId: row["ownerId"], status: row["status"], finalReviewConfirmed: row["finalReviewConfirmed"], orderMode, name: row["name"], socialAccountId: row["socialAccountId"], repeatBehavior: row["repeatBehavior"] === "ask" || row["repeatBehavior"] === "automatic" ? row["repeatBehavior"] : "never", timezone, scheduleSettings: scheduleSettings ? { ...scheduleSettings, orderMode } : null, ...(row["createdAt"] instanceof Date ? { createdAt: row["createdAt"] } : {}) };
+  return { id: row["id"], ownerId: row["ownerId"], status: row["status"], finalReviewConfirmed: row["finalReviewConfirmed"], orderMode, name: row["name"], socialAccountId: row["socialAccountId"], repeatBehavior: row["repeatBehavior"] === "ask" || row["repeatBehavior"] === "automatic" ? row["repeatBehavior"] : "never", timezone, scheduleSettings: scheduleSettings ? { ...scheduleSettings, orderMode } : null, ...(row["createdAt"] instanceof Date ? { createdAt: row["createdAt"] } : {}), deletedAt: row["deletedAt"] instanceof Date ? row["deletedAt"] : null };
 };
 
 /** The fields a version-checked update may change. Media/source/render identity is immutable after collection admission. */

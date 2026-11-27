@@ -12,10 +12,10 @@ export type AdminPage<T> = { items: T[]; total: number; page: number; pageSize: 
 export type AdminListQuery = { page: number; pageSize: number; search?: string; status?: string; planId?: PlanId; from?: Date; to?: Date; verified?: boolean; actorId?: string; action?: string; targetType?: string; targetId?: string };
 export type AdminUserRow = { id: string; name: string | null; email: string; emailVerified: Date | null; role: string; createdAt: Date };
 export type AdminUserSuspension = { isSuspended: boolean; suspendedAt: Date | null; suspendedByAdminId: string | null; reason: string | null };
-export type AdminCycleRow = { id: string; ownerId: string; ownerName: string | null; ownerEmail: string; name: string; status: string; timezone: string; createdAt: Date; updatedAt: Date; itemCount: number; scheduledItemCount: number };
+export type AdminCycleRow = { id: string; ownerId: string; ownerName: string | null; ownerEmail: string; name: string; status: string; deletedAt: Date | null; timezone: string; createdAt: Date; updatedAt: Date; itemCount: number; scheduledItemCount: number };
 export type AdminStoredSchedule = ScheduleSettings & { startDate: string };
 export type AdminCycleDetails = {
-  cycle: { id: string; name: string; status: string; finalReviewConfirmed: boolean; orderMode: string; repeatBehavior: string; timezone: string; schedule: AdminStoredSchedule | null; scheduleAvailable: boolean; createdAt: Date; updatedAt: Date };
+  cycle: { id: string; name: string; status: string; deletedAt: Date | null; finalReviewConfirmed: boolean; orderMode: string; repeatBehavior: string; timezone: string; schedule: AdminStoredSchedule | null; scheduleAvailable: boolean; createdAt: Date; updatedAt: Date };
   owner: { id: string; name: string | null; email: string } | null;
   instagramAccount: { id: string; username: string | null; accountType: string | null; scopes: string | null; storedStatus: string; tokenExpiresAt: Date | null } | null;
   accountAssociation: "verified_owner_account" | "missing" | "owner_mismatch" | "unsupported_platform";
@@ -42,8 +42,8 @@ export type AdminInstagramDetails = {
   storedEligibility: { eligibleFromStoredFields: boolean; reason: InstagramEligibilityReason | null };
   restrictionState: "not_stored";
   liveMetaVerified: false;
-  campaigns: { id: string; name: string; status: string; timezone: string; createdAt: Date; updatedAt: Date }[];
-  publishingActivity: { id: string; campaignId: string | null; campaignName: string | null; cycleItemId: string; attemptNumber: number; stage: string; outcome: string; errorCategory: string | null; createdAt: Date; startedAt: Date; finishedAt: Date | null; itemStatus?: string; scheduledFor?: Date | null }[];
+  campaigns: { id: string; name: string; status: string; deletedAt: Date | null; timezone: string; createdAt: Date; updatedAt: Date }[];
+  publishingActivity: { id: string; campaignId: string | null; campaignName: string | null; campaignDeletedAt: Date | null; cycleItemId: string; attemptNumber: number; stage: string; outcome: string; errorCategory: string | null; createdAt: Date; startedAt: Date; finishedAt: Date | null; itemStatus?: string; scheduledFor?: Date | null }[];
   historyTruncated: { campaigns: boolean; publishingActivity: boolean };
 };
 export type AdminPaymentRow = { id: string; userId: string; ownerName: string | null; ownerEmail: string; amountPaise: number; currency: string; status: string; providerPaymentId: string; providerSubscriptionId: string | null; planId: string | null; interval: string | null; billingMode: "recurring" | "manual" | "unlinked" | "conflicting"; createdAt: Date };
@@ -57,7 +57,7 @@ export type AdminAnalyticsReport = {
   generatedAt: Date; from: Date; to: Date;
   series: { day: string; registrations: number; campaignsCreated: number; publishingQueued: number; publishingAttempted: number; publishingRecorded: number; publishingFailed: number; publishingNeedsReview: number }[];
   users: { registrationsInRange: number };
-  campaigns: { createdInRange: number; currentStatusesForCyclesCreatedInRange: Record<string, number>; unrecognizedStatusCount: number };
+  campaigns: { createdInRange: number; deletedInRange: number; currentStatusesForCyclesCreatedInRange: Record<string, number>; unrecognizedStatusCount: number };
   publishing: { attemptsCreatedInRange: number; currentStateCounts: Record<string, number>; unclassifiedCount: number };
   instagram: { accountsCreatedInRange: number; storedStatusCounts: Record<string, number>; unrecognizedStatusCount: number };
   payments: { paymentRecordsInRange: number; storedStatusCounts: Record<string, number>; unrecognizedStatusCount: number; monetaryMetrics: "unavailable" };
@@ -85,7 +85,7 @@ export type AdminUserDetails = {
   manualAccessPeriods: { id: string; intentId: string; planId: string; startsAt: Date; expiresAt: Date; createdAt: Date }[];
   payments: { id: string; amountPaise: number; currency: string; status: string; providerPaymentId: string; providerSubscriptionId: string | null; createdAt: Date }[];
   socialAccounts: { id: string; platform: string; username: string | null; accountType: string | null; grantedScopes: string | null; status: string; tokenExpiresAt: Date | null; createdAt: Date }[];
-  cycles: { id: string; name: string; status: string; timezone: string; createdAt: Date; updatedAt: Date; itemCount: number; scheduledItemCount: number }[];
+  cycles: { id: string; name: string; status: string; deletedAt: Date | null; timezone: string; createdAt: Date; updatedAt: Date; itemCount: number; scheduledItemCount: number }[];
   reels: { id: string; cycleId: string; position: number; status: string; scheduledFor: Date | null; publishedAt: Date | null; externalPostId: string | null; createdAt: Date }[];
   publishingAttempts: { id: string; cycleId: string; cycleItemId: string; attemptNumber: number; stage: string; outcome: string; errorCategory: string | null; instagramMediaId: string | null; createdAt: Date; startedAt: Date; finishedAt: Date | null }[];
   auditHistory: AdminAuditRow[];
@@ -95,7 +95,7 @@ export type AdminUserDetails = {
 export type AdminOverview = {
   generatedAt: Date;
   users: { registered: number; suspended: number | null };
-  cycles: { total: number; byStatus: Record<string, number> };
+  cycles: { total: number; deleted: number; byStatus: Record<string, number> };
   publishing: { totalAttempts: number; byStage: Record<string, number>; byOutcome: Record<string, number> };
   instagram: { totalStoredAccounts: number; byStoredStatus: Record<string, number> };
   billing: { paymentRecordCount: number; recordsByRecognizedStoredStatus: Record<string, number>; unclassifiedStatusCount: number; monetaryMetrics: "unavailable" };
@@ -128,7 +128,7 @@ export interface AdminDataRepository {
 }
 
 const USER_SELECT = { id: true, name: true, email: true, emailVerified: true, role: true, createdAt: true };
-const CYCLE_SELECT = { id: true, ownerId: true, name: true, status: true, timezone: true, createdAt: true, updatedAt: true };
+const CYCLE_SELECT = { id: true, ownerId: true, name: true, status: true, deletedAt: true, timezone: true, createdAt: true, updatedAt: true };
 const ACCOUNT_SELECT = { id: true, userId: true, platform: true, username: true, accountType: true, grantedScopes: true, status: true, tokenExpiresAt: true, createdAt: true };
 const PAYMENT_SELECT = { id: true, userId: true, amountPaise: true, currency: true, status: true, providerPaymentId: true, providerSubscriptionId: true, subscriptionIntentId: true, manualPaymentIntentId: true, createdAt: true };
 const AUDIT_SELECT = { id: true, actorId: true, action: true, entityType: true, entityId: true, createdAt: true, metadata: true };
@@ -234,10 +234,11 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
 
   async getOverview(generatedAt: Date): Promise<AdminOverview> {
     const PAYMENT_STATUSES = ["captured", "authorized", "failed", "refunded", "partially_refunded", "created"] as const;
-    const [registered, cycleTotal, cycleCounts, publishingTotal, stageCounts, outcomeCounts, accountTotal, accountCounts, paymentTotal, paymentCounts, suspended] = await Promise.all([
+    const [registered, cycleTotal, deletedCycleCount, cycleCounts, publishingTotal, stageCounts, outcomeCounts, accountTotal, accountCounts, paymentTotal, paymentCounts, suspended] = await Promise.all([
       this.db.user.count({ where: { role: "user" } }),
       this.db.publishingCycle.count(),
-      Promise.all(CYCLE_STATUSES.map(async (status) => [status, await this.db.publishingCycle.count({ where: { status } })] as const)),
+      this.db.publishingCycle.count({ where: { deletedAt: { not: null } } }),
+      Promise.all(CYCLE_STATUSES.map(async (status) => [status, await this.db.publishingCycle.count({ where: { status, deletedAt: null } })] as const)),
       this.db.publishingJob.count(),
       Promise.all(PUBLISHING_STAGES.map(async (stage) => [stage, await this.db.publishingJob.count({ where: { stage } })] as const)),
       Promise.all(PUBLISH_OUTCOMES.map(async (outcome) => [outcome, await this.db.publishingJob.count({ where: { outcome } })] as const)),
@@ -255,7 +256,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     return {
       generatedAt,
       users: { registered, suspended },
-      cycles: { total: cycleTotal, byStatus: Object.fromEntries(cycleCounts) },
+      cycles: { total: cycleTotal, deleted: deletedCycleCount, byStatus: Object.fromEntries(cycleCounts) },
       publishing: { totalAttempts: publishingTotal, byStage: Object.fromEntries(stageCounts), byOutcome: Object.fromEntries(outcomeCounts) },
       instagram: { totalStoredAccounts: accountTotal, byStoredStatus: Object.fromEntries(accountCounts) },
       billing: { paymentRecordCount: paymentTotal, recordsByRecognizedStoredStatus: Object.fromEntries(paymentCounts), unclassifiedStatusCount: Math.max(0, paymentTotal - paymentCounts.reduce((sum, [, count]) => sum + count, 0)), monetaryMetrics: "unavailable" },
@@ -296,7 +297,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     const userMap = new Map(users.map((row) => [str(row, "id"), { name: nullableStr(row, "name"), email: str(row, "email") }]));
     return makePage(rows.map((row) => {
       const ownerId = str(row, "ownerId"); const owner = userMap.get(ownerId); const itemCount = itemCounts.get(str(row, "id"));
-      return { id: str(row, "id"), ownerId, ownerName: owner?.name ?? null, ownerEmail: owner?.email ?? "unknown", name: str(row, "name"), status: str(row, "status"), timezone: str(row, "timezone"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]), itemCount: itemCount?.total ?? 0, scheduledItemCount: itemCount?.scheduled ?? 0 };
+      return { id: str(row, "id"), ownerId, ownerName: owner?.name ?? null, ownerEmail: owner?.email ?? "unknown", name: str(row, "name"), status: str(row, "status"), deletedAt: nullableDate(row["deletedAt"]), timezone: str(row, "timezone"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]), itemCount: itemCount?.total ?? 0, scheduledItemCount: itemCount?.scheduled ?? 0 };
     }), total, query);
   }
 
@@ -434,7 +435,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     const createdAt = { gte: from, lte: to };
     const [userRows, cycleRows, publishingRows, accountRows, paymentRows, subscriptionRows, planCounts, plans] = await Promise.all([
       this.db.user.findMany({ where: { role: "user", createdAt }, select: { createdAt: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: ANALYTICS_ROW_LIMIT + 1 }),
-      this.db.publishingCycle.findMany({ where: { createdAt }, select: { createdAt: true, status: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: ANALYTICS_ROW_LIMIT + 1 }),
+      this.db.publishingCycle.findMany({ where: { createdAt }, select: { createdAt: true, status: true, deletedAt: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: ANALYTICS_ROW_LIMIT + 1 }),
       this.db.publishingJob.findMany({ where: { createdAt }, select: { createdAt: true, stage: true, outcome: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: ANALYTICS_ROW_LIMIT + 1 }),
       this.db.socialAccount.findMany({ where: { createdAt }, select: { createdAt: true, status: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: ANALYTICS_ROW_LIMIT + 1 }),
       this.db.paymentRecord.findMany({ where: { createdAt }, select: { createdAt: true, status: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: ANALYTICS_ROW_LIMIT + 1 }),
@@ -465,13 +466,14 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
       else if (entry && state === "failed") entry.publishingFailed++;
       else if (entry && state === "needs_review") entry.publishingNeedsReview++;
     }
-    const campaignStatuses = countKnown(cycles, "status", CYCLE_STATUSES);
+    const deletedCycles = cycles.filter((row) => row["deletedAt"] != null);
+    const campaignStatuses = countKnown(cycles.filter((row) => row["deletedAt"] == null), "status", CYCLE_STATUSES);
     const instagramStatuses = countKnown(accounts, "status", ACCOUNT_STATUSES);
     const paymentStatuses = countKnown(payments, "status", ["captured", "authorized", "failed", "refunded", "partially_refunded", "created"]);
     const subscriptionStatuses = countKnown(subscriptions, "status", ["created", "authenticated", "active", "pending", "halted", "paused", "cancelled", "completed", "expired"]);
     return {
       generatedAt, from, to, series: [...series.values()], users: { registrationsInRange: users.length },
-      campaigns: { createdInRange: cycles.length, currentStatusesForCyclesCreatedInRange: campaignStatuses.counts, unrecognizedStatusCount: campaignStatuses.unrecognized },
+      campaigns: { createdInRange: cycles.length, deletedInRange: deletedCycles.length, currentStatusesForCyclesCreatedInRange: campaignStatuses.counts, unrecognizedStatusCount: campaignStatuses.unrecognized },
       publishing: { attemptsCreatedInRange: jobs.length, currentStateCounts: publishingCounts, unclassifiedCount },
       instagram: { accountsCreatedInRange: accounts.length, storedStatusCounts: instagramStatuses.counts, unrecognizedStatusCount: instagramStatuses.unrecognized },
       payments: { paymentRecordsInRange: payments.length, storedStatusCounts: paymentStatuses.counts, unrecognizedStatusCount: paymentStatuses.unrecognized, monetaryMetrics: "unavailable" },
@@ -642,7 +644,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
       this.db.manualPlanAccess.findMany({ where: { userId }, select: { id: true, intentId: true, planId: true, startsAt: true, expiresAt: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 }),
       this.db.paymentRecord.findMany({ where: { userId }, select: { id: true, amountPaise: true, currency: true, status: true, providerPaymentId: true, providerSubscriptionId: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 }),
       this.db.socialAccount.findMany({ where: { userId }, select: { id: true, platform: true, username: true, accountType: true, grantedScopes: true, status: true, tokenExpiresAt: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 }),
-      this.db.publishingCycle.findMany({ where: { ownerId: userId }, select: { id: true, name: true, status: true, timezone: true, createdAt: true, updatedAt: true }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 }),
+      this.db.publishingCycle.findMany({ where: { ownerId: userId }, select: { id: true, name: true, status: true, deletedAt: true, timezone: true, createdAt: true, updatedAt: true }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 }),
       this.db.usageRecord.findMany({ where: { userId }, select: { id: true, kind: true, amount: true, periodStart: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 }),
     ]);
     const cycleRowsLimited = cycleRows.slice(0, HISTORY_LIMIT);
@@ -654,7 +656,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     ]) : [[], [], new Map<string, { total: number; scheduled: number }>()];
     const auditWhere: Where = { OR: [{ actorId: userId }, { entityType: "user", entityId: userId }, ...(cycleIds.length ? [{ entityType: "cycle", entityId: { in: cycleIds } }] : [])] };
     const auditRows = await this.db.auditLog.findMany({ where: auditWhere, select: AUDIT_SELECT, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 });
-    const cycles = cycleRowsLimited.map((row) => { const id = str(row, "id"); const counts = cycleCounts.get(id); return { id, name: str(row, "name"), status: str(row, "status"), timezone: str(row, "timezone"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]), itemCount: counts?.total ?? 0, scheduledItemCount: counts?.scheduled ?? 0 }; });
+    const cycles = cycleRowsLimited.map((row) => { const id = str(row, "id"); const counts = cycleCounts.get(id); return { id, name: str(row, "name"), status: str(row, "status"), deletedAt: nullableDate(row["deletedAt"]), timezone: str(row, "timezone"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]), itemCount: counts?.total ?? 0, scheduledItemCount: counts?.scheduled ?? 0 }; });
     const subscription = subscriptionRow ? { planId: str(subscriptionRow, "planId"), interval: str(subscriptionRow, "interval"), status: str(subscriptionRow, "status"), currentPeriodEnd: nullableDate(subscriptionRow["currentPeriodEnd"]), cancelAtPeriodEnd: subscriptionRow["cancelAtPeriodEnd"] === true, cancellationRequestedAt: nullableDate(subscriptionRow["cancellationRequestedAt"]), createdAt: toDate(subscriptionRow["createdAt"]), updatedAt: toDate(subscriptionRow["updatedAt"]) } : null;
     const mapIntent = (row: Row) => ({ id: str(row, "id"), planId: str(row, "planId"), interval: str(row, "interval"), amountPaise: row["amountPaise"] === null ? null : num(row, "amountPaise"), currency: str(row, "currency"), status: str(row, "status"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]) });
     const mapManualIntent = (row: Row) => ({ ...mapIntent(row), amountPaise: num(row, "amountPaise") });
@@ -718,14 +720,15 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
       if (!actor || actor["role"] !== "admin" || actor["emailVerified"] == null) return { status: "forbidden", inFlightItemCount: 0 };
       const locked = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${input.cycleId} FOR UPDATE`;
       if (!Array.isArray(locked) || locked.length !== 1) return { status: "not_found", inFlightItemCount: 0 };
-      const cycle = await tx.publishingCycle.findUnique({ where: { id: input.cycleId }, select: { id: true, status: true } });
+      const cycle = await tx.publishingCycle.findUnique({ where: { id: input.cycleId }, select: { id: true, status: true, deletedAt: true } });
       if (!cycle) return { status: "not_found", inFlightItemCount: 0 };
+      if (cycle["deletedAt"] != null) return { status: "not_found", inFlightItemCount: 0 };
       const expected = input.action === "pause" ? "running" : "paused";
       const next = input.action === "pause" ? "paused" : "running";
       if (cycle["status"] === next) return { status: "existing", inFlightItemCount: 0 };
       if (cycle["status"] !== expected) return { status: "invalid_transition", inFlightItemCount: 0 };
       const inFlightItemCount = input.action === "pause" ? await tx.cycleItem.count({ where: { cycleId: input.cycleId, status: { in: ["processing", "publishing"] } } }) : 0;
-      const updated = await tx.publishingCycle.updateMany({ where: { id: input.cycleId, status: expected }, data: { status: next, updatedAt: input.now } });
+      const updated = await tx.publishingCycle.updateMany({ where: { id: input.cycleId, status: expected, deletedAt: null }, data: { status: next, updatedAt: input.now } });
       if (updated.count !== 1) return { status: "invalid_transition", inFlightItemCount: 0 };
       await tx.auditLog.create({ data: {
         id: input.newId(), actorId: input.adminId, action: input.action === "pause" ? "admin.cycle_paused" : "admin.cycle_resumed",
@@ -737,7 +740,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
   }
 
   async getCycleDetails(cycleId: string): Promise<AdminCycleDetails | null> {
-    const cycleRow = await this.db.publishingCycle.findUnique({ where: { id: cycleId }, select: { id: true, ownerId: true, socialAccountId: true, name: true, status: true, finalReviewConfirmed: true, orderMode: true, repeatBehavior: true, timezone: true, scheduleSettings: true, createdAt: true, updatedAt: true } });
+    const cycleRow = await this.db.publishingCycle.findUnique({ where: { id: cycleId }, select: { id: true, ownerId: true, socialAccountId: true, name: true, status: true, deletedAt: true, finalReviewConfirmed: true, orderMode: true, repeatBehavior: true, timezone: true, scheduleSettings: true, createdAt: true, updatedAt: true } });
     if (!cycleRow) return null;
     const ownerId = str(cycleRow, "ownerId");
     const [ownerRow, accountRow, itemRows, attemptRows] = await Promise.all([
@@ -788,7 +791,7 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     }
     const schedule = parseStoredSchedule(cycleRow["scheduleSettings"]);
     return {
-      cycle: { id: str(cycleRow, "id"), name: str(cycleRow, "name"), status: str(cycleRow, "status"), finalReviewConfirmed: bool(cycleRow, "finalReviewConfirmed"), orderMode: str(cycleRow, "orderMode"), repeatBehavior: str(cycleRow, "repeatBehavior"), timezone: str(cycleRow, "timezone"), schedule, scheduleAvailable: schedule !== null, createdAt: toDate(cycleRow["createdAt"]), updatedAt: toDate(cycleRow["updatedAt"]) },
+      cycle: { id: str(cycleRow, "id"), name: str(cycleRow, "name"), status: str(cycleRow, "status"), deletedAt: nullableDate(cycleRow["deletedAt"]), finalReviewConfirmed: bool(cycleRow, "finalReviewConfirmed"), orderMode: str(cycleRow, "orderMode"), repeatBehavior: str(cycleRow, "repeatBehavior"), timezone: str(cycleRow, "timezone"), schedule, scheduleAvailable: schedule !== null, createdAt: toDate(cycleRow["createdAt"]), updatedAt: toDate(cycleRow["updatedAt"]) },
       owner: ownerRow ? { id: str(ownerRow, "id"), name: nullableStr(ownerRow, "name"), email: str(ownerRow, "email") } : null,
       instagramAccount, accountAssociation, items, publishingAttempts: safeAttempts,
       historyTruncated: { items: itemRows.length > DETAIL_LIMIT, publishingAttempts: attemptRows.length > DETAIL_LIMIT },
@@ -802,21 +805,21 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
     const [ownerRow, tokenRow, campaignRows, attemptRows] = await Promise.all([
       this.db.user.findUnique({ where: { id: ownerId, role: "user" }, select: { id: true, name: true, email: true } }),
       this.db.socialAccount.findFirst({ where: { id: accountId, encryptedAccessToken: { not: null } }, select: { id: true } }),
-      this.db.publishingCycle.findMany({ where: { ownerId, socialAccountId: accountId }, select: { id: true, ownerId: true, socialAccountId: true, name: true, status: true, timezone: true, createdAt: true, updatedAt: true }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 }),
+      this.db.publishingCycle.findMany({ where: { ownerId, socialAccountId: accountId }, select: { id: true, ownerId: true, socialAccountId: true, name: true, status: true, deletedAt: true, timezone: true, createdAt: true, updatedAt: true }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take: HISTORY_LIMIT + 1 }),
       this.db.publishingJob.findMany({ where: { ownerId, socialAccountId: accountId }, select: { id: true, ownerId: true, socialAccountId: true, cycleId: true, cycleItemId: true, attemptNumber: true, stage: true, outcome: true, errorCategory: true, createdAt: true, startedAt: true, finishedAt: true }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: DETAIL_LIMIT + 1 }),
     ]);
     const tokenStored = tokenRow !== null;
     const status = str(accountRow, "status"); const accountType = nullableStr(accountRow, "accountType"); const grantedScopes = nullableStr(accountRow, "grantedScopes"); const tokenExpiresAt = nullableDate(accountRow["tokenExpiresAt"]);
     const assessment = storedInstagramEligibility({ status, accountType, grantedScopes, tokenExpiresAt }, tokenStored, now);
-    const campaigns = campaignRows.slice(0, HISTORY_LIMIT).map((row) => ({ id: str(row, "id"), name: str(row, "name"), status: str(row, "status"), timezone: str(row, "timezone"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]) }));
+    const campaigns = campaignRows.slice(0, HISTORY_LIMIT).map((row) => ({ id: str(row, "id"), name: str(row, "name"), status: str(row, "status"), deletedAt: nullableDate(row["deletedAt"]), timezone: str(row, "timezone"), createdAt: toDate(row["createdAt"]), updatedAt: toDate(row["updatedAt"]) }));
     const activityRows = attemptRows.slice(0, DETAIL_LIMIT);
     const cycleIds = [...new Set(activityRows.map((row) => str(row, "cycleId")))];
     const itemIds = [...new Set(activityRows.map((row) => str(row, "cycleItemId")))];
     const [relatedCycles, items] = await Promise.all([
-      cycleIds.length ? this.db.publishingCycle.findMany({ where: { id: { in: cycleIds }, ownerId, socialAccountId: accountId }, select: { id: true, name: true } }) : Promise.resolve([]),
+      cycleIds.length ? this.db.publishingCycle.findMany({ where: { id: { in: cycleIds }, ownerId, socialAccountId: accountId }, select: { id: true, name: true, deletedAt: true } }) : Promise.resolve([]),
       itemIds.length ? this.db.cycleItem.findMany({ where: { id: { in: itemIds } }, select: { id: true, cycleId: true, status: true, scheduledFor: true } }) : Promise.resolve([]),
     ]);
-    const cycleById = new Map(relatedCycles.map((row) => [str(row, "id"), str(row, "name")]));
+    const cycleById = new Map(relatedCycles.map((row) => [str(row, "id"), { name: str(row, "name"), deletedAt: nullableDate(row["deletedAt"]) }]));
     const itemById = new Map(items.map((row) => [str(row, "id"), { cycleId: str(row, "cycleId"), status: str(row, "status"), scheduledFor: nullableDate(row["scheduledFor"]) }]));
     return {
       account: { id: str(accountRow, "id"), username: nullableStr(accountRow, "username"), accountType, storedStatus: status, tokenExpiresAt, createdAt: toDate(accountRow["createdAt"]), updatedInformation: "unavailable" },
@@ -830,7 +833,8 @@ export class PrismaAdminDataRepository implements AdminDataRepository {
       publishingActivity: activityRows.map((row) => {
         const cycleId = str(row, "cycleId"); const cycleItemId = str(row, "cycleItemId"); const item = itemById.get(cycleItemId);
         const verifiedItem = item?.cycleId === cycleId ? item : undefined;
-        return { id: str(row, "id"), campaignId: cycleById.has(cycleId) ? cycleId : null, campaignName: cycleById.get(cycleId) ?? null, cycleItemId, attemptNumber: num(row, "attemptNumber"), stage: str(row, "stage"), outcome: str(row, "outcome"), errorCategory: nullableStr(row, "errorCategory"), createdAt: toDate(row["createdAt"]), startedAt: toDate(row["startedAt"]), finishedAt: nullableDate(row["finishedAt"]), ...(verifiedItem ? { itemStatus: verifiedItem.status, scheduledFor: verifiedItem.scheduledFor } : {}) };
+        const campaign = cycleById.get(cycleId);
+        return { id: str(row, "id"), campaignId: campaign ? cycleId : null, campaignName: campaign?.name ?? null, campaignDeletedAt: campaign?.deletedAt ?? null, cycleItemId, attemptNumber: num(row, "attemptNumber"), stage: str(row, "stage"), outcome: str(row, "outcome"), errorCategory: nullableStr(row, "errorCategory"), createdAt: toDate(row["createdAt"]), startedAt: toDate(row["startedAt"]), finishedAt: nullableDate(row["finishedAt"]), ...(verifiedItem ? { itemStatus: verifiedItem.status, scheduledFor: verifiedItem.scheduledFor } : {}) };
       }),
       historyTruncated: { campaigns: campaignRows.length > HISTORY_LIMIT, publishingActivity: attemptRows.length > DETAIL_LIMIT },
     };

@@ -892,17 +892,17 @@ export class MemoryRepository implements Repository {
     });
   }
 
-  async getCycle(cycleId: string): Promise<CycleRecord | null> { await tick(); const c = this.cycles.get(cycleId); return c ? clone(c) : null; }
+  async getCycle(cycleId: string): Promise<CycleRecord | null> { await tick(); const c = this.cycles.get(cycleId); return c && c.deletedAt == null ? clone(c) : null; }
   async countActiveCycles(userId: string): Promise<number> {
     await tick();
-    return [...this.cycles.values()].filter((c) => c.ownerId === userId && (c.status === "draft" || c.status === "running" || c.status === "paused")).length;
+    return [...this.cycles.values()].filter((c) => c.ownerId === userId && c.deletedAt == null && (c.status === "draft" || c.status === "running" || c.status === "paused")).length;
   }
   async createCycle(cycle: CycleRecord): Promise<void> { await tick(); this.cycles.set(cycle.id, clone(cycle)); }
   async createCycleWithinLimit(cycle: CycleRecord, activeCycleLimit: number): Promise<boolean> {
     return this.withPromotionLock(`user:${cycle.ownerId}`, async () => {
       await tick();
       if (!Number.isInteger(activeCycleLimit) || activeCycleLimit < 1 || this.cycles.has(cycle.id)) return false;
-      const active = [...this.cycles.values()].filter((entry) => entry.ownerId === cycle.ownerId && (entry.status === "draft" || entry.status === "running" || entry.status === "paused")).length;
+      const active = [...this.cycles.values()].filter((entry) => entry.ownerId === cycle.ownerId && entry.deletedAt == null && (entry.status === "draft" || entry.status === "running" || entry.status === "paused")).length;
       if (active >= activeCycleLimit) return false;
       this.cycles.set(cycle.id, clone(cycle));
       return true;
@@ -916,7 +916,7 @@ export class MemoryRepository implements Repository {
         if (!Number.isInteger(activeCycleLimit) || activeCycleLimit < 1 || this.cycles.has(cycle.id) || cycle.status !== "draft" || cycle.finalReviewConfirmed || items.length === 0 || items.some((item) => item.cycleId !== cycle.id || item.cycleOwnerId !== cycle.ownerId || item.status !== "upcoming" || item.scheduledFor !== null || !Number.isInteger(item.position) || item.position < 1)) return false;
         if (new Set(items.map((item) => item.id)).size !== items.length || new Set(items.map((item) => item.mediaAssetId)).size !== items.length || new Set(items.map((item) => item.position)).size !== items.length) return false;
         if (items.some((item) => !item.sourceCollectionId || !Object.hasOwn(expectedCollectionSettingsVersions, item.sourceCollectionId))) return false;
-        const active = [...this.cycles.values()].filter((entry) => entry.ownerId === cycle.ownerId && (entry.status === "draft" || entry.status === "running" || entry.status === "paused")).length;
+        const active = [...this.cycles.values()].filter((entry) => entry.ownerId === cycle.ownerId && entry.deletedAt == null && (entry.status === "draft" || entry.status === "running" || entry.status === "paused")).length;
         if (active >= activeCycleLimit || new Set(items.map((item) => item.mediaAssetId)).size !== items.length) return false;
         for (const [collectionId, version] of Object.entries(expectedCollectionSettingsVersions)) {
           const collection = this.collections.get(collectionId);
@@ -945,14 +945,14 @@ export class MemoryRepository implements Repository {
   async listRunningCyclesForSettlement(afterCycleId: string | null, limit: number): Promise<CycleRecord[]> {
     await tick();
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) return [];
-    return [...this.cycles.values()].filter((cycle) => cycle.status === "running" && (afterCycleId === null || cycle.id > afterCycleId))
+    return [...this.cycles.values()].filter((cycle) => cycle.status === "running" && cycle.deletedAt == null && (afterCycleId === null || cycle.id > afterCycleId))
       .sort((a, b) => a.id.localeCompare(b.id)).slice(0, limit).map(clone);
   }
   async completeSettledCycle(input: { cycleId: string; ownerId: string; now: Date; activeCycleLimit: number; newId: () => string }): Promise<import("./repository.ts").CompleteSettledCycleResult> {
     return this.withPromotionLock(`user:${input.ownerId}`, () => this.withPromotionLock(`cycle:${input.cycleId}`, async () => {
       await tick();
       const cycle = this.cycles.get(input.cycleId);
-      if (!cycle || cycle.ownerId !== input.ownerId) return "not_found";
+      if (!cycle || cycle.deletedAt != null || cycle.ownerId !== input.ownerId) return "not_found";
       if (cycle.status === "completed") return "already_completed";
       if (cycle.status !== "running") return "not_ready";
       const items = [...this.items.values()].filter((item) => item.cycleId === cycle.id).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
@@ -1008,7 +1008,7 @@ export class MemoryRepository implements Repository {
     return this.withPromotionLock(`cycle:${cycleId}`, async () => {
       await tick();
       const cycle = this.cycles.get(cycleId);
-      if (!cycle || cycle.status !== from) return false; // someone else already changed it
+      if (!cycle || cycle.deletedAt != null || cycle.status !== from) return false; // someone else already changed it
       this.cycles.set(cycleId, { ...cycle, status: to, finalReviewConfirmed });
       return true;
     });
@@ -1017,7 +1017,7 @@ export class MemoryRepository implements Repository {
     return this.withPromotionLock(`cycle:${cycleId}`, async () => {
       await tick();
       const cycle = this.cycles.get(cycleId);
-      if (!cycle || cycle.ownerId !== ownerId || cycle.status !== from) return false;
+      if (!cycle || cycle.deletedAt != null || cycle.ownerId !== ownerId || cycle.status !== from) return false;
       for (const { item, expectedVersion } of updates) {
         const stored = this.items.get(item.id);
         if (!stored || stored.cycleId !== cycleId || stored.cycleOwnerId !== ownerId || stored.version !== expectedVersion || (stored.status !== "upcoming" && stored.status !== "scheduled")) return false;
@@ -1027,10 +1027,37 @@ export class MemoryRepository implements Repository {
       return true;
     });
   }
+  async deletePublishingCycle(cycleId: string, ownerId: string, now: Date): Promise<import("./repository.ts").DeletePublishingCycleResult> {
+    return this.withPromotionLock(`cycle:${cycleId}`, async () => {
+      await tick();
+      const cycle = this.cycles.get(cycleId);
+      if (!cycle || cycle.ownerId !== ownerId) return "not_found";
+      if (cycle.deletedAt != null) return "already_deleted";
+      const jobs = [...this.publishingJobs.values()].filter((job) => job.cycleId === cycleId);
+      if (jobs.some((job) => job.stage === "needs_manual_review" || job.outcome === "ambiguous")) return "ambiguous_outcome";
+      const activeJobs = jobs.filter((job) => isActivePublishingAttempt(job.stage));
+      const expiredClaimed = activeJobs.filter((job) => job.stage === "claimed" && job.leaseExpiresAt !== null && job.leaseExpiresAt <= now);
+      if (activeJobs.some((job) => !expiredClaimed.includes(job))) return "active_worker";
+      const items = [...this.items.values()].filter((item) => item.cycleId === cycleId);
+      if (items.some((item) => item.status === "processing" || item.status === "needs_review")) return "processing";
+      const expiredClaimItemIds = new Set(expiredClaimed.map((job) => job.cycleItemId));
+      if (items.some((item) => item.status === "publishing" && !expiredClaimItemIds.has(item.id))) return "ambiguous_outcome";
+      for (const job of expiredClaimed) {
+        const item = items.find((candidate) => candidate.id === job.cycleItemId);
+        if (!item || item.status !== "publishing" || item.lockedBy !== job.workerId) return "conflict";
+      }
+      const expiredJobIds = new Set(expiredClaimed.map((job) => job.id));
+      for (const job of jobs) if (job.stage === "queued" || expiredJobIds.has(job.id)) this.publishingJobs.set(job.id, { ...job, stage: "cancelled", workerId: null, lockToken: null, leaseExpiresAt: null, updatedAt: now, finishedAt: now });
+      for (const item of items) if (item.status === "upcoming" || item.status === "scheduled" || expiredClaimItemIds.has(item.id)) this.items.set(item.id, { ...item, status: "cancelled", scheduledFor: null, lockedBy: null, lockExpiresAt: null, version: item.version + 1 });
+      this.cycles.set(cycleId, { ...cycle, status: "stopped", deletedAt: now });
+      this.audit.push({ actorId: ownerId, action: "cycle.deleted", entityType: "PublishingCycle", entityId: cycleId, metadata: { cancelledQueuedAttempts: jobs.filter((job) => job.stage === "queued").length, retainedPublishedHistory: true } });
+      return "deleted";
+    });
+  }
   async updateCycleRepeat(cycleId: string, ownerId: string, repeatBehavior: "never" | "ask" | "automatic"): Promise<boolean> {
     await tick();
     const cycle = this.cycles.get(cycleId);
-    if (!cycle || cycle.ownerId !== ownerId) return false;
+    if (!cycle || cycle.deletedAt != null || cycle.ownerId !== ownerId) return false;
     this.cycles.set(cycleId, { ...cycle, repeatBehavior });
     return true;
   }
@@ -1052,7 +1079,7 @@ export class MemoryRepository implements Repository {
     return this.withPromotionLock(`cycle:${cycleId}`, async () => {
       await tick();
       const cycle = this.cycles.get(cycleId);
-      if (!cycle || cycle.ownerId !== ownerId || cycle.status === "completed" || cycle.status === "stopped" || items.some((item) => this.items.has(item.id))) return false;
+      if (!cycle || cycle.deletedAt != null || cycle.ownerId !== ownerId || cycle.status === "completed" || cycle.status === "stopped" || items.some((item) => this.items.has(item.id))) return false;
       const mediaIds = new Set(items.map((item) => item.mediaAssetId));
       if ([...this.items.values()].some((item) => item.cycleId === cycleId && mediaIds.has(item.mediaAssetId) && item.status !== "cancelled" && !confirmedDuplicates.has(item.mediaAssetId))) return false;
       if (Object.entries(expectedCollectionSettingsVersions).some(([collectionId, version]) => (this.collections.get(collectionId)?.settingsVersion ?? 1) !== version)) return false;
@@ -1085,35 +1112,43 @@ export class MemoryRepository implements Repository {
   async saveCycleItemsIfVersionMatches(updates: { item: CycleItem; expectedVersion: number }[]): Promise<{ itemId: string; saved: boolean }[]> {
     await tick();
     this.beforeItemSave?.();
-    // No `await` below: the check-and-write of each item is atomic, like a single SQL UPDATE ... WHERE version = ?.
-    return updates.map(({ item, expectedVersion }) => {
-      const stored = this.items.get(item.id);
-      if (!stored || stored.version !== expectedVersion || stored.cycleId !== item.cycleId || stored.cycleOwnerId !== item.cycleOwnerId ||
-        stored.mediaAssetId !== item.mediaAssetId || stored.sourceKind !== item.sourceKind || stored.sourceCollectionId !== item.sourceCollectionId ||
-        stored.selectedRenderOutputId !== item.selectedRenderOutputId) return { itemId: item.id, saved: false };
-      const merged = { ...stored } as Record<string, unknown>;
-      for (const field of MUTABLE_ITEM_FIELDS) merged[field] = clone(item[field]);
-      this.items.set(item.id, merged as unknown as CycleItem);
-      return { itemId: item.id, saved: true };
+    const results = new Map<string, boolean>();
+    const groups = new Map<string, typeof updates>();
+    for (const update of updates) groups.set(update.item.cycleId, [...(groups.get(update.item.cycleId) ?? []), update]);
+    for (const [cycleId, group] of [...groups].sort(([left], [right]) => left.localeCompare(right))) await this.withPromotionLock(`cycle:${cycleId}`, async () => {
+      const cycle = this.cycles.get(cycleId);
+      for (const { item, expectedVersion } of group) {
+        const stored = this.items.get(item.id);
+        if (!cycle || cycle.deletedAt != null || cycle.ownerId !== item.cycleOwnerId || !stored || stored.version !== expectedVersion || stored.cycleId !== item.cycleId || stored.cycleOwnerId !== item.cycleOwnerId ||
+          stored.mediaAssetId !== item.mediaAssetId || stored.sourceKind !== item.sourceKind || stored.sourceCollectionId !== item.sourceCollectionId ||
+          stored.selectedRenderOutputId !== item.selectedRenderOutputId) { results.set(item.id, false); continue; }
+        const merged = { ...stored } as Record<string, unknown>;
+        for (const field of MUTABLE_ITEM_FIELDS) merged[field] = clone(item[field]);
+        this.items.set(item.id, merged as unknown as CycleItem);
+        results.set(item.id, true);
+      }
     });
+    return updates.map(({ item }) => ({ itemId: item.id, saved: results.get(item.id) ?? false }));
   }
   async selectCycleItemRenderOutput(input: SelectCycleItemRenderOutputInput): Promise<boolean> {
-    await tick();
-    const cycle = this.cycles.get(input.cycleId);
-    const item = this.items.get(input.itemId);
-    if (!cycle || cycle.ownerId !== input.ownerId || cycle.status !== "draft" || !item || item.cycleId !== input.cycleId || item.cycleOwnerId !== input.ownerId || item.version !== input.expectedVersion || (item.status !== "upcoming" && item.status !== "scheduled")) return false;
-    if (input.renderOutputId !== null) {
-      const output = this.renders.get(input.renderOutputId);
-      if (!output || output.ownerId !== input.ownerId || output.sourceMediaId !== item.mediaAssetId) return false;
-    }
-    this.items.set(item.id, { ...item, selectedRenderOutputId: input.renderOutputId, version: item.version + 1 });
-    return true;
+    return this.withPromotionLock(`cycle:${input.cycleId}`, async () => {
+      await tick();
+      const cycle = this.cycles.get(input.cycleId);
+      const item = this.items.get(input.itemId);
+      if (!cycle || cycle.deletedAt != null || cycle.ownerId !== input.ownerId || cycle.status !== "draft" || !item || item.cycleId !== input.cycleId || item.cycleOwnerId !== input.ownerId || item.version !== input.expectedVersion || (item.status !== "upcoming" && item.status !== "scheduled")) return false;
+      if (input.renderOutputId !== null) {
+        const output = this.renders.get(input.renderOutputId);
+        if (!output || output.ownerId !== input.ownerId || output.sourceMediaId !== item.mediaAssetId) return false;
+      }
+      this.items.set(item.id, { ...item, selectedRenderOutputId: input.renderOutputId, version: item.version + 1 });
+      return true;
+    });
   }
 
   async saveCycleSchedule(cycleId: string, ownerId: string, scheduleSettings: PersistedCycleSchedule, updates: { item: CycleItem; expectedVersion: number }[]): Promise<boolean> {
     await tick();
     const cycle = this.cycles.get(cycleId);
-    if (!cycle || cycle.ownerId !== ownerId || cycle.status !== "draft") return false;
+    if (!cycle || cycle.deletedAt != null || cycle.ownerId !== ownerId || cycle.status !== "draft") return false;
     const seen = new Set<string>();
     for (const { item, expectedVersion } of updates) {
       const stored = this.items.get(item.id);
@@ -1492,7 +1527,7 @@ export class MemoryRepository implements Repository {
     const validIds = new Set(this.grants.filter((g) => g.granteeId === userId && g.status === "active" && (g.expiresAt === null || g.expiresAt > now)).map((g) => g.collectionId));
     return [...this.collections.values()].filter((c) => validIds.has(c.id) && c.ownerId !== userId).map(clone);
   }
-  async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { await tick(); return [...this.cycles.values()].filter((c) => c.ownerId === userId).map(clone); }
+  async listCyclesForOwner(userId: string): Promise<CycleRecord[]> { await tick(); return [...this.cycles.values()].filter((c) => c.ownerId === userId && c.deletedAt == null).map(clone); }
   async getStorageUsedBytes(userId: string): Promise<number> {
     await tick();
     const mediaBytes = [...this.media.values()].filter((m) => m.ownerId === userId && m.status !== "deleted").reduce((sum, m) => sum + m.sizeBytes, 0);
@@ -1926,6 +1961,7 @@ export class MemoryRepository implements Repository {
     return [...this.publishingJobs.values()].filter((job) => isActivePublishingAttempt(job.stage) && job.leaseExpiresAt !== null && job.leaseExpiresAt <= now).sort((a, b) => a.leaseExpiresAt!.getTime() - b.leaseExpiresAt!.getTime()).slice(0, Math.max(0, limit)).map((job) => ({ jobId: job.id, ownerId: job.ownerId }));
   }
   async createOrGetPublishingAttempt(input: CreatePublishingAttemptInput): Promise<{ status: "created" | "existing" | "conflict"; job?: PublishingAttemptRecord }> {
+    return this.withPromotionLock(`cycle:${input.cycleId}`, async () => {
     await tick();
     if (input.idempotencyKey !== buildPublishIdempotencyKey({ cycleId: input.cycleId, id: input.cycleItemId }, input.attemptNumber)) return { status: "conflict" };
     const existing = [...this.publishingJobs.values()].find((job) => job.idempotencyKey === input.idempotencyKey);
@@ -1935,15 +1971,17 @@ export class MemoryRepository implements Repository {
     }
     if (this.publishingJobs.has(input.id) || [...this.publishingJobs.values()].some((job) => job.cycleItemId === input.cycleItemId && job.attemptNumber === input.attemptNumber)) return { status: "conflict" };
     const cycle = this.cycles.get(input.cycleId), item = this.items.get(input.cycleItemId), account = this.socialAccounts.get(input.socialAccountId);
-    if (!cycle || !item || !account || cycle.ownerId !== input.ownerId || cycle.socialAccountId !== input.socialAccountId || item.cycleId !== cycle.id || item.cycleOwnerId !== input.ownerId || account.userId !== input.ownerId || input.attemptNumber < 1) return { status: "conflict" };
+    if (!cycle || cycle.deletedAt != null || !item || !account || cycle.ownerId !== input.ownerId || cycle.socialAccountId !== input.socialAccountId || item.cycleId !== cycle.id || item.cycleOwnerId !== input.ownerId || account.userId !== input.ownerId || input.attemptNumber < 1) return { status: "conflict" };
     const job: PublishingAttemptRecord = { ...input, stage: "queued", outcome: "in_progress", workerId: null, lockToken: null, leaseExpiresAt: null, containerId: null, instagramMediaId: null, errorCategory: null, errorDetails: null, startedAt: input.now, createdAt: input.now, updatedAt: input.now, finishedAt: null };
     this.publishingJobs.set(job.id, clone(job)); return { status: "created", job: clone(job) };
+    });
   }
   async claimPublishingAttempt(input: ClaimPublishingAttemptInput): Promise<PublishingAttemptRecord | null> {
+    return this.withPromotionLock(`cycle:${input.cycleId}`, async () => {
     await tick();
     const job = this.publishingJobs.get(input.attemptId), cycle = this.cycles.get(input.cycleId), item = this.items.get(input.cycleItemId), account = this.socialAccounts.get(input.socialAccountId);
     const accountEligibility = account ? evaluateInstagramEligibility({ platform: account.platform, status: account.status, accountType: account.accountType, grantedScopes: account.grantedScopes, hasToken: account.hasToken, tokenExpiresAt: account.tokenExpiresAt, now: input.now }) : null;
-    if (!job || job.stage !== "queued" || !cycle || !item || !account || !accountEligibility?.eligible || cycle.ownerId !== input.ownerId || cycle.socialAccountId !== input.socialAccountId || cycle.status !== "running" || item.cycleId !== cycle.id || item.cycleOwnerId !== input.ownerId || item.version !== input.expectedItemVersion || (item.status !== "upcoming" && item.status !== "scheduled") || (item.scheduledFor && item.scheduledFor > input.now) || account.userId !== input.ownerId) return null;
+    if (!job || job.stage !== "queued" || !cycle || cycle.deletedAt != null || !item || !account || !accountEligibility?.eligible || cycle.ownerId !== input.ownerId || cycle.socialAccountId !== input.socialAccountId || cycle.status !== "running" || item.cycleId !== cycle.id || item.cycleOwnerId !== input.ownerId || item.version !== input.expectedItemVersion || (item.status !== "upcoming" && item.status !== "scheduled") || (item.scheduledFor && item.scheduledFor > input.now) || account.userId !== input.ownerId) return null;
     if (job.ownerId !== input.ownerId || job.cycleId !== cycle.id || job.cycleItemId !== item.id || job.socialAccountId !== account.id) return null;
     if ([...this.publishingJobs.values()].some((other) => other.socialAccountId === account.id && other.id !== job.id && isActivePublishingAttempt(other.stage))) return null;
     const lockToken = randomUUID(), leaseExpiresAt = new Date(input.now.getTime() + Math.max(1, input.leaseSeconds) * 1000);
@@ -1951,9 +1989,15 @@ export class MemoryRepository implements Repository {
     this.publishingJobs.set(job.id, claimed);
     this.items.set(item.id, { ...item, status: "publishing", lockedBy: input.workerId, lockExpiresAt: leaseExpiresAt, version: item.version + 1 });
     return clone(claimed);
+    });
   }
   async transitionPublishingAttempt(input: PublishingAttemptUpdate): Promise<boolean> {
+    const initial = this.publishingJobs.get(input.jobId);
+    if (!initial) return false;
+    return this.withPromotionLock(`cycle:${initial.cycleId}`, async () => {
     await tick(); const job = this.publishingJobs.get(input.jobId);
+    const cycle = job ? this.cycles.get(job.cycleId) : null;
+    if (!cycle || cycle.deletedAt != null) return false;
     if (!job || job.ownerId !== input.ownerId || job.workerId !== input.workerId || job.lockToken !== input.lockToken || job.stage !== input.expectedStage || !job.leaseExpiresAt || job.leaseExpiresAt <= input.now || !canTransitionPublishingAttempt(job.stage, input.nextStage)) return false;
     const terminal = ["published", "failed", "needs_manual_review"].includes(input.nextStage);
     const safeError = input.errorCategory !== undefined || input.errorDetails !== undefined ? safePublishingError(input.errorCategory) : null;
@@ -1969,37 +2013,55 @@ export class MemoryRepository implements Repository {
       next.lockToken = null; next.leaseExpiresAt = null; next.workerId = null;
     }
     this.publishingJobs.set(job.id, next); return true;
+    });
   }
   async heartbeatPublishingAttempt(jobId: string, ownerId: string, workerId: string, lockToken: string, now: Date, leaseSeconds: number): Promise<boolean> {
-    await tick(); const job = this.publishingJobs.get(jobId);
-    if (!job || job.ownerId !== ownerId || job.workerId !== workerId || job.lockToken !== lockToken || !isActivePublishingAttempt(job.stage) || !job.leaseExpiresAt || job.leaseExpiresAt <= now) return false;
-    this.publishingJobs.set(job.id, { ...job, leaseExpiresAt: new Date(now.getTime() + Math.max(1, leaseSeconds) * 1000), updatedAt: now }); return true;
+    const initial = this.publishingJobs.get(jobId);
+    if (!initial) return false;
+    return this.withPromotionLock(`cycle:${initial.cycleId}`, async () => {
+      await tick(); const job = this.publishingJobs.get(jobId);
+      const cycle = job ? this.cycles.get(job.cycleId) : null;
+      if (!job || !cycle || cycle.deletedAt != null || job.ownerId !== ownerId || job.workerId !== workerId || job.lockToken !== lockToken || !isActivePublishingAttempt(job.stage) || !job.leaseExpiresAt || job.leaseExpiresAt <= now) return false;
+      this.publishingJobs.set(job.id, { ...job, leaseExpiresAt: new Date(now.getTime() + Math.max(1, leaseSeconds) * 1000), updatedAt: now }); return true;
+    });
   }
   async cancelPublishingAttempt(jobId: string, ownerId: string, now: Date): Promise<boolean> {
-    await tick(); const job = this.publishingJobs.get(jobId);
-    if (!job || job.ownerId !== ownerId || (job.stage !== "queued" && job.stage !== "claimed")) return false;
-    const item = this.items.get(job.cycleItemId);
-    if (job.stage === "claimed" && (!job.leaseExpiresAt || job.leaseExpiresAt > now || !item || item.status !== "publishing" || item.lockedBy !== job.workerId)) return false;
-    if (item && item.status === "publishing") this.items.set(item.id, { ...item, status: "scheduled", lockedBy: null, lockExpiresAt: null, version: item.version + 1 });
-    this.publishingJobs.set(job.id, { ...job, stage: "cancelled", workerId: null, lockToken: null, leaseExpiresAt: null, outcome: "in_progress", updatedAt: now, finishedAt: now }); return true;
+    const initial = this.publishingJobs.get(jobId);
+    if (!initial) return false;
+    return this.withPromotionLock(`cycle:${initial.cycleId}`, async () => {
+      await tick(); const job = this.publishingJobs.get(jobId);
+      if (!job || job.ownerId !== ownerId || (job.stage !== "queued" && job.stage !== "claimed")) return false;
+      const item = this.items.get(job.cycleItemId);
+      if (job.stage === "claimed" && (!job.leaseExpiresAt || job.leaseExpiresAt > now || !item || item.status !== "publishing" || item.lockedBy !== job.workerId)) return false;
+      if (item && item.status === "publishing") this.items.set(item.id, { ...item, status: "scheduled", lockedBy: null, lockExpiresAt: null, version: item.version + 1 });
+      this.publishingJobs.set(job.id, { ...job, stage: "cancelled", workerId: null, lockToken: null, leaseExpiresAt: null, outcome: "in_progress", updatedAt: now, finishedAt: now }); return true;
+    });
   }
   async cancelClaimedPublishingAttempt(jobId: string, ownerId: string, workerId: string, lockToken: string, now: Date): Promise<boolean> {
-    await tick(); const job = this.publishingJobs.get(jobId);
-    if (!job || job.ownerId !== ownerId || job.workerId !== workerId || job.lockToken !== lockToken || job.stage !== "claimed" || !job.leaseExpiresAt || job.leaseExpiresAt <= now) return false;
-    const item = this.items.get(job.cycleItemId), cycle = this.cycles.get(job.cycleId);
-    if (!item || !cycle || cycle.ownerId !== ownerId || item.status !== "publishing" || item.lockedBy !== workerId) return false;
-    const restoredStatus = cycle.status === "stopped" || cycle.status === "completed" ? "cancelled" : item.scheduledFor ? "scheduled" : "upcoming";
-    this.items.set(item.id, { ...item, status: restoredStatus, lockedBy: null, lockExpiresAt: null, version: item.version + 1 });
-    this.publishingJobs.set(job.id, { ...job, stage: "cancelled", outcome: "in_progress", workerId: null, lockToken: null, leaseExpiresAt: null, updatedAt: now, finishedAt: now });
-    return true;
+    const initial = this.publishingJobs.get(jobId);
+    if (!initial) return false;
+    return this.withPromotionLock(`cycle:${initial.cycleId}`, async () => {
+      await tick(); const job = this.publishingJobs.get(jobId);
+      if (!job || job.ownerId !== ownerId || job.workerId !== workerId || job.lockToken !== lockToken || job.stage !== "claimed" || !job.leaseExpiresAt || job.leaseExpiresAt <= now) return false;
+      const item = this.items.get(job.cycleItemId), cycle = this.cycles.get(job.cycleId);
+      if (!item || !cycle || cycle.deletedAt != null || cycle.ownerId !== ownerId || item.status !== "publishing" || item.lockedBy !== workerId) return false;
+      const restoredStatus = cycle.status === "stopped" || cycle.status === "completed" ? "cancelled" : item.scheduledFor ? "scheduled" : "upcoming";
+      this.items.set(item.id, { ...item, status: restoredStatus, lockedBy: null, lockExpiresAt: null, version: item.version + 1 });
+      this.publishingJobs.set(job.id, { ...job, stage: "cancelled", outcome: "in_progress", workerId: null, lockToken: null, leaseExpiresAt: null, updatedAt: now, finishedAt: now });
+      return true;
+    });
   }
   async markExpiredPublishingAttemptForReview(jobId: string, ownerId: string, now: Date): Promise<boolean> {
-    await tick(); const job = this.publishingJobs.get(jobId);
-    if (!job || job.ownerId !== ownerId || !isActivePublishingAttempt(job.stage) || !job.leaseExpiresAt || job.leaseExpiresAt > now) return false;
-    const item = this.items.get(job.cycleItemId);
-    if (!item || item.status !== "publishing" || item.lockedBy !== job.workerId) return false;
-    this.items.set(item.id, { ...item, status: "needs_review", lockedBy: null, lockExpiresAt: null, reviewReason: "worker_lost_during_publish", version: item.version + 1 });
-    this.publishingJobs.set(job.id, { ...job, stage: "needs_manual_review", outcome: "ambiguous", workerId: null, lockToken: null, leaseExpiresAt: null, errorCategory: "worker_lease_expired", errorDetails: "The worker lease expired; the external outcome was not verified.", updatedAt: now, finishedAt: now }); return true;
+    const initial = this.publishingJobs.get(jobId);
+    if (!initial) return false;
+    return this.withPromotionLock(`cycle:${initial.cycleId}`, async () => {
+      await tick(); const job = this.publishingJobs.get(jobId);
+      if (!job || job.ownerId !== ownerId || !isActivePublishingAttempt(job.stage) || !job.leaseExpiresAt || job.leaseExpiresAt > now) return false;
+      const item = this.items.get(job.cycleItemId);
+      if (!item || item.status !== "publishing" || item.lockedBy !== job.workerId) return false;
+      this.items.set(item.id, { ...item, status: "needs_review", lockedBy: null, lockExpiresAt: null, reviewReason: "worker_lost_during_publish", version: item.version + 1 });
+      this.publishingJobs.set(job.id, { ...job, stage: "needs_manual_review", outcome: "ambiguous", workerId: null, lockToken: null, leaseExpiresAt: null, errorCategory: "worker_lease_expired", errorDetails: "The worker lease expired; the external outcome was not verified.", updatedAt: now, finishedAt: now }); return true;
+    });
   }
   async getScheduledItemsUsedThisMonth(userId: string, monthStart: Date): Promise<number> { await tick(); return this.usageByMonth.get(`${userId}|${monthStart.toISOString()}`)?.scheduledItems ?? 0; }
   async getRecentPublishTimes(userId: string, since: Date): Promise<Date[]> {

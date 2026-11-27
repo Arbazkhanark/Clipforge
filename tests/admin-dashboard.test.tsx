@@ -129,6 +129,20 @@ test("Admin campaign detail page renders stored configuration and publishing sta
   assert.doesNotMatch(html, /do-not-display|encryptedAccessToken|idempotencyKey|lockToken/);
 });
 
+test("Admin campaign history labels soft-deleted cycles and omits pause/resume controls", async () => {
+  const db = new FakePrismaClient(); const deletedAt = new Date("2026-11-28T12:00:00.000Z");
+  db.user.rows.push({ id: "owner", name: "Owner", email: "owner@example.test", role: "user", createdAt: now });
+  db.publishingCycle.rows.push({ id: "deleted-cycle", ownerId: "owner", socialAccountId: "missing", name: "Retained history", status: "stopped", deletedAt,
+    finalReviewConfirmed: true, orderMode: "manual", repeatBehavior: "never", timezone: "UTC", scheduleSettings: {}, createdAt: now, updatedAt: deletedAt });
+  const service = new AdminDataService(new PrismaAdminDataRepository(db), () => now);
+  setRuntimeForTests({ ...adminRuntime, adminData: async () => service });
+  const listing = renderToStaticMarkup(await renderAdminCampaignsPage(Promise.resolve({})));
+  assert.match(listing, /Deleted/);
+  const details = renderToStaticMarkup(await renderAdminCampaignDetailsPage("deleted-cycle"));
+  assert.match(details, /Deleted at/);
+  assert.doesNotMatch(details, /Cycle controls|Pause cycle|Resume cycle/);
+});
+
 test("Admin Instagram accounts page renders search, stored-status filters and unavailable state", async () => {
   setRuntimeForTests(adminRuntime);
   const html = renderToStaticMarkup(await renderAdminInstagramAccountsPage(Promise.resolve({ search: "owner", status: "connected" })));

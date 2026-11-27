@@ -38,6 +38,7 @@ const EXPECTED_MIGRATIONS = [
   "20261121120000_complimentary_access_hold",
   "20261121120000_edited_media_replacements",
   "20261122120000_admin_user_suspension",
+  "20261127120000_cycle_soft_deletion",
 ] as const;
 
 type TestClient = PrismaClientLike & { $disconnect(): Promise<void> };
@@ -92,7 +93,7 @@ async function assertDatabaseIdentityAndMigrations(db: TestClient): Promise<void
   const migrationRows = await db.$queryRaw`SELECT "migration_name" AS "migrationName",
     "finished_at" AS "finishedAt", "rolled_back_at" AS "rolledBackAt"
     FROM public."_prisma_migrations" ORDER BY "migration_name"` as Array<Record<string, unknown>>;
-  assert.deepEqual(migrationRows.map((row) => row["migrationName"]), [...EXPECTED_MIGRATIONS], "expected exactly the verified 22 migrations");
+  assert.deepEqual(migrationRows.map((row) => row["migrationName"]), [...EXPECTED_MIGRATIONS], "expected exactly the verified 23 migrations");
   assert.ok(migrationRows.every((row) => row["finishedAt"] instanceof Date && row["rolledBackAt"] === null), "all expected migrations must be applied successfully");
 }
 

@@ -32,6 +32,7 @@ export type RevokeCollectionShareLinkResult = "revoked" | "already_revoked" | "n
 export interface PersistedCycleSchedule extends ScheduleSettings { startDate: string; orderMode?: OrderMode; shuffleSeed?: string | null; }
 export interface CycleRecord extends PublishingCycle { name: string; socialAccountId: string; repeatBehavior?: "never" | "ask" | "automatic"; scheduleSettings?: PersistedCycleSchedule | null; timezone?: string; createdAt?: Date; }
 export type CompleteSettledCycleResult = "completed" | "repeat_queued" | "repeat_skipped_limit" | "not_ready" | "already_completed" | "not_found";
+export type DeletePublishingCycleResult = "deleted" | "already_deleted" | "not_found" | "active_worker" | "ambiguous_outcome" | "processing" | "conflict";
 export const INSTAGRAM_ACCOUNT_TYPES = ["BUSINESS", "MEDIA_CREATOR", "PERSONAL", "UNKNOWN"] as const;
 export type InstagramAccountType = (typeof INSTAGRAM_ACCOUNT_TYPES)[number];
 export interface PublishingJobRecord {
@@ -345,6 +346,8 @@ export interface Repository {
   transitionCycleStatus(cycleId: string, from: CycleStatus, to: CycleStatus, finalReviewConfirmed: boolean): Promise<boolean>;
   /** Atomically stops an owned cycle and cancels the version-checked editable items. */
   stopCycle(cycleId: string, ownerId: string, from: CycleStatus, finalReviewConfirmed: boolean, updates: { item: CycleItem; expectedVersion: number }[]): Promise<boolean>;
+  /** Soft-deletes an owned cycle, retaining all rows/history and serializing with publish claims/transitions. */
+  deletePublishingCycle(cycleId: string, ownerId: string, now: Date): Promise<DeletePublishingCycleResult>;
 
   getCycleItems(cycleId: string): Promise<CycleItem[]>;
   /** Adds items only while the parent cycle is still editable; serializes against cycle completion. */

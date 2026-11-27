@@ -11,6 +11,7 @@ export const FLASH_NOTICES = {
   cycle_paused: "Cycle paused in ClipForge. An item already in progress is not interrupted.",
   cycle_resumed: "Cycle marked as running again in ClipForge. This action does not publish a Reel.",
   cycle_stopped: "Cycle stopped. Unstarted items were cancelled; already-published posts were not changed and no Reel was published.",
+  cycle_deleted: "Cycle deleted. Published posts, publishing history, and shared media were kept.",
   cycle_repeat_saved: "Repeat mode saved. Only eligible unpublished items can enter another round, according to this setting; nothing was published by saving it.",
   cycle_schedule_saved: "Schedule saved in ClipForge. Review the planned dates in this cycle; no Reel was published.",
   cycle_render_output_saved: "Rendered output selected for this cycle item. The original video is unchanged; no Reel was published.",

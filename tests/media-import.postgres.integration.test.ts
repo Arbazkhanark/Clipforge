@@ -45,6 +45,7 @@ const EXPECTED_MIGRATIONS = [
   "20261121120000_complimentary_access_hold",
   "20261121120000_edited_media_replacements",
   "20261122120000_admin_user_suspension",
+  "20261127120000_cycle_soft_deletion",
 ] as const;
 const NOW = new Date("2026-11-23T12:00:00.000Z");
 const SOURCE_BYTES = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]);

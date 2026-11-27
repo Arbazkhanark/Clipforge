@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import type { CycleItem } from "../src/lib/domain/types.ts";
 import { buildPublishIdempotencyKey } from "../src/lib/domain/cycle-state.ts";
+import { createMockPublishingAdapters, createPublishingWorker } from "../src/server/publishing/publishing-worker.ts";
+import type { PreflightReport } from "../src/lib/domain/preflight.ts";
 import { createCycle, mixIntoCycle, startPublishingCycle } from "../src/server/handlers/cycles.ts";
 import type { MediaServices, RequestContext } from "../src/server/context.ts";
 import { createPrismaClient } from "../src/server/prisma/create-client.ts";
@@ -41,6 +43,7 @@ const EXPECTED_MIGRATIONS = [
   "20261121120000_complimentary_access_hold",
   "20261121120000_edited_media_replacements",
   "20261122120000_admin_user_suspension",
+  "20261127120000_cycle_soft_deletion",
 ] as const;
 
 type TestClient = PrismaClientLike & { $disconnect(): Promise<void> };
@@ -110,7 +113,7 @@ async function assertDatabaseIdentityAndMigrations(db: TestClient): Promise<void
 
   const rows = await db.$queryRaw`SELECT "migration_name" AS "migrationName", "finished_at" AS "finishedAt", "rolled_back_at" AS "rolledBackAt"
     FROM public."_prisma_migrations" ORDER BY "migration_name"` as Array<Record<string, unknown>>;
-  assert.deepEqual(rows.map((row) => row["migrationName"]), [...EXPECTED_MIGRATIONS], "expected exactly the reviewed 22 migrations");
+  assert.deepEqual(rows.map((row) => row["migrationName"]), [...EXPECTED_MIGRATIONS], "expected exactly the reviewed 23 migrations");
   assert.ok(rows.every((row) => row["finishedAt"] instanceof Date && row["rolledBackAt"] === null), "all expected migrations must be applied successfully");
 }
 
@@ -215,7 +218,7 @@ async function cleanupFixture(db: TestClient, fixture: Fixture): Promise<void> {
     if (row && row["ownerId"] === fixture.ownerId && fixture.cycleIds.has(String(row["cycleId"])) && fixture.itemIds.has(String(row["cycleItemId"])) && fixture.accountIds.has(String(row["socialAccountId"]))) fixture.publishingJobIds.add(id);
   }
   if (fixture.cycleIds.size) {
-    const auditRows = await db.auditLog.findMany({ where: { entityType: "PublishingCycle", entityId: { in: [...fixture.cycleIds] }, action: { in: ["cycle.created", "cycle.started", "cycle.paused", "cycle.resumed", "cycle.stopped", "cycle.schedule_saved", "cycle.videos_mixed", "cycle.completed", "cycle.repeat_queued"] } } });
+    const auditRows = await db.auditLog.findMany({ where: { entityType: "PublishingCycle", entityId: { in: [...fixture.cycleIds] }, action: { in: ["cycle.created", "cycle.started", "cycle.paused", "cycle.resumed", "cycle.stopped", "cycle.deleted", "cycle.schedule_saved", "cycle.videos_mixed", "cycle.completed", "cycle.repeat_queued"] } } });
     for (const row of auditRows) fixture.auditIds.add(String(row["id"]));
   }
   if (fixture.publishingJobIds.size || fixture.cycleIds.size || fixture.itemIds.size) {
@@ -481,6 +484,165 @@ test("PostgreSQL cycles: settlement is idempotent and automatic repeat creates o
     assert.equal(await first!.publishingCycle.count({ where: { id: generatedCycleId, ownerId: fixture.ownerId } }), 1);
     assert.equal(await first!.cycleItem.count({ where: { id: generatedItemId, cycleId: generatedCycleId, mediaAssetId: fixture.mediaId } }), 1);
     assert.equal(await first!.auditLog.count({ where: { entityId: cycleId, action: "cycle.repeat_queued" } }), 1);
+  });
+});
+
+test("PostgreSQL cycles: deletion serializes with an independent lease heartbeat", testOptions, async () => {
+  await withFixture(2, async ([first, second], fixture) => {
+    const cycleId = `${fixture.prefix}-delete-heartbeat`;
+    await createCycleRow(first!, fixture, cycleId, "running");
+    const item = itemRecord(fixture, cycleId, `${cycleId}-item`, { status: "scheduled", scheduledFor: new Date(FIXED_NOW.getTime() - 1_000) });
+    await createItemRow(first!, fixture, item);
+    const attemptId = `${fixture.prefix}-delete-heartbeat-attempt`;
+    fixture.candidatePublishingJobIds.add(attemptId);
+    const created = await repository(first!).createOrGetPublishingAttempt({ id: attemptId, ownerId: fixture.ownerId, cycleId, cycleItemId: item.id,
+      socialAccountId: fixture.ownerAccountId, attemptNumber: 1, idempotencyKey: buildPublishIdempotencyKey({ cycleId, id: item.id }, 1), now: FIXED_NOW });
+    assert.equal(created.status, "created");
+    fixture.publishingJobIds.add(attemptId);
+    const claimed = await repository(first!).claimPublishingAttempt({ attemptId, ownerId: fixture.ownerId, cycleId, cycleItemId: item.id,
+      socialAccountId: fixture.ownerAccountId, expectedItemVersion: 1, workerId: `${fixture.prefix}-worker`, now: FIXED_NOW, leaseSeconds: 1 });
+    assert.ok(claimed?.lockToken);
+
+    const deletionTime = new Date(FIXED_NOW.getTime() + 2_000);
+    const heartbeatTime = new Date(FIXED_NOW.getTime() + 500);
+    const barrier = makeBarrier(2);
+    const [deleted, renewed] = await Promise.all([
+      (async () => { await barrier(); return repository(first!).deletePublishingCycle(cycleId, fixture.ownerId, deletionTime); })(),
+      (async () => { await barrier(); return repository(second!).heartbeatPublishingAttempt(attemptId, fixture.ownerId, claimed!.workerId!, claimed!.lockToken!, heartbeatTime, 60); })(),
+    ]);
+    const persistedCycle = await first!.publishingCycle.findUnique({ where: { id: cycleId } });
+    const persistedItem = await first!.cycleItem.findUnique({ where: { id: item.id } });
+    const persistedJob = await first!.publishingJob.findUnique({ where: { id: attemptId } });
+    if (deleted === "deleted") {
+      assert.equal(renewed, false, "a heartbeat must not renew a job after deletion wins the cycle lock");
+      assert.ok(persistedCycle?.["deletedAt"] instanceof Date);
+      assert.equal(persistedJob?.["stage"], "cancelled");
+      assert.equal(persistedItem?.["status"], "cancelled");
+      assert.equal(await first!.auditLog.count({ where: { entityId: cycleId, action: "cycle.deleted" } }), 1);
+      await trackCycleAudits(first!, fixture, cycleId, ["cycle.deleted"]);
+    } else {
+      assert.equal(deleted, "active_worker", "a renewed lease must prevent deletion");
+      assert.equal(renewed, true, "the heartbeat that wins the cycle lock must succeed");
+      assert.equal(persistedCycle?.["deletedAt"], null);
+      assert.equal(persistedJob?.["stage"], "claimed");
+      assert.ok(persistedJob?.["leaseExpiresAt"] instanceof Date && persistedJob["leaseExpiresAt"] > deletionTime);
+      assert.equal(persistedItem?.["status"], "publishing");
+      assert.equal(await first!.auditLog.count({ where: { entityId: cycleId, action: "cycle.deleted" } }), 0);
+    }
+  });
+});
+
+test("PostgreSQL cycles: deletion races an independent queued-job claim without leaving an invalid owner", testOptions, async () => {
+  await withFixture(2, async ([first, second], fixture) => {
+    const cycleId = `${fixture.prefix}-delete-claim`;
+    await createCycleRow(first!, fixture, cycleId, "running");
+    const item = itemRecord(fixture, cycleId, `${cycleId}-item`, { status: "scheduled", scheduledFor: new Date(FIXED_NOW.getTime() - 1_000) });
+    await createItemRow(first!, fixture, item);
+    const attemptId = `${fixture.prefix}-delete-claim-attempt`;
+    fixture.candidatePublishingJobIds.add(attemptId);
+    const created = await repository(first!).createOrGetPublishingAttempt({ id: attemptId, ownerId: fixture.ownerId, cycleId, cycleItemId: item.id,
+      socialAccountId: fixture.ownerAccountId, attemptNumber: 1, idempotencyKey: buildPublishIdempotencyKey({ cycleId, id: item.id }, 1), now: FIXED_NOW });
+    assert.equal(created.status, "created"); fixture.publishingJobIds.add(attemptId);
+    const barrier = makeBarrier(2);
+    const [deleted, claimed] = await Promise.all([
+      (async () => { await barrier(); return repository(first!).deletePublishingCycle(cycleId, fixture.ownerId, FIXED_NOW); })(),
+      (async () => { await barrier(); return repository(second!).claimPublishingAttempt({ attemptId, ownerId: fixture.ownerId, cycleId, cycleItemId: item.id,
+        socialAccountId: fixture.ownerAccountId, expectedItemVersion: 1, workerId: `${fixture.prefix}-claim-worker`, now: FIXED_NOW, leaseSeconds: 60 }); })(),
+    ]);
+    const persistedCycle = await first!.publishingCycle.findUnique({ where: { id: cycleId } });
+    const persistedJob = await first!.publishingJob.findUnique({ where: { id: attemptId } });
+    const persistedItem = await first!.cycleItem.findUnique({ where: { id: item.id } });
+    if (deleted === "deleted") {
+      assert.equal(claimed, null);
+      assert.ok(persistedCycle?.["deletedAt"] instanceof Date);
+      assert.equal(persistedJob?.["stage"], "cancelled");
+      assert.equal(persistedItem?.["status"], "cancelled");
+    } else {
+      assert.equal(deleted, "active_worker");
+      assert.ok(claimed?.lockToken);
+      assert.equal(persistedCycle?.["deletedAt"], null);
+      assert.equal(persistedJob?.["stage"], "claimed");
+      assert.equal(persistedJob?.["workerId"], `${fixture.prefix}-claim-worker`);
+      assert.equal(persistedItem?.["status"], "publishing");
+    }
+  });
+});
+
+test("PostgreSQL cycles: deletion races an independent claimed-to-container transition", testOptions, async () => {
+  await withFixture(2, async ([first, second], fixture) => {
+    const cycleId = `${fixture.prefix}-delete-transition`;
+    await createCycleRow(first!, fixture, cycleId, "running");
+    const item = itemRecord(fixture, cycleId, `${cycleId}-item`, { status: "scheduled", scheduledFor: new Date(FIXED_NOW.getTime() - 1_000) });
+    await createItemRow(first!, fixture, item);
+    const attemptId = `${fixture.prefix}-delete-transition-attempt`;
+    fixture.candidatePublishingJobIds.add(attemptId);
+    const created = await repository(first!).createOrGetPublishingAttempt({ id: attemptId, ownerId: fixture.ownerId, cycleId, cycleItemId: item.id,
+      socialAccountId: fixture.ownerAccountId, attemptNumber: 1, idempotencyKey: buildPublishIdempotencyKey({ cycleId, id: item.id }, 1), now: FIXED_NOW });
+    assert.equal(created.status, "created"); fixture.publishingJobIds.add(attemptId);
+    const workerId = `${fixture.prefix}-transition-worker`;
+    const claimed = await repository(first!).claimPublishingAttempt({ attemptId, ownerId: fixture.ownerId, cycleId, cycleItemId: item.id,
+      socialAccountId: fixture.ownerAccountId, expectedItemVersion: 1, workerId, now: FIXED_NOW, leaseSeconds: 1 });
+    assert.ok(claimed?.lockToken);
+    const deletionTime = new Date(FIXED_NOW.getTime() + 2_000);
+    const transitionTime = new Date(FIXED_NOW.getTime() + 500);
+    const barrier = makeBarrier(2);
+    const [deleted, advanced] = await Promise.all([
+      (async () => { await barrier(); return repository(first!).deletePublishingCycle(cycleId, fixture.ownerId, deletionTime); })(),
+      (async () => { await barrier(); return repository(second!).transitionPublishingAttempt({ jobId: attemptId, ownerId: fixture.ownerId, workerId, lockToken: claimed!.lockToken!,
+        expectedStage: "claimed", nextStage: "container_creation_pending", now: transitionTime, leaseSeconds: 60 }); })(),
+    ]);
+    const persistedCycle = await first!.publishingCycle.findUnique({ where: { id: cycleId } });
+    const persistedJob = await first!.publishingJob.findUnique({ where: { id: attemptId } });
+    const persistedItem = await first!.cycleItem.findUnique({ where: { id: item.id } });
+    if (deleted === "deleted") {
+      assert.equal(advanced, false);
+      assert.ok(persistedCycle?.["deletedAt"] instanceof Date);
+      assert.equal(persistedJob?.["stage"], "cancelled");
+      assert.equal(persistedItem?.["status"], "cancelled");
+    } else {
+      assert.equal(deleted, "active_worker");
+      assert.equal(advanced, true);
+      assert.equal(persistedCycle?.["deletedAt"], null);
+      assert.equal(persistedJob?.["stage"], "container_creation_pending");
+      assert.equal(persistedItem?.["status"], "publishing");
+    }
+  });
+});
+
+test("PostgreSQL cycles: deletion is blocked while a mocked publish call is in flight", testOptions, async () => {
+  await withFixture(2, async ([first, second], fixture) => {
+    const cycleId = `${fixture.prefix}-delete-during-publish`;
+    await createCycleRow(first!, fixture, cycleId, "running");
+    const derivativeId = `${fixture.prefix}-publish-output`;
+    fixture.derivativeIds.add(derivativeId);
+    const item = itemRecord(fixture, cycleId, `${cycleId}-item`, { status: "scheduled", scheduledFor: new Date(FIXED_NOW.getTime() - 1_000), selectedRenderOutputId: derivativeId });
+    await createItemRow(first!, fixture, item);
+    await first!.mediaDerivative.create({ data: { id: derivativeId, ownerId: fixture.ownerId, mediaAssetId: fixture.mediaId, kind: "render", sizeBytes: 64n,
+      storageKey: `test/${fixture.prefix}/render`, settingsHash: "synthetic-publish-delete", createdAt: FIXED_NOW } });
+    const attemptId = `${fixture.prefix}-publish-delete-attempt`;
+    fixture.candidatePublishingJobIds.add(attemptId);
+    let publishCalls = 0; let signalPublish!: () => void; let releasePublish!: () => void;
+    const publishEntered = new Promise<void>((resolve) => { signalPublish = resolve; });
+    const publishGate = new Promise<void>((resolve) => { releasePublish = resolve; });
+    const adapters = createMockPublishingAdapters({ containerCreation: { kind: "created", containerId: "synthetic-container" }, containerStatus: { kind: "ready" },
+      publishing: { kind: "confirmed", instagramMediaId: "synthetic-confirmed-post" } });
+    adapters.publishContainer = async () => { publishCalls += 1; signalPublish(); await publishGate; return { kind: "confirmed", instagramMediaId: "synthetic-confirmed-post" }; };
+    const preflight: PreflightReport = { overall: "ready", canStart: true, checks: [] };
+    const running = createPublishingWorker({ repo: repository(first!), enabled: true, workerId: `${fixture.prefix}-mock-worker`, now: () => FIXED_NOW,
+      newId: () => attemptId, leaseSeconds: 60, adapters, preflight: async () => preflight }).runOnce();
+    try {
+      await publishEntered;
+      const persistedBeforeDelete = await second!.publishingJob.findUnique({ where: { id: attemptId } });
+      assert.equal(persistedBeforeDelete?.["stage"], "publishing", "the worker must persist publishing before the mocked provider call");
+      assert.equal(await repository(second!).deletePublishingCycle(cycleId, fixture.ownerId, FIXED_NOW), "active_worker");
+      assert.equal((await second!.publishingCycle.findUnique({ where: { id: cycleId } }))?.["deletedAt"], null);
+    } finally {
+      releasePublish();
+    }
+    assert.equal((await running).status, "published");
+    assert.equal(publishCalls, 1);
+    assert.equal((await second!.publishingJob.findUnique({ where: { id: attemptId } }))?.["stage"], "published");
+    assert.equal((await second!.cycleItem.findUnique({ where: { id: item.id } }))?.["status"], "published");
   });
 });
 

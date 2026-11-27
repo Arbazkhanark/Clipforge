@@ -6484,7 +6484,7 @@ body.clipforge-dark .editor-page .editor-empty-state {
 .cycles-section-heading h2 { margin: .15rem 0 0; font-size: 1.18rem; letter-spacing: -.025em; }
 .cycles-count { flex: 0 0 auto; padding: .35rem .62rem; border: 1px solid var(--cycle-line); border-radius: 99px; color: var(--cycle-muted); background: var(--cycle-canvas); font-size: .72rem; font-weight: 700; }
 .cycles-table-scroll, .cycle-items-scroll { width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; }
-.cycles-table { width: 100%; min-width: 48rem; border-collapse: collapse; }
+.cycles-table { width: 100%; min-width: 56rem; border-collapse: collapse; }
 .cycles-table th, .cycles-table td { padding: .95rem 1rem; border-bottom: 1px solid var(--cycle-line); text-align: left; vertical-align: middle; }
 .cycles-table thead th { color: var(--cycle-muted); background: var(--cycle-canvas); font-size: .68rem; font-weight: 780; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
 .cycles-table tbody tr { transition: background .15s ease; }
@@ -6507,6 +6507,12 @@ body.clipforge-dark .editor-page .editor-empty-state {
 .cycles-progress-track > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #ec8b55, #cf4d30); transition: width .25s ease; }
 .cycles-attention-count { color: #a23c35; font-size: .75rem; font-weight: 700; white-space: nowrap; }
 .cycles-detail-link, .cycles-secondary-link { color: var(--cycle-accent); font-size: .76rem; font-weight: 750; text-decoration: none; white-space: nowrap; }
+.cycle-delete-action { display: grid; justify-items: start; gap: .35rem; min-width: 10rem; }
+.cycle-delete-action button { min-height: 2.35rem; padding: .45rem .7rem; border: 1px solid #c5534b; border-radius: .55rem; background: transparent; color: #a23c35; font: inherit; font-size: .72rem; font-weight: 750; cursor: pointer; }
+.cycle-delete-action button:hover { background: #fff0ee; }
+.cycle-delete-action button:disabled { opacity: .55; cursor: wait; }
+.cycle-delete-action [role="status"], .cycle-delete-action [role="alert"] { max-width: 14rem; color: var(--cycle-muted); font-size: .68rem; line-height: 1.4; overflow-wrap: anywhere; }
+.cycle-delete-action [role="alert"] { color: #a23c35; }
 .cycles-empty-state { display: grid; justify-items: center; gap: .65rem; padding: clamp(2rem, 6vw, 4rem) 1.25rem; text-align: center; }
 .cycles-empty-state h3 { margin: .3rem 0 0; font-size: 1.16rem; letter-spacing: -.025em; }
 .cycles-empty-state p { max-width: 37rem; margin: 0 0 .65rem; color: var(--cycle-muted); font-size: .85rem; line-height: 1.65; }

@@ -301,6 +301,24 @@ export async function changeCycleStatus(ctx: RequestContext, rawInput: unknown):
   return { status };
 }
 
+export async function deletePublishingCycle(ctx: RequestContext, rawInput: unknown): Promise<{ deleted: true; alreadyDeleted?: true }> {
+  const userId = requireUser(ctx);
+  const problems = new Problems();
+  const input = readObject(rawInput, problems);
+  if (Object.keys(input).some((key) => key !== "cycleId" && key !== "confirm")) problems.add("The request contains unsupported fields.");
+  const cycleId = readId(input, "cycleId", problems);
+  if (input["confirm"] !== true) problems.add("Confirm that you want to delete this publishing cycle.");
+  problems.throwIfAny();
+
+  const result = await ctx.repo.deletePublishingCycle(cycleId, userId, ctx.now);
+  if (result === "not_found") throw notFound("Publishing cycle");
+  if (result === "active_worker") throw conflict("A publishing worker still holds an active lease for this cycle. Wait for the attempt to finish before deleting it.");
+  if (result === "ambiguous_outcome") throw conflict("This cycle has an unresolved publishing outcome. Resolve the item in publishing history before deleting the cycle.");
+  if (result === "processing") throw conflict("A cycle item is still processing or needs review. Wait for it to finish or resolve the review before deleting the cycle.");
+  if (result === "conflict") throw conflict("The cycle changed while deletion was being prepared. Reload the page and try again.");
+  return result === "already_deleted" ? { deleted: true, alreadyDeleted: true } : { deleted: true };
+}
+
 function validCalendarDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00.000Z`);

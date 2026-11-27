@@ -207,6 +207,40 @@ test("ambiguous publish is verified once, moved to review, and never automatical
   assert.equal(publishCalls, 1); assert.equal(verifyCalls, 1); assert.equal(repo.items.get("item1")?.status, "needs_review");
 });
 
+test("a failed ready-to-publishing transition prevents media_publish", async () => {
+  const repo = await fixture(); let publishCalls = 0;
+  const transition = repo.transitionPublishingAttempt.bind(repo);
+  repo.transitionPublishingAttempt = async (input) => input.nextStage === "publishing" ? false : transition(input);
+  const adapters = createMockPublishingAdapters({ containerCreation: { kind: "created", containerId: "container-transition-failure" }, containerStatus: { kind: "ready" } });
+  adapters.publishContainer = async () => { publishCalls += 1; return { kind: "confirmed", instagramMediaId: "must-not-publish" }; };
+  assert.equal((await worker(repo, { adapters }).runOnce()).status, "skipped");
+  assert.equal(publishCalls, 0);
+  assert.equal(repo.publishingJobs.get("attempt1")?.stage, "ready_to_publish");
+  assert.equal(repo.items.get("item1")?.externalPostId, null);
+});
+
+test("confirmed publish with failed persistence is verified on re-entry and routed to manual review without republishing", async () => {
+  const repo = await fixture(); let publishCalls = 0; let verifyCalls = 0;
+  const transition = repo.transitionPublishingAttempt.bind(repo);
+  repo.transitionPublishingAttempt = async (input) => input.nextStage === "published" ? false : transition(input);
+  const adapters = createMockPublishingAdapters({
+    containerCreation: { kind: "created", containerId: "container-persistence-failure" },
+    containerStatus: { kind: "ready" },
+    publishing: { kind: "confirmed", instagramMediaId: "confirmed-media" },
+    verification: { kind: "unknown" },
+  });
+  adapters.publishContainer = async () => { publishCalls += 1; return { kind: "confirmed", instagramMediaId: "confirmed-media" }; };
+  adapters.verifyPublishingResult = async () => { verifyCalls += 1; return { kind: "unknown" }; };
+  const instance = worker(repo, { adapters });
+  assert.equal((await instance.runOnce()).status, "skipped");
+  assert.equal(repo.publishingJobs.get("attempt1")?.stage, "publishing");
+  assert.equal((await instance.runOnce()).status, "needs_manual_review");
+  assert.equal(repo.publishingJobs.get("attempt1")?.stage, "needs_manual_review");
+  assert.equal(repo.items.get("item1")?.status, "needs_review");
+  assert.equal(publishCalls, 1);
+  assert.equal(verifyCalls, 1);
+});
+
 test("an expired lease is moved to manual review without calling an adapter", async () => {
   const repo = await fixture();
   const attempt = await repo.createOrGetPublishingAttempt({ id: "attempt1", ownerId: "bob", cycleId: "cycle1", cycleItemId: "item1", socialAccountId: "acct1", attemptNumber: 1, idempotencyKey: "publish:cycle1:item1:1", now: NOW });
