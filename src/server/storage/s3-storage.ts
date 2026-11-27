@@ -51,7 +51,7 @@ export class S3MediaStorage implements MediaStorage {
       await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: stagingKey, Body: data, IfNoneMatch: "*", ...(metadata.contentType ? { ContentType: metadata.contentType } : {}) }));
     } catch (error) {
       if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.");
-      throw new Error("Private storage could not save the staged file.");
+      throw new Error("Private storage could not save the staged file.", { cause: error });
     }
   }
 
@@ -65,7 +65,7 @@ export class S3MediaStorage implements MediaStorage {
       await this.client.send(new CopyObjectCommand({ Bucket: this.bucket, Key: finalKey, CopySource: copySource(this.bucket, stagingKey), IfNoneMatch: "*" }));
     } catch (error) {
       if ([409, 412].includes(errorInfo(error).status ?? 0)) throw new Error("An object already exists under that key.");
-      throw new Error("Private storage could not commit the staged file.");
+      throw new Error("Private storage could not commit the staged file.", { cause: error });
     }
     // The final object is now committed. A staging cleanup failure must not report the commit as failed;
     // an age-based staging sweep can remove the leftover object after checking active import leases.
