@@ -110,7 +110,7 @@ export function MediaDeleteAction({ mediaId, mediaTitle, status }: Props) {
           >
             <h2 id={`media-delete-title-${mediaId}`}>Permanently delete this media?</h2>
             <p><strong>{mediaTitle}</strong></p>
-            <p id={`media-delete-description-${mediaId}`}>The original and its preview will be permanently removed from private storage. Collection links will also be removed. This cannot be undone. Published cycle history is retained, and deletion waits if an active cycle, render, import, or cover still depends on this media.</p>
+            <p id={`media-delete-description-${mediaId}`}>The original and its preview will be permanently removed from private storage. Collection links will also be removed. This cannot be undone. Published cycle history is retained. Deletion waits if an active cycle, render, import, or active collection or cycle cover still depends on this media.</p>
             {state.status === "preview_loading" && <p role="status">Checking collection usage…</p>}
             {preview && state.status !== "preview_loading" && (
               <div className="media-delete-collections" aria-label="Collections affected by deletion">

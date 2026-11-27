@@ -1115,19 +1115,40 @@ export class MemoryRepository implements Repository {
     const results = new Map<string, boolean>();
     const groups = new Map<string, typeof updates>();
     for (const update of updates) groups.set(update.item.cycleId, [...(groups.get(update.item.cycleId) ?? []), update]);
-    for (const [cycleId, group] of [...groups].sort(([left], [right]) => left.localeCompare(right))) await this.withPromotionLock(`cycle:${cycleId}`, async () => {
-      const cycle = this.cycles.get(cycleId);
-      for (const { item, expectedVersion } of group) {
-        const stored = this.items.get(item.id);
-        if (!cycle || cycle.deletedAt != null || cycle.ownerId !== item.cycleOwnerId || !stored || stored.version !== expectedVersion || stored.cycleId !== item.cycleId || stored.cycleOwnerId !== item.cycleOwnerId ||
-          stored.mediaAssetId !== item.mediaAssetId || stored.sourceKind !== item.sourceKind || stored.sourceCollectionId !== item.sourceCollectionId ||
-          stored.selectedRenderOutputId !== item.selectedRenderOutputId) { results.set(item.id, false); continue; }
-        const merged = { ...stored } as Record<string, unknown>;
-        for (const field of MUTABLE_ITEM_FIELDS) merged[field] = clone(item[field]);
-        this.items.set(item.id, merged as unknown as CycleItem);
-        results.set(item.id, true);
+    for (const [cycleId, group] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
+      const initialCycle = this.cycles.get(cycleId);
+      const ownerId = initialCycle?.ownerId;
+      if (!ownerId || group.some(({ item }) => item.cycleOwnerId !== ownerId)) {
+        for (const { item } of group) results.set(item.id, false);
+        continue;
       }
-    });
+      const newlyReferencedMediaIds = [...new Set(group.flatMap(({ item }) => {
+        const stored = this.items.get(item.id);
+        return item.coverMediaId && stored?.coverMediaId !== item.coverMediaId ? [item.coverMediaId] : [];
+      }))].sort();
+      const withMediaLocks = async (index: number, work: () => Promise<void>): Promise<void> => index >= newlyReferencedMediaIds.length
+        ? work()
+        : this.withPromotionLock(`media:${newlyReferencedMediaIds[index]}`, () => withMediaLocks(index + 1, work));
+      await withMediaLocks(0, () => this.withPromotionLock(`cycle:${cycleId}`, async () => {
+        const cycle = this.cycles.get(cycleId);
+        const invalidCoverItemIds = new Set(group.filter(({ item }) => {
+          const stored = this.items.get(item.id);
+          if (!item.coverMediaId || stored?.coverMediaId === item.coverMediaId) return false;
+          const media = this.media.get(item.coverMediaId);
+          return !media || media.ownerId !== ownerId || media.status !== "active";
+        }).map(({ item }) => item.id));
+        for (const { item, expectedVersion } of group) {
+          const stored = this.items.get(item.id);
+          if (!cycle || cycle.deletedAt != null || cycle.ownerId !== item.cycleOwnerId || !stored || stored.version !== expectedVersion || stored.cycleId !== item.cycleId || stored.cycleOwnerId !== item.cycleOwnerId ||
+            stored.mediaAssetId !== item.mediaAssetId || stored.sourceKind !== item.sourceKind || stored.sourceCollectionId !== item.sourceCollectionId ||
+            stored.selectedRenderOutputId !== item.selectedRenderOutputId || invalidCoverItemIds.has(item.id)) { results.set(item.id, false); continue; }
+          const merged = { ...stored } as Record<string, unknown>;
+          for (const field of MUTABLE_ITEM_FIELDS) merged[field] = clone(item[field]);
+          this.items.set(item.id, merged as unknown as CycleItem);
+          results.set(item.id, true);
+        }
+      }));
+    }
     return updates.map(({ item }) => ({ itemId: item.id, saved: results.get(item.id) ?? false }));
   }
   async selectCycleItemRenderOutput(input: SelectCycleItemRenderOutputInput): Promise<boolean> {
@@ -1459,6 +1480,24 @@ export class MemoryRepository implements Repository {
       if (media.status === "deleted") return { status: "already_deleted" as const };
       const collectionIds = [...this.collections.values()].filter((collection) => collection.mediaIds.includes(media.id)).map((collection) => collection.id).sort();
       if (JSON.stringify(collectionIds) !== JSON.stringify([...new Set(input.expectedCollectionIds)].sort())) return { status: "collections_changed" as const };
+      const activeCoverDependencies = () => {
+        const dependencies = new Map<string, { type: "collection" | "cycle"; id: string; name: string }>();
+        for (const collection of this.collections.values()) {
+          if (collection.archived) continue;
+          if (collection.sharedCoverMediaId === media.id || collection.items?.some((item) => item.coverMediaId === media.id)) {
+            dependencies.set(`collection:${collection.id}`, { type: "collection", id: collection.id, name: collection.name ?? "Untitled collection" });
+          }
+        }
+        for (const item of this.items.values()) {
+          const cycle = this.cycles.get(item.cycleId);
+          if (item.coverMediaId === media.id && cycle && cycle.deletedAt == null && ["draft", "running", "paused"].includes(cycle.status)) {
+            dependencies.set(`cycle:${cycle.id}`, { type: "cycle", id: cycle.id, name: cycle.name });
+          }
+        }
+        return [...dependencies.values()].sort((left, right) => left.type.localeCompare(right.type) || left.id.localeCompare(right.id));
+      };
+      const collectionCoverIds = [...this.collections.values()].filter((collection) => collection.sharedCoverMediaId === media.id || collection.items?.some((item) => item.coverMediaId === media.id)).map((collection) => collection.id);
+      const collectionLockIds = [...new Set([...collectionIds, ...collectionCoverIds])].sort();
       const finishDeletion = async () => {
         const lockedCollectionIds = [...this.collections.values()].filter((collection) => collection.mediaIds.includes(media.id)).map((collection) => collection.id).sort();
         if (JSON.stringify(lockedCollectionIds) !== JSON.stringify(collectionIds)) return { status: "collections_changed" as const };
@@ -1467,14 +1506,28 @@ export class MemoryRepository implements Repository {
         if ([...this.items.values()].some((item) => item.mediaAssetId === media.id && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status))) return { status: "in_use" as const };
         if ([...this.mediaImportJobs.values()].some((job) => job.sourceMediaId === media.id && ["pending", "copying", "verifying"].includes(job.status))) return { status: "import_in_progress" as const };
         if ([...this.renderJobs.values()].some((job) => job.mediaAssetId === media.id && ["queued", "running"].includes(job.status))) return { status: "in_use" as const };
-        if ([...this.collections.values()].some((collection) => collection.sharedCoverMediaId === media.id) || [...this.collections.values()].some((collection) => collection.items?.some((item) => item.coverMediaId === media.id)) || [...this.items.values()].some((item) => item.coverMediaId === media.id)) return { status: "cover_in_use" as const };
+        const coverDependencies = activeCoverDependencies();
+        if (coverDependencies.length) return { status: "cover_in_use" as const, dependencies: coverDependencies };
         const job: MediaCleanupJobRecord = { id: input.id, ownerId: input.ownerId, mediaAssetId: media.id, status: "queued", attempts: 0, lockToken: null, lockExpiresAt: null, createdAt: input.now };
-        const collectionSnapshot = collectionIds.map((id) => [id, clone(this.collections.get(id)!)] as const);
+        const collectionSnapshot = collectionLockIds.flatMap((id) => {
+          const collection = this.collections.get(id);
+          return collection ? [[id, clone(collection)] as const] : [];
+        });
         const auditLength = this.audit.length;
         try {
           for (const id of collectionIds) {
             const collection = this.collections.get(id)!;
             this.collections.set(id, { ...collection, mediaIds: collection.mediaIds.filter((id) => id !== media.id), items: collection.items?.filter((item) => item.mediaAssetId !== media.id) });
+          }
+          // Archived collections are reversible, so clear only their obsolete cover pointers
+          // before marking the asset deleted. Cycle-item cover pointers are retained as history.
+          for (const id of collectionCoverIds) {
+            const collection = this.collections.get(id);
+            if (!collection?.archived) continue;
+            const sharedCoverMediaId = collection.sharedCoverMediaId === media.id ? null : collection.sharedCoverMediaId ?? null;
+            const items = (collection.items ?? []).map((item) => item.coverMediaId === media.id ? { ...item, coverMediaId: null, version: item.version + 1 } : item);
+            const changed = sharedCoverMediaId !== (collection.sharedCoverMediaId ?? null) || items.some((item, index) => item !== collection.items?.[index]);
+            if (changed) this.collections.set(id, { ...collection, sharedCoverMediaId, items, settingsVersion: (collection.settingsVersion ?? 1) + 1 });
           }
           this.media.set(media.id, { ...media, status: "deleted", deleteAfter: null });
           this.mediaCleanupJobs.set(job.id, job);
@@ -1486,9 +1539,9 @@ export class MemoryRepository implements Repository {
           return { status: "conflict" as const };
         }
       };
-      const withCollectionLocks = async (index: number): Promise<PermanentMediaDeletionResult> => index >= collectionIds.length
+      const withCollectionLocks = async (index: number): Promise<PermanentMediaDeletionResult> => index >= collectionLockIds.length
         ? finishDeletion()
-        : this.withPromotionLock(`collection:${collectionIds[index]}`, () => withCollectionLocks(index + 1));
+        : this.withPromotionLock(`collection:${collectionLockIds[index]}`, () => withCollectionLocks(index + 1));
       return withCollectionLocks(0);
     }));
   }
@@ -1506,7 +1559,13 @@ export class MemoryRepository implements Repository {
   }
   async canCleanupMediaAsset(mediaId: string): Promise<boolean> {
     await tick(); const media = this.media.get(mediaId);
-    return Boolean(media?.status === "deleted" && ![...this.items.values()].some((item) => item.mediaAssetId === mediaId && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status)) && ![...this.mediaImportJobs.values()].some((job) => job.sourceMediaId === mediaId && ["pending", "copying", "verifying"].includes(job.status)) && ![...this.renderJobs.values()].some((job) => job.mediaAssetId === mediaId && job.kind === "render" && ["queued", "running"].includes(job.status)) && ![...this.collections.values()].some((collection) => collection.sharedCoverMediaId === mediaId || collection.items?.some((item) => item.coverMediaId === mediaId)) && ![...this.items.values()].some((item) => item.coverMediaId === mediaId));
+    if (!media || media.status !== "deleted") return false;
+    const activeCollectionCover = [...this.collections.values()].some((collection) => !collection.archived && (collection.sharedCoverMediaId === mediaId || collection.items?.some((item) => item.coverMediaId === mediaId)));
+    const activeCycleCover = [...this.items.values()].some((item) => {
+      const cycle = this.cycles.get(item.cycleId);
+      return item.coverMediaId === mediaId && cycle?.deletedAt == null && cycle !== undefined && ["draft", "running", "paused"].includes(cycle.status);
+    });
+    return ![...this.items.values()].some((item) => item.mediaAssetId === mediaId && ["upcoming", "scheduled", "processing", "publishing"].includes(item.status)) && ![...this.mediaImportJobs.values()].some((job) => job.sourceMediaId === mediaId && ["pending", "copying", "verifying"].includes(job.status)) && ![...this.renderJobs.values()].some((job) => job.mediaAssetId === mediaId && job.kind === "render" && ["queued", "running"].includes(job.status)) && !activeCollectionCover && !activeCycleCover;
   }
   async finishMediaCleanupJob(input: { id: string; ownerId: string; lockToken: string; now: Date }): Promise<boolean> {
     await tick(); const job = this.mediaCleanupJobs.get(input.id);
@@ -1541,14 +1600,20 @@ export class MemoryRepository implements Repository {
 
   async getCollection(collectionId: string): Promise<VideoCollection | null> { await tick(); const c = this.collections.get(collectionId); return c ? clone(c) : null; }
   async createCollection(collection: VideoCollection): Promise<boolean> {
-    return this.withPromotionLock(`user:${collection.ownerId}`, async () => {
+    const settings = new Map((collection.items ?? []).map((item) => [item.mediaAssetId, item]));
+    const coverIds = [...new Set([collection.sharedCoverMediaId ?? null, ...collection.mediaIds.map((id) => settings.get(id)?.coverMediaId ?? null)].filter((id): id is string => id !== null))].sort();
+    const withMediaLocks = async (index: number, work: () => Promise<boolean>): Promise<boolean> => index >= coverIds.length
+      ? work()
+      : this.withPromotionLock(`media:${coverIds[index]}`, () => withMediaLocks(index + 1, work));
+    return this.withPromotionLock(`user:${collection.ownerId}`, () => withMediaLocks(0, async () => {
       await tick();
       if (this.collections.has(collection.id)) return false;
       if (new Set(collection.mediaIds).size !== collection.mediaIds.length) return false;
       if (collection.mediaIds.some((id) => { const media = this.media.get(id); return !media || media.ownerId !== collection.ownerId || media.status !== "active"; })) return false;
+      if (coverIds.some((id) => { const media = this.media.get(id); return !media || media.ownerId !== collection.ownerId || media.status !== "active"; })) return false;
       this.collections.set(collection.id, clone({ ...collection, captionMode: collection.captionMode ?? "individual", sharedCaptionText: collection.sharedCaptionText ?? null, coverMode: collection.coverMode ?? "individual", sharedCoverMediaId: collection.sharedCoverMediaId ?? null, settingsVersion: collection.settingsVersion ?? 1, items: collection.mediaIds.map((mediaAssetId) => collection.items?.find((item) => item.mediaAssetId === mediaAssetId) ?? { mediaAssetId, captionText: "", coverMediaId: null, version: 1 }) }));
       return true;
-    });
+    }));
   }
   async addOwnedMediaToCollection(input: { collectionId: string; mediaAssetId: string; ownerId: string; actorId: string; now: Date }): Promise<"added" | "existing" | "not_found" | "not_owned"> {
     if (input.actorId !== input.ownerId) return "not_owned";
@@ -1568,24 +1633,43 @@ export class MemoryRepository implements Repository {
     }));
   }
   async saveCollectionItemSettings(input: { collectionId: string; ownerId: string; mediaAssetId: string; captionText: string; coverMediaId: string | null; expectedVersion: number }): Promise<boolean> {
-    return this.withPromotionLock(`collection:${input.collectionId}`, async () => {
+    const initialCollection = this.collections.get(input.collectionId);
+    const initialItem = initialCollection?.items?.find((item) => item.mediaAssetId === input.mediaAssetId);
+    const needsMediaLock = input.coverMediaId !== null && initialItem?.coverMediaId !== input.coverMediaId;
+    const withMediaLock = (work: () => Promise<boolean>) => needsMediaLock && input.coverMediaId
+      ? this.withPromotionLock(`media:${input.coverMediaId}`, work)
+      : work();
+    return this.withPromotionLock(`user:${input.ownerId}`, () => withMediaLock(() => this.withPromotionLock(`collection:${input.collectionId}`, async () => {
       await tick(); const collection = this.collections.get(input.collectionId);
       if (!collection || collection.ownerId !== input.ownerId || !collection.mediaIds.includes(input.mediaAssetId)) return false;
       const items = collection.items ?? collection.mediaIds.map((mediaAssetId) => ({ mediaAssetId, captionText: "", coverMediaId: null, version: 1 }));
       const current = items.find((item) => item.mediaAssetId === input.mediaAssetId);
       if (!current || current.version !== input.expectedVersion) return false;
+      if (input.coverMediaId !== null && current.coverMediaId !== input.coverMediaId) {
+        const media = this.media.get(input.coverMediaId);
+        if (!media || media.ownerId !== input.ownerId || media.status !== "active") return false;
+      }
       this.collections.set(input.collectionId, { ...collection, settingsVersion: (collection.settingsVersion ?? 1) + 1, items: items.map((item) => item.mediaAssetId === input.mediaAssetId ? { ...item, captionText: input.captionText, coverMediaId: input.coverMediaId, version: item.version + 1 } : item) });
       return true;
-    });
+    })));
   }
   async saveCollectionSharedSettings(input: { collectionId: string; ownerId: string; actorId: string; affected: number; expectedVersion: number; captionMode?: "individual" | "shared"; sharedCaptionText?: string | null; coverMode?: "individual" | "shared"; sharedCoverMediaId?: string | null }): Promise<boolean> {
-    return this.withPromotionLock(`collection:${input.collectionId}`, async () => {
+    const initial = this.collections.get(input.collectionId);
+    const needsMediaLock = input.sharedCoverMediaId != null && initial?.sharedCoverMediaId !== input.sharedCoverMediaId;
+    const withMediaLock = (work: () => Promise<boolean>) => needsMediaLock && input.sharedCoverMediaId
+      ? this.withPromotionLock(`media:${input.sharedCoverMediaId}`, work)
+      : work();
+    return this.withPromotionLock(`user:${input.ownerId}`, () => withMediaLock(() => this.withPromotionLock(`collection:${input.collectionId}`, async () => {
       await tick(); const collection = this.collections.get(input.collectionId);
       if (!collection || collection.ownerId !== input.ownerId || (collection.settingsVersion ?? 1) !== input.expectedVersion) return false;
+      if (input.sharedCoverMediaId != null && collection.sharedCoverMediaId !== input.sharedCoverMediaId) {
+        const media = this.media.get(input.sharedCoverMediaId);
+        if (!media || media.ownerId !== input.ownerId || media.status !== "active") return false;
+      }
       this.collections.set(input.collectionId, { ...collection, ...(input.captionMode !== undefined ? { captionMode: input.captionMode } : {}), ...(input.sharedCaptionText !== undefined ? { sharedCaptionText: input.sharedCaptionText } : {}), ...(input.coverMode !== undefined ? { coverMode: input.coverMode } : {}), ...(input.sharedCoverMediaId !== undefined ? { sharedCoverMediaId: input.sharedCoverMediaId } : {}), settingsVersion: input.expectedVersion + 1 });
       this.audit.push({ actorId: input.actorId, action: input.captionMode === "shared" || input.coverMode === "shared" ? "collection.shared_settings_applied" : "collection.settings_mode_changed", entityType: "VideoCollection", entityId: input.collectionId, metadata: { affected: input.affected, captionMode: input.captionMode ?? null, coverMode: input.coverMode ?? null } });
       return true;
-    });
+    })));
   }
   async deleteCollection(collectionId: string): Promise<boolean> {
     return this.withPromotionLock(`collection:${collectionId}`, async () => {

@@ -69,7 +69,11 @@ export async function requestPermanentOwnedMediaDeletion(ctx: RequestContext, ra
   if (result.status === "missing" || result.status === "already_deleted") throw notFound("File");
   if (result.status === "collections_changed") throw conflict("This media's collection membership changed. Refresh and review the affected collections before confirming again.");
   if (result.status === "in_use") throw conflict("This media is used by a cycle, publishing job, or render. Remove it from those workflows before permanent deletion.");
-  if (result.status === "cover_in_use") throw conflict("This media is selected as a collection or cycle cover. Change those covers before permanent deletion.");
+  if (result.status === "cover_in_use") {
+    const resources = result.dependencies.map(({ type, name }) => `${type === "collection" ? "collection" : "publishing cycle"} “${name.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 80) || "Untitled"}”`);
+    const list = resources.length === 1 ? resources[0] : `${resources.slice(0, -1).join(", ")} and ${resources.at(-1)}`;
+    throw conflict(`This media is still used as a cover by active ${list}. Change the cover in that resource before permanent deletion.`);
+  }
   if (result.status === "import_in_progress") throw conflict("A media import is still using this file. Wait for it to finish before permanent deletion.");
   if (result.status === "conflict") throw conflict("The media deletion request conflicts with another change. Refresh and try again.");
   if (result.status !== "queued" && result.status !== "existing") throw conflict("The media deletion request could not be confirmed. Refresh and try again.");

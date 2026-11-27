@@ -128,7 +128,8 @@ export interface MediaVerificationState {
   attempts: number; retryable: boolean; updatedAt: Date | null; thumbnailStatus: "pending" | "verified" | "failed" | "skipped";
 }
 export interface MediaCleanupJobRecord { id: string; ownerId: string; mediaAssetId: string; status: "queued" | "running" | "succeeded" | "failed"; attempts: number; lockToken: string | null; lockExpiresAt: Date | null; createdAt: Date; }
-export type PermanentMediaDeletionResult = { status: "queued" | "existing"; job: MediaCleanupJobRecord; removedCollectionIds: string[] } | { status: "missing" | "already_deleted" | "collections_changed" | "in_use" | "cover_in_use" | "import_in_progress" | "conflict" };
+export type MediaCoverDependency = { type: "collection" | "cycle"; id: string; name: string };
+export type PermanentMediaDeletionResult = { status: "queued" | "existing"; job: MediaCleanupJobRecord; removedCollectionIds: string[] } | { status: "cover_in_use"; dependencies: MediaCoverDependency[] } | { status: "missing" | "already_deleted" | "collections_changed" | "in_use" | "import_in_progress" | "conflict" };
 export type MediaUploadPersistResult = boolean | "collection_unavailable";
 export interface MediaVerificationClaim { workerId: string; now: Date; leaseSeconds: number; jobId?: string; }
 export interface RenderJobFence { id: string; ownerId: string; lockToken: string; }

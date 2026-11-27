@@ -98,6 +98,16 @@ const lockedUsers = async (tx: PrismaClientLike, ids: string[]): Promise<boolean
   return true;
 };
 
+/** Locks cover targets in a stable order and accepts only active media owned by the resource owner. */
+const lockActiveOwnedMediaRows = async (tx: PrismaClientLike, ownerId: string, mediaIds: string[]): Promise<Set<string>> => {
+  const lockedIds = new Set<string>();
+  for (const mediaId of [...new Set(mediaIds)].sort()) {
+    const locked = await tx.$queryRaw`SELECT "id" FROM "MediaAsset" WHERE "id" = ${mediaId} AND "ownerId" = ${ownerId} AND "status" = 'active' FOR UPDATE`;
+    if (Array.isArray(locked) && locked.length === 1) lockedIds.add(mediaId);
+  }
+  return lockedIds;
+};
+
 const ACTIVE_CYCLE_STATUSES = ["draft", "running", "paused"];
 const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]` : typeof value === "object" && value !== null ? `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}` : JSON.stringify(value) ?? "undefined";
 
@@ -1409,12 +1419,23 @@ export class PrismaRepository implements Repository {
     for (const update of updates) groups.set(update.item.cycleId, [...(groups.get(update.item.cycleId) ?? []), update]);
     for (const [cycleId, group] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
       await this.db.$transaction(async (tx) => {
-        // Serialize item edits with cycle deletion. A deleted cycle cannot acquire
-        // new editable item state after its pending items have been cancelled.
-        const locked = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${cycleId} FOR UPDATE`;
+        const cycleBeforeLock = await tx.publishingCycle.findUnique({ where: { id: cycleId }, select: { ownerId: true } });
+        const ownerId = typeof cycleBeforeLock?.["ownerId"] === "string" ? cycleBeforeLock["ownerId"] : null;
+        if (!ownerId || group.some(({ item }) => item.cycleOwnerId !== ownerId)) {
+          for (const { item } of group) results.set(item.id, false);
+          return;
+        }
+        // A deletion and a cover assignment both lock the target MediaAsset before
+        // either can commit. Acquire new cover rows before the cycle row for stable ordering.
+        const storedItems = await tx.cycleItem.findMany({ where: { id: { in: group.map(({ item }) => item.id) }, cycleId }, select: { id: true, coverMediaId: true } });
+        const storedCoverByItem = new Map(storedItems.map((row) => [String(row["id"]), row["coverMediaId"] as string | null ?? null]));
+        const newlyReferencedMediaIds = group.flatMap(({ item }) => item.coverMediaId && storedCoverByItem.get(item.id) !== item.coverMediaId ? [item.coverMediaId] : []);
+        const activeCoverIds = await lockActiveOwnedMediaRows(tx, ownerId, newlyReferencedMediaIds);
+        const invalidCoverItemIds = new Set(group.filter(({ item }) => item.coverMediaId !== null && storedCoverByItem.get(item.id) !== item.coverMediaId && !activeCoverIds.has(item.coverMediaId)).map(({ item }) => item.id));
+        const locked = await tx.$queryRaw`SELECT "id" FROM "PublishingCycle" WHERE "id" = ${cycleId} AND "ownerId" = ${ownerId} FOR UPDATE`;
         const cycle = Array.isArray(locked) && locked.length === 1 ? await tx.publishingCycle.findUnique({ where: { id: cycleId }, select: { ownerId: true, deletedAt: true } }) : null;
         for (const { item, expectedVersion } of group) {
-          if (!cycle || cycle["deletedAt"] instanceof Date || cycle["ownerId"] !== item.cycleOwnerId) { results.set(item.id, false); continue; }
+          if (!cycle || cycle["deletedAt"] instanceof Date || cycle["ownerId"] !== item.cycleOwnerId || invalidCoverItemIds.has(item.id)) { results.set(item.id, false); continue; }
           const outcome = await tx.cycleItem.updateMany({ where: { id: item.id, cycleId, cycleOwnerId: item.cycleOwnerId, mediaAssetId: item.mediaAssetId, sourceKind: item.sourceKind, sourceCollectionId: item.sourceCollectionId, selectedRenderOutputId: item.selectedRenderOutputId, version: expectedVersion }, data: itemToMutableData(item) });
           results.set(item.id, outcome.count === 1);
         }
@@ -1949,17 +1970,18 @@ export class PrismaRepository implements Repository {
         if (imports.length) return { status: "import_in_progress" as const };
         const renders = await tx.processingJob.findMany({ where: { mediaAssetId: input.mediaId, kind: "render", status: { in: ["queued", "running"] } }, select: { id: true } });
         if (renders.length) return { status: "in_use" as const };
-        const coverRefs = await Promise.all([
-          tx.videoCollection.findMany({ where: { sharedCoverMediaId: input.mediaId }, select: { id: true } }),
-          tx.collectionItem.findMany({ where: { coverMediaId: input.mediaId }, select: { id: true } }),
-          tx.cycleItem.findMany({ where: { coverMediaId: input.mediaId }, select: { id: true } }),
-        ]);
-        if (coverRefs.some((rows) => rows.length > 0)) return { status: "cover_in_use" as const };
-        // Lock collection rows with bound identifiers before deleting their membership rows.
-        if (collectionIds.length) {
-          for (const collectionId of collectionIds) {
+        const sharedCoverRows = await tx.videoCollection.findMany({ where: { sharedCoverMediaId: input.mediaId }, select: { id: true } });
+        const itemCoverRows = await tx.collectionItem.findMany({ where: { coverMediaId: input.mediaId }, select: { collectionId: true } });
+        const coverCollectionIds = [...new Set([...sharedCoverRows.map((row) => String(row["id"])), ...itemCoverRows.map((row) => String(row["collectionId"]))])].sort();
+        const collectionLockIds = [...new Set([...collectionIds, ...coverCollectionIds])].sort();
+        // Cover writers use User -> MediaAsset -> VideoCollection. Lock every current
+        // cover parent with the same final lock so archive/restore cannot race stale-ref cleanup.
+        if (collectionLockIds.length) {
+          for (const collectionId of collectionLockIds) {
             const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${collectionId} FOR UPDATE`;
-            if (!Array.isArray(locked) || locked.length !== 1) return { status: "collections_changed" as const };
+            if (!Array.isArray(locked) || locked.length !== 1) {
+              if (collectionIds.includes(collectionId)) return { status: "collections_changed" as const };
+            }
           }
         }
         // Re-read every dependency after taking the locks. Collection-derived cycle creation
@@ -1974,12 +1996,36 @@ export class PrismaRepository implements Repository {
         if (lockedImports.length) return { status: "import_in_progress" as const };
         const lockedRenders = await tx.processingJob.findMany({ where: { mediaAssetId: input.mediaId, kind: "render", status: { in: ["queued", "running"] } }, select: { id: true } });
         if (lockedRenders.length) return { status: "in_use" as const };
-        const lockedCoverRefs = await Promise.all([
-          tx.videoCollection.findMany({ where: { sharedCoverMediaId: input.mediaId }, select: { id: true } }),
-          tx.collectionItem.findMany({ where: { coverMediaId: input.mediaId }, select: { id: true } }),
-          tx.cycleItem.findMany({ where: { coverMediaId: input.mediaId }, select: { id: true } }),
-        ]);
-        if (lockedCoverRefs.some((rows) => rows.length > 0)) return { status: "cover_in_use" as const };
+        const activeSharedCoverRows = await tx.videoCollection.findMany({ where: { sharedCoverMediaId: input.mediaId, archived: false }, select: { id: true, name: true } });
+        const activeItemCoverRows = await tx.collectionItem.findMany({ where: { coverMediaId: input.mediaId, collection: { is: { archived: false } } }, select: { id: true, collectionId: true } });
+        const activeCycleCoverRows = await tx.cycleItem.findMany({ where: { coverMediaId: input.mediaId, cycle: { is: { deletedAt: null, status: { in: ACTIVE_CYCLE_STATUSES } } } }, select: { id: true, cycleId: true } });
+        const archivedSharedCoverRows = await tx.videoCollection.findMany({ where: { sharedCoverMediaId: input.mediaId, archived: true }, select: { id: true } });
+        const archivedItemCoverRows = await tx.collectionItem.findMany({ where: { coverMediaId: input.mediaId, collection: { is: { archived: true } } }, select: { id: true, collectionId: true } });
+        const coverDependencies = new Map<string, { type: "collection" | "cycle"; id: string; name: string }>();
+        for (const row of activeSharedCoverRows) coverDependencies.set(`collection:${String(row["id"])}`, { type: "collection", id: String(row["id"]), name: String(row["name"] ?? "Untitled collection") });
+        const itemCoverCollectionIds = [...new Set(activeItemCoverRows.map((row) => String(row["collectionId"])))];
+        const cycleCoverIds = [...new Set(activeCycleCoverRows.map((row) => String(row["cycleId"])))];
+        const itemCoverCollections = itemCoverCollectionIds.length
+          ? await tx.videoCollection.findMany({ where: { id: { in: itemCoverCollectionIds }, archived: false }, select: { id: true, name: true } })
+          : [];
+        const activeCoverCycles = cycleCoverIds.length
+          ? await tx.publishingCycle.findMany({ where: { id: { in: cycleCoverIds }, deletedAt: null, status: { in: ACTIVE_CYCLE_STATUSES } }, select: { id: true, name: true } })
+          : [];
+        for (const row of itemCoverCollections) coverDependencies.set(`collection:${String(row["id"])}`, { type: "collection", id: String(row["id"]), name: String(row["name"] ?? "Untitled collection") });
+        for (const row of activeCoverCycles) coverDependencies.set(`cycle:${String(row["id"])}`, { type: "cycle", id: String(row["id"]), name: String(row["name"] ?? "Untitled cycle") });
+        const dependencies = [...coverDependencies.values()].sort((left, right) => left.type.localeCompare(right.type) || left.id.localeCompare(right.id));
+        if (dependencies.length) return { status: "cover_in_use" as const, dependencies };
+
+        // Archived collections can be restored, so clear only their obsolete cover
+        // pointers before deleting the referenced storage. Soft-deleted cycle-item
+        // pointers remain untouched to preserve publishing history.
+        const archivedCollectionIds = [...new Set([...archivedSharedCoverRows.map((row) => String(row["id"])), ...archivedItemCoverRows.map((row) => String(row["collectionId"]))])].sort();
+        if (archivedSharedCoverRows.length) await tx.videoCollection.updateMany({ where: { id: { in: archivedSharedCoverRows.map((row) => String(row["id"])) }, archived: true, sharedCoverMediaId: input.mediaId }, data: { sharedCoverMediaId: null, settingsVersion: { increment: 1 } } });
+        if (archivedItemCoverRows.length) {
+          const itemOnlyCollectionIds = archivedCollectionIds.filter((id) => !archivedSharedCoverRows.some((row) => String(row["id"]) === id));
+          if (itemOnlyCollectionIds.length) await tx.videoCollection.updateMany({ where: { id: { in: itemOnlyCollectionIds }, archived: true }, data: { settingsVersion: { increment: 1 } } });
+          await tx.collectionItem.updateMany({ where: { id: { in: archivedItemCoverRows.map((row) => String(row["id"])) }, collectionId: { in: archivedCollectionIds }, coverMediaId: input.mediaId }, data: { coverMediaId: null, version: { increment: 1 } } });
+        }
         await tx.collectionItem.deleteMany({ where: { mediaAssetId: input.mediaId } });
         const changed = await tx.mediaAsset.updateMany({ where: { id: input.mediaId, ownerId: input.ownerId, status: media["status"] }, data: { status: "deleted", deleteAfter: null } });
         if (changed.count !== 1) throw new Error("Media changed while deletion was being confirmed.");
@@ -2019,12 +2065,12 @@ export class PrismaRepository implements Repository {
     const media = await this.db.mediaAsset.findUnique({ where: { id: mediaId }, select: { status: true } });
     if (!media || media["status"] !== "deleted") return false;
     const [items, imports, renders, collectionCovers, itemCovers, cycleCovers] = await Promise.all([
-      this.db.cycleItem.findMany({ where: { mediaAssetId: mediaId }, select: { status: true } }),
+      this.db.cycleItem.findMany({ where: { mediaAssetId: mediaId, status: { in: ["upcoming", "scheduled", "processing", "publishing"] } }, select: { status: true } }),
       this.db.mediaImportJob.findMany({ where: { sourceMediaId: mediaId, status: { in: ["pending", "copying", "verifying"] } }, select: { id: true } }),
       this.db.processingJob.findMany({ where: { mediaAssetId: mediaId, kind: "render", status: { in: ["queued", "running"] } }, select: { id: true } }),
-      this.db.videoCollection.findMany({ where: { sharedCoverMediaId: mediaId }, select: { id: true } }),
-      this.db.collectionItem.findMany({ where: { coverMediaId: mediaId }, select: { id: true } }),
-      this.db.cycleItem.findMany({ where: { coverMediaId: mediaId }, select: { id: true } }),
+      this.db.videoCollection.findMany({ where: { sharedCoverMediaId: mediaId, archived: false }, select: { id: true } }),
+      this.db.collectionItem.findMany({ where: { coverMediaId: mediaId, collection: { is: { archived: false } } }, select: { id: true } }),
+      this.db.cycleItem.findMany({ where: { coverMediaId: mediaId, cycle: { is: { deletedAt: null, status: { in: ACTIVE_CYCLE_STATUSES } } } }, select: { id: true } }),
     ]);
     return !items.some((item) => ["upcoming", "scheduled", "processing", "publishing"].includes(String(item["status"]))) && imports.length === 0 && renders.length === 0 && collectionCovers.length === 0 && itemCovers.length === 0 && cycleCovers.length === 0;
   }
@@ -2070,10 +2116,13 @@ export class PrismaRepository implements Repository {
         if (!Array.isArray(lockedUser) || lockedUser.length !== 1 || !(await this.mediaRowsExist(tx, collection.mediaIds))) return false;
         const ownedActiveMedia = collection.mediaIds.length === 0 ? 0 : await tx.mediaAsset.count({ where: { id: { in: collection.mediaIds }, ownerId: collection.ownerId, status: "active" } });
         if (ownedActiveMedia !== collection.mediaIds.length) return false;
+        const itemSettings = new Map((collection.items ?? []).map((item) => [item.mediaAssetId, item]));
+        const coverIds = [collection.sharedCoverMediaId ?? null, ...collection.mediaIds.map((mediaId) => itemSettings.get(mediaId)?.coverMediaId ?? null)].filter((id): id is string => id !== null);
+        const activeCoverIds = await lockActiveOwnedMediaRows(tx, collection.ownerId, coverIds);
+        if (activeCoverIds.size !== new Set(coverIds).size) return false;
         await tx.videoCollection.create({ data: { id: collection.id, ownerId: collection.ownerId, name: collection.name ?? collection.id, description: collection.description ?? null, visibility: collection.visibility, archived: collection.archived, captionMode: collection.captionMode ?? "individual", sharedCaptionText: collection.sharedCaptionText ?? null, coverMode: collection.coverMode ?? "individual", sharedCoverMediaId: collection.sharedCoverMediaId ?? null, settingsVersion: collection.settingsVersion ?? 1, ...(collection.createdAt ? { createdAt: collection.createdAt } : {}) } });
         if (collection.mediaIds.length > 0) {
-          const settings = new Map((collection.items ?? []).map((item) => [item.mediaAssetId, item]));
-          await tx.collectionItem.createMany({ data: collection.mediaIds.map((mediaAssetId, position) => { const item = settings.get(mediaAssetId); return { collectionId: collection.id, mediaAssetId, position, captionText: item?.captionText ?? "", coverMediaId: item?.coverMediaId ?? null }; }) });
+          await tx.collectionItem.createMany({ data: collection.mediaIds.map((mediaAssetId, position) => { const item = itemSettings.get(mediaAssetId); return { collectionId: collection.id, mediaAssetId, position, captionText: item?.captionText ?? "", coverMediaId: item?.coverMediaId ?? null }; }) });
         }
         return true;
       });
@@ -2100,6 +2149,13 @@ export class PrismaRepository implements Repository {
   }
   async saveCollectionItemSettings(input: { collectionId: string; ownerId: string; mediaAssetId: string; captionText: string; coverMediaId: string | null; expectedVersion: number }): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
+      const initial = await tx.collectionItem.findUnique({ where: { collectionId_mediaAssetId: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId } }, select: { coverMediaId: true } });
+      const initialCollection = await tx.videoCollection.findUnique({ where: { id: input.collectionId }, select: { ownerId: true } });
+      if (!initial || initialCollection?.["ownerId"] !== input.ownerId || !(await lockedUsers(tx, [input.ownerId]))) return false;
+      if (input.coverMediaId !== null && initial["coverMediaId"] !== input.coverMediaId) {
+        const valid = await lockActiveOwnedMediaRows(tx, input.ownerId, [input.coverMediaId]);
+        if (!valid.has(input.coverMediaId)) return false;
+      }
       const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
       if (!Array.isArray(locked) || locked.length !== 1) return false;
       const result = await tx.collectionItem.updateMany({ where: { collectionId: input.collectionId, mediaAssetId: input.mediaAssetId, version: input.expectedVersion }, data: { captionText: input.captionText, coverMediaId: input.coverMediaId, version: { increment: 1 } } });
@@ -2109,6 +2165,12 @@ export class PrismaRepository implements Repository {
   }
   async saveCollectionSharedSettings(input: { collectionId: string; ownerId: string; actorId: string; affected: number; expectedVersion: number; captionMode?: "individual" | "shared"; sharedCaptionText?: string | null; coverMode?: "individual" | "shared"; sharedCoverMediaId?: string | null }): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
+      const initial = await tx.videoCollection.findUnique({ where: { id: input.collectionId }, select: { ownerId: true, sharedCoverMediaId: true } });
+      if (!initial || initial["ownerId"] !== input.ownerId || !(await lockedUsers(tx, [input.ownerId]))) return false;
+      if (input.sharedCoverMediaId != null && initial["sharedCoverMediaId"] !== input.sharedCoverMediaId) {
+        const valid = await lockActiveOwnedMediaRows(tx, input.ownerId, [input.sharedCoverMediaId]);
+        if (!valid.has(input.sharedCoverMediaId)) return false;
+      }
       const locked = await tx.$queryRaw`SELECT "id" FROM "VideoCollection" WHERE "id" = ${input.collectionId} AND "ownerId" = ${input.ownerId} FOR UPDATE`;
       if (!Array.isArray(locked) || locked.length !== 1) return false;
       const data: Record<string, unknown> = { settingsVersion: { increment: 1 } };
